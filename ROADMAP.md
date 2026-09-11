@@ -119,6 +119,7 @@ Nothing.
 | B-9 | **Resolved.** Audit entries that describe a change now commit inside that change's transaction via `uow.audit`; geography and organization gained a boundary. Entries that record a refusal or a detected inconsistency stay deliberately out of band, because rollback would erase the only evidence of why nothing happened | resolved |
 | B-10 | **Resolved.** `InMemoryTransactionBoundary` journals the inverse of every write it is given a scope for, so it unwinds like `ROLLBACK` does. The rollback tests that used to be Postgres-only now run against both adapters | resolved |
 | B-11 | **Resolved.** Money and execution state were settled in two separate transactions, so a failure between them left funds captured against a fulfillment still recorded as `dispatched`/`held`. `MoneyService.captureWithin` / `voidWithin` now enlist in the caller's unit of work; `capture`/`voidAuthorization` are thin wrappers that open their own | resolved |
+| B-12 | **Resolved.** The in-memory money store enforced only primary keys, so two concurrent captures both inserted a `capture:<authorization_id>` ledger transaction and the money moved twice, while Postgres refused the second. The reference store now enforces the schema's UNIQUE constraints, synchronously | resolved |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -673,3 +674,68 @@ shape was temporarily restored and they reported `expected 'captured' to be
 that has never seen the bug it describes is not evidence.
 
 182 tests pass with `DATABASE_URL`, 116 without.
+
+### B-12 resolved: the reference store now enforces the schema's uniqueness
+
+Found by the new concurrency tests, and it is the clearest example yet of why
+the "no hidden divergence" rule is worth the trouble.
+
+Every existing idempotency test called the same command twice *in sequence*,
+which only proves the second call can see the first one's row. Issuing both at
+once asks a different question. On Postgres, `money.capture` is safe: two
+racing captures both try to insert a ledger transaction whose
+`business_reference` is `capture:<authorization_id>`, and
+`ledger_transaction_business_reference_key` refuses the second, which rolls
+back with it. In memory, both succeeded, and **the money moved twice** —
+`posted_minor` went to 2000 instead of 6000.
+
+So the in-memory store was more permissive than production, which means it was
+certifying a double spend as correct. The service code was identical in both
+cases; the guarantee came entirely from a constraint only one backend had.
+
+`InMemoryMoneyRepository` now enforces what `db/migrations/0002` declares:
+`ledger_transaction.business_reference` UNIQUE,
+`payment_authorization.business_reference` UNIQUE, and
+`wallet (owner_type, owner_id, currency)` UNIQUE. The error messages
+deliberately mirror the Postgres text, so a caller matching on them behaves
+the same either way.
+
+**The subtle part, which cost a debugging cycle and is worth recording.** The
+first version of the guard called the existing async finder:
+
+```ts
+const clash = await this.findTransactionByReference(ref);   // wrong
+if (clash) throw ...;
+this.ledger.set(...)
+```
+
+That still double-spent. A single `await` between the check and the write is
+enough to lose the race in a single-threaded runtime: both captures suspend on
+the lookup, both find nothing, both resume and write. The guards are therefore
+synchronous, scanning the maps inline rather than calling the async finders.
+In this runtime, **atomic means no `await` between the check and the write** —
+which is the same reason the transaction boundary journals inverses instead of
+deferring writes.
+
+Under concurrency `capture` is exactly-once but not always success-returning:
+one caller may receive a refusal and must retry, at which point
+`findTransactionByReference` returns the existing transaction idempotently. The
+test asserts on the balance rather than on both calls succeeding, because the
+balance is the invariant and the return value is not.
+
+### Transaction boundary coverage, against the required list
+
+| Required | Where | Backends |
+|---|---|---|
+| state + event + outbox + audit commit together | `commits state, audit entry and event together`, `commits a multi-table unit of work as one visible change` | in-memory + Postgres |
+| complete rollback on failure | `leaves no audit entry behind when the command is rolled back`, `appends no event when a later write in the same unit of work fails`, `restores the previous value of a row the transaction overwrote` | in-memory + Postgres |
+| duplicate commands | `authorizes, holds and captures funds exactly once`, `treats upsertCountry as an update, not a duplicate`, idempotent `cancel` and `consumeMarketOrder` | in-memory + Postgres |
+| duplicate events | `duplicate delivery of every event changes nothing`, `ignores a duplicate append of the same event id`, `survives a duplicated delivery of every event` | in-memory + Postgres |
+| concurrent claims | `hands one event to exactly one of two simultaneous claimants`, `captures a hold once when two callers capture it at the same time`, `closes a fulfillment once when cancellation races the MOVE completion` | in-memory + Postgres |
+| retry after failure | `a transient consumer failure is retried and then succeeds`, `allows a retry after release` | in-memory + Postgres |
+| restart then reload | `replaying the whole event history after a restart produces no new effects` (in-memory), `reloads state from the database and refuses to redo settled work` (new, Postgres only — a restart is only meaningful where state outlives the process) | both, separately |
+| capture / release in money | `carries an order through to completion and captures the hold`, `releases the hold when MOVE rejects the job`, the settlement-atomicity suite | in-memory + Postgres |
+| completion / failure / cancellation | `fulfillment-settlement.test.ts` (11 tests), vertical slice 5–7 | in-memory + Postgres |
+| money and state atomic together | `tests/settlement-atomicity.test.ts` (4 tests, both backends) | in-memory + Postgres |
+
+189 tests pass with `DATABASE_URL`, 119 without.
