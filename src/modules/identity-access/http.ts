@@ -36,14 +36,14 @@ export function bearer(ctx: RequestContext): string {
   return raw.slice("Bearer ".length);
 }
 
-export function requirePrincipal(
+export async function requirePrincipal(
   ctx: RequestContext,
   identity: IdentityService,
   permission: Permission,
   organizationId?: string,
-): AuthenticatedPrincipal {
-  const actor = identity.authenticate(bearer(ctx));
-  identity.authorize(actor, permission, organizationId);
+): Promise<AuthenticatedPrincipal> {
+  const actor = await identity.authenticate(bearer(ctx));
+  await identity.authorize(actor, permission, organizationId);
   return actor;
 }
 
@@ -90,33 +90,33 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
   });
 
   // Verify the caller's own session. Returns principal, org membership and permissions.
-  router.get("/v1/sessions/current", (ctx) => {
-    const actor = identity.authenticate(bearer(ctx));
+  router.get("/v1/sessions/current", async (ctx) => {
+    const actor = await identity.authenticate(bearer(ctx));
     return { status: 200, body: actor };
   });
 
-  router.post("/v1/sessions/revoke", (ctx) => {
+  router.post("/v1/sessions/revoke", async (ctx) => {
     const input = body(ctx);
     identity.revokeSession(str(input, "session_id"), ctx.correlation_id);
     return { status: 204, body: null };
   });
 
   // Service-to-service authorization probe used by MOVE and MARKET.
-  router.post("/v1/access/check", (ctx) => {
+  router.post("/v1/access/check", async (ctx) => {
     const input = body(ctx);
-    const actor = identity.authenticate(bearer(ctx));
+    const actor = await identity.authenticate(bearer(ctx));
     const permission = str(input, "permission") as Permission;
     const organizationId =
       typeof input["organization_id"] === "string" ? input["organization_id"] : undefined;
     try {
-      identity.authorize(actor, permission, organizationId);
+      await identity.authorize(actor, permission, organizationId);
       return { status: 200, body: { allowed: true, principal_id: actor.principal_id } };
     } catch {
       return { status: 200, body: { allowed: false, principal_id: actor.principal_id } };
     }
   });
 
-  router.post("/v1/memberships", (ctx) => {
+  router.post("/v1/memberships", async (ctx) => {
     const input = body(ctx);
     const rawRoles = input["roles"];
     if (!Array.isArray(rawRoles) || rawRoles.length === 0) throw invalid("roles is required");
@@ -126,7 +126,7 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
       }
       return role as Role;
     });
-    const membership = identity.grantMembership({
+    const membership = await identity.grantMembership({
       principal_id: str(input, "principal_id"),
       organization_id: str(input, "organization_id"),
       roles,

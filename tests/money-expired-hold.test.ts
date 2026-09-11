@@ -9,7 +9,7 @@ import { FixedClock } from "../src/platform/clock.js";
 async function walletWithExpiringHold(amount: number, hold: number) {
   const clock = new FixedClock();
   const core = createCoreApp({ clock });
-  const { wallet } = core.money.createWallet({
+  const { wallet } = await core.money.createWallet({
     owner_type: "identity",
     owner_id: "i-expired-hold",
     currency: "SAR",
@@ -35,7 +35,7 @@ describe("expired holds stop blocking funds before the sweep runs", () => {
   it("moves an expired hold out of held_minor and into expired_hold_minor", async () => {
     const { core, clock, wallet } = await walletWithExpiringHold(3_000, 1_000);
 
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 3_000,
       held_minor: 1_000,
       available_minor: 2_000,
@@ -44,7 +44,7 @@ describe("expired holds stop blocking funds before the sweep runs", () => {
 
     clock.advance(60_001);
 
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 3_000,
       held_minor: 0,
       available_minor: 3_000,
@@ -79,13 +79,13 @@ describe("expired holds stop blocking funds before the sweep runs", () => {
   it("keeps the ledger untouched when the sweep finally releases the hold", async () => {
     const { core, clock, wallet, authorization } = await walletWithExpiringHold(3_000, 1_000);
     clock.advance(60_001);
-    const before = core.money.balance(wallet.wallet_id);
+    const before = await core.money.balance(wallet.wallet_id);
 
     const swept = await core.money.expireDueAuthorizations("sweep");
 
     expect(swept).toHaveLength(1);
-    expect(core.money.getAuthorization(authorization.authorization_id).status).toBe("voided");
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect((await core.money.getAuthorization(authorization.authorization_id)).status).toBe("voided");
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: before.posted_minor,
       held_minor: 0,
       available_minor: before.available_minor,

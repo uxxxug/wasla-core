@@ -35,8 +35,8 @@ function acceptance(core: CoreApp, fulfillmentId: string, jobId: string): EventE
   });
 }
 
-function dispatched(core: CoreApp) {
-  return core.outbox.all().filter((r) => r.event.event_type === "core.fulfillment.dispatched");
+async function dispatched(core: CoreApp) {
+  return (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.dispatched");
 }
 
 describe("fulfillment dispatch is an observable lifecycle transition", () => {
@@ -48,7 +48,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
     await core.fulfillment.consumeJobAccepted(accepted);
     await core.fulfillment.consumeJobAccepted(accepted);
 
-    const events = dispatched(core);
+    const events = await dispatched(core);
     expect(events).toHaveLength(1);
     expect(events[0]!.event.causation_id).toBe(accepted.event_id);
     expect(events[0]!.event.payload).toEqual({
@@ -57,7 +57,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
       job_reference: "job-1",
       dispatched_at: core.clock.now().toISOString(),
     });
-    expect(core.fulfillment.require(created.fulfillment_id).status).toBe("dispatched");
+    expect((await core.fulfillment.require(created.fulfillment_id)).status).toBe("dispatched");
   });
 
   it("keeps the MOVE job reference opaque in the dispatch event payload", async () => {
@@ -65,7 +65,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d2"));
     await core.fulfillment.consumeJobAccepted(acceptance(core, created.fulfillment_id, "job-2"));
 
-    const payload = dispatched(core)[0]!.event.payload as Record<string, unknown>;
+    const payload = (await dispatched(core))[0]!.event.payload as Record<string, unknown>;
     for (const leaked of ["driver_id", "vehicle_id", "route", "items", "price"]) {
       expect(payload).not.toHaveProperty(leaked);
     }
@@ -79,7 +79,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
     await expect(
       core.fulfillment.consumeJobAccepted(acceptance(core, created.fulfillment_id, "job-4")),
     ).rejects.toMatchObject({ code: "conflict" });
-    expect(dispatched(core)).toHaveLength(1);
+    expect(await dispatched(core)).toHaveLength(1);
   });
 
   it("tolerates an acceptance that races a cancellation without dispatching", async () => {
@@ -98,7 +98,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
 
     expect(result.status).toBe("cancelled");
     expect(result.move_job_reference).toBe("job-5");
-    expect(dispatched(core)).toHaveLength(0);
+    expect(await dispatched(core)).toHaveLength(0);
   });
 
   it("still refuses an acceptance for a fulfillment that already completed", async () => {

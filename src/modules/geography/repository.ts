@@ -1,19 +1,20 @@
+import type { TransactionScope } from "../../platform/persistence/transaction.js";
 import type { City, Country, Region, ServiceArea } from "./domain.js";
 
 export interface GeographyRepository {
-  upsertCountry(country: Country): void;
-  getCountry(countryCode: string): Country | undefined;
-  listCountries(): readonly Country[];
-  insertRegion(region: Region): void;
-  getRegion(regionId: string): Region | undefined;
-  findRegion(countryCode: string, code: string): Region | undefined;
-  listRegions(countryCode: string): readonly Region[];
-  insertCity(city: City): void;
-  getCity(cityId: string): City | undefined;
-  listCities(regionId: string): readonly City[];
-  insertServiceArea(area: ServiceArea): void;
-  getServiceArea(serviceAreaId: string): ServiceArea | undefined;
-  listServiceAreas(countryCode?: string): readonly ServiceArea[];
+  upsertCountry(country: Country, scope: TransactionScope): Promise<void>;
+  getCountry(countryCode: string): Promise<Country | undefined>;
+  listCountries(): Promise<readonly Country[]>;
+  insertRegion(region: Region, scope: TransactionScope): Promise<void>;
+  getRegion(regionId: string): Promise<Region | undefined>;
+  findRegion(countryCode: string, code: string): Promise<Region | undefined>;
+  listRegions(countryCode: string): Promise<readonly Region[]>;
+  insertCity(city: City, scope: TransactionScope): Promise<void>;
+  getCity(cityId: string): Promise<City | undefined>;
+  listCities(regionId: string): Promise<readonly City[]>;
+  insertServiceArea(area: ServiceArea, scope: TransactionScope): Promise<void>;
+  getServiceArea(serviceAreaId: string): Promise<ServiceArea | undefined>;
+  listServiceAreas(countryCode?: string): Promise<readonly ServiceArea[]>;
 }
 
 export class InMemoryGeographyRepository implements GeographyRepository {
@@ -22,43 +23,43 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   private cities = new Map<string, City>();
   private areas = new Map<string, ServiceArea>();
 
-  upsertCountry(country: Country): void {
+  async upsertCountry(country: Country, _scope?: TransactionScope): Promise<void> {
     this.countries.set(country.country_code, country);
   }
-  getCountry(countryCode: string): Country | undefined {
+  async getCountry(countryCode: string): Promise<Country | undefined> {
     return this.countries.get(countryCode);
   }
-  listCountries(): readonly Country[] {
+  async listCountries(): Promise<readonly Country[]> {
     return [...this.countries.values()];
   }
-  insertRegion(region: Region): void {
+  async insertRegion(region: Region, _scope?: TransactionScope): Promise<void> {
     this.regions.set(region.region_id, region);
   }
-  getRegion(regionId: string): Region | undefined {
+  async getRegion(regionId: string): Promise<Region | undefined> {
     return this.regions.get(regionId);
   }
-  findRegion(countryCode: string, code: string): Region | undefined {
+  async findRegion(countryCode: string, code: string): Promise<Region | undefined> {
     return [...this.regions.values()].find((row) => row.country_code === countryCode && row.code === code);
   }
-  listRegions(countryCode: string): readonly Region[] {
+  async listRegions(countryCode: string): Promise<readonly Region[]> {
     return [...this.regions.values()].filter((row) => row.country_code === countryCode);
   }
-  insertCity(city: City): void {
+  async insertCity(city: City, _scope?: TransactionScope): Promise<void> {
     this.cities.set(city.city_id, city);
   }
-  getCity(cityId: string): City | undefined {
+  async getCity(cityId: string): Promise<City | undefined> {
     return this.cities.get(cityId);
   }
-  listCities(regionId: string): readonly City[] {
+  async listCities(regionId: string): Promise<readonly City[]> {
     return [...this.cities.values()].filter((row) => row.region_id === regionId);
   }
-  insertServiceArea(area: ServiceArea): void {
+  async insertServiceArea(area: ServiceArea, _scope?: TransactionScope): Promise<void> {
     this.areas.set(area.service_area_id, area);
   }
-  getServiceArea(serviceAreaId: string): ServiceArea | undefined {
+  async getServiceArea(serviceAreaId: string): Promise<ServiceArea | undefined> {
     return this.areas.get(serviceAreaId);
   }
-  listServiceAreas(countryCode?: string): readonly ServiceArea[] {
+  async listServiceAreas(countryCode?: string): Promise<readonly ServiceArea[]> {
     const rows = [...this.areas.values()];
     return countryCode ? rows.filter((row) => row.country_code === countryCode) : rows;
   }

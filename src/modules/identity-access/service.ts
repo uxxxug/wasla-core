@@ -1,3 +1,4 @@
+import { NO_SCOPE, type TransactionBoundary } from "../../platform/persistence/transaction.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, forbidden, invalid, notFound, unauthenticated } from "../../platform/errors.js";
 import { hashToken, newId, newToken } from "../../platform/ids.js";
@@ -49,6 +50,7 @@ export class IdentityService {
   constructor(
     private readonly repo: IdentityRepository,
     private readonly outbox: OutboxStore,
+    private readonly boundary: TransactionBoundary,
     private readonly audit: AuditLog,
     private readonly clock: Clock,
   ) {}
@@ -62,11 +64,11 @@ export class IdentityService {
     if (!input.external_id.trim()) throw invalid("external_id is required");
     if (!input.correlation_id.trim()) throw invalid("correlation_id is required");
 
-    const existingLink = this.repo.findLink(input.channel_type, input.external_id);
+    const existingLink = await this.repo.findLink(input.channel_type, input.external_id);
     if (existingLink) {
-      const identity = this.repo.getIdentity(existingLink.identity_id);
+      const identity = await this.repo.getIdentity(existingLink.identity_id);
       if (!identity) throw notFound("identity referenced by link does not exist");
-      const principal = this.repo.findPrincipalByIdentity(identity.identity_id);
+      const principal = await this.repo.findPrincipalByIdentity(identity.identity_id);
       if (!principal) throw notFound("principal for identity does not exist");
       return { identity, principal, created: false };
     }
@@ -96,11 +98,11 @@ export class IdentityService {
       created_at: now.toISOString(),
     };
 
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => {
-        this.repo.insertIdentity(identity);
-        this.repo.insertPrincipal(principal);
-        this.repo.insertLink(link);
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage(async (scope) => {
+        await this.repo.insertIdentity(identity, scope);
+        await this.repo.insertPrincipal(principal, scope);
+        await this.repo.insertLink(link, scope);
       });
       uow.emit(
         makeEvent({
@@ -121,7 +123,7 @@ export class IdentityService {
       );
     });
 
-    this.audit.record({
+    await this.audit.record({
       actor_type: "system",
       actor_id: null,
       action: "identity.registered",
@@ -140,9 +142,9 @@ export class IdentityService {
     channel_type: ChannelType;
     correlation_id: string;
   }): Promise<{ session: Session; token: string }> {
-    const principal = this.repo.getPrincipal(input.principal_id);
+    const principal = await this.repo.getPrincipal(input.principal_id);
     if (!principal) throw notFound("principal not found");
-    const identity = this.repo.getIdentity(principal.identity_id);
+    const identity = await this.repo.getIdentity(principal.identity_id);
     if (!identity) throw notFound("identity not found");
     if (identity.status !== "active") throw forbidden("identity is not active");
 
@@ -157,8 +159,8 @@ export class IdentityService {
       expires_at: new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
       revoked_at: null,
     };
-    this.repo.insertSession(session);
-    this.audit.record({
+    await this.repo.insertSession(session, NO_SCOPE);
+    await this.audit.record({
       actor_type: "principal",
       actor_id: principal.principal_id,
       action: "session.issued",
@@ -170,13 +172,13 @@ export class IdentityService {
     return { session, token };
   }
 
-  revokeSession(sessionId: string, correlationId: string): void {
-    const session = this.repo.getSession(sessionId);
+  async revokeSession(sessionId: string, correlationId: string): Promise<void> {
+    const session = await this.repo.getSession(sessionId);
     if (!session) throw notFound("session not found");
     if (session.revoked_at !== null) return;
     session.revoked_at = this.clock.now().toISOString();
-    this.repo.updateSession(session);
-    this.audit.record({
+    await this.repo.updateSession(session, NO_SCOPE);
+    await this.audit.record({
       actor_type: "principal",
       actor_id: session.principal_id,
       action: "session.revoked",
@@ -188,18 +190,18 @@ export class IdentityService {
   }
 
   /** Authenticates a bearer token and resolves the acting principal. */
-  authenticate(token: string): AuthenticatedPrincipal {
+  async authenticate(token: string): Promise<AuthenticatedPrincipal> {
     if (!token) throw unauthenticated();
-    const session = this.repo.getSessionByTokenHash(hashToken(token));
+    const session = await this.repo.getSessionByTokenHash(hashToken(token));
     if (!session) throw unauthenticated("unknown session token");
     if (!isSessionActive(session, this.clock.now())) throw unauthenticated("session expired or revoked");
 
-    const principal = this.repo.getPrincipal(session.principal_id);
+    const principal = await this.repo.getPrincipal(session.principal_id);
     if (!principal) throw unauthenticated("principal no longer exists");
-    const identity = this.repo.getIdentity(principal.identity_id);
+    const identity = await this.repo.getIdentity(principal.identity_id);
     if (!identity || identity.status !== "active") throw forbidden("identity is not active");
 
-    const memberships = this.repo.listMemberships(principal.principal_id);
+    const memberships = await this.repo.listMemberships(principal.principal_id);
     const roles = [...new Set(memberships.flatMap((m) => m.roles))];
     return {
       principal_id: principal.principal_id,
@@ -211,14 +213,14 @@ export class IdentityService {
     };
   }
 
-  grantMembership(input: {
+  async grantMembership(input: {
     principal_id: string;
     organization_id: string;
     roles: Role[];
     correlation_id: string;
-  }): Membership {
-    if (!this.repo.getPrincipal(input.principal_id)) throw notFound("principal not found");
-    if (this.repo.findMembership(input.principal_id, input.organization_id)) {
+  }): Promise<Membership> {
+    if (!await this.repo.getPrincipal(input.principal_id)) throw notFound("principal not found");
+    if (await this.repo.findMembership(input.principal_id, input.organization_id)) {
       throw conflict("membership already exists");
     }
     const membership: Membership = {
@@ -228,8 +230,8 @@ export class IdentityService {
       roles: input.roles,
       created_at: this.clock.now().toISOString(),
     };
-    this.repo.insertMembership(membership);
-    this.audit.record({
+    await this.repo.insertMembership(membership, NO_SCOPE);
+    await this.audit.record({
       actor_type: "system",
       actor_id: null,
       action: "membership.granted",

@@ -3,6 +3,10 @@ import { InMemoryAuditLog, type AuditLog } from "./platform/audit/audit.js";
 import { LocalEventBus } from "./platform/eventing/bus.js";
 import { InMemoryInbox } from "./platform/eventing/inbox.js";
 import { InMemoryOutbox, type OutboxStore } from "./platform/eventing/outbox.js";
+import {
+  InMemoryTransactionBoundary,
+  type TransactionBoundary,
+} from "./platform/persistence/transaction.js";
 import { OutboxPublisher } from "./platform/eventing/publisher.js";
 import { Router } from "./platform/http/router.js";
 import { InMemoryIdentityRepository } from "./modules/identity-access/memory-repository.js";
@@ -29,6 +33,7 @@ export interface CoreApp {
   router: Router;
   bus: LocalEventBus;
   outbox: OutboxStore;
+  boundary: TransactionBoundary;
   publisher: OutboxPublisher;
   audit: AuditLog;
   identity: IdentityService;
@@ -47,21 +52,23 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
   const clock = options.clock ?? systemClock;
   const audit = new InMemoryAuditLog(clock);
   const outbox = new InMemoryOutbox(clock);
+  const boundary = new InMemoryTransactionBoundary();
   const inbox = new InMemoryInbox();
   const bus = new LocalEventBus(inbox);
   const publisher = new OutboxPublisher(outbox, bus, clock);
 
-  const identity = new IdentityService(new InMemoryIdentityRepository(), outbox, audit, clock);
+  const identity = new IdentityService(new InMemoryIdentityRepository(), outbox, boundary, audit, clock);
   const organization = new OrganizationService(
     new InMemoryOrganizationRepository(),
     audit,
     clock,
   );
-  const money = new MoneyService(new InMemoryMoneyRepository(), outbox, audit, clock);
+  const money = new MoneyService(new InMemoryMoneyRepository(), outbox, boundary, audit, clock);
   const geography = new GeographyService(new InMemoryGeographyRepository(), audit);
   const fulfillment = new FulfillmentService(
     new InMemoryFulfillmentRepository(),
     outbox,
+    boundary,
     audit,
     clock,
     money,
@@ -81,9 +88,9 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
 
   const router = new Router();
   router.get("/health", () => ({ status: 200, body: { status: "ok" } }));
-  router.get("/ready", () => ({
+  router.get("/ready", async () => ({
     status: 200,
-    body: { status: "ready", outbox_pending: outbox.byStatus("pending").length },
+    body: { status: "ready", outbox_pending: (await outbox.byStatus("pending")).length },
   }));
   registerIdentityRoutes(router, identity);
   registerOrganizationRoutes(router, organization, identity);
@@ -95,6 +102,7 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
     router,
     bus,
     outbox,
+    boundary,
     publisher,
     audit,
     identity,

@@ -19,7 +19,7 @@ describe("fulfillment coordination", () => {
     await core.bus.publish(event);
     await core.bus.publish(event);
 
-    const created = core.outbox.all().filter((record) => record.event.event_type === "core.fulfillment.created");
+    const created = (await core.outbox.all()).filter((record) => record.event.event_type === "core.fulfillment.created");
     expect(created).toHaveLength(1);
     expect(created[0]!.event.causation_id).toBe(event.event_id);
     expect(created[0]!.event.payload).not.toHaveProperty("items");
@@ -38,7 +38,7 @@ describe("fulfillment coordination", () => {
       payload: { order_id: "order-2", organization_id: "org-1", requested_service: "delivery" },
     });
     await core.bus.publish(order);
-    const created = core.outbox.all().find((record) => record.event.event_type === "core.fulfillment.created");
+    const created = (await core.outbox.all()).find((record) => record.event.event_type === "core.fulfillment.created");
     const fulfillmentId = created?.event.entity_id;
     expect(fulfillmentId).toBeDefined();
     if (!fulfillmentId) return;
@@ -62,12 +62,12 @@ describe("fulfillment coordination", () => {
     await core.bus.publish(completion);
     await core.bus.publish(completion);
 
-    expect(core.fulfillment.require(fulfillmentId)).toMatchObject({
+    expect(await core.fulfillment.require(fulfillmentId)).toMatchObject({
       status: "completed",
       move_job_reference: "job-9",
     });
     expect(
-      core.outbox.all().filter((record) => record.event.event_type === "core.fulfillment.completed"),
+      (await core.outbox.all()).filter((record) => record.event.event_type === "core.fulfillment.completed"),
     ).toHaveLength(1);
   });
 });

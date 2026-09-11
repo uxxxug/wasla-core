@@ -4,6 +4,7 @@ import { LocalEventBus } from "../src/platform/eventing/bus.js";
 import { isValidEnvelope, makeEvent } from "../src/platform/eventing/envelope.js";
 import { InMemoryInbox } from "../src/platform/eventing/inbox.js";
 import { InMemoryOutbox } from "../src/platform/eventing/outbox.js";
+import { InMemoryTransactionBoundary } from "../src/platform/persistence/transaction.js";
 import { OutboxPublisher } from "../src/platform/eventing/publisher.js";
 import { withTransaction } from "../src/platform/eventing/unit-of-work.js";
 
@@ -21,7 +22,7 @@ function event(type = "core.test.happened", entityId = "e-1") {
 }
 
 describe("event envelope", () => {
-  it("carries every canonical field", () => {
+  it("carries every canonical field", async () => {
     const e = event();
     expect(isValidEnvelope(e)).toBe(true);
     for (const key of [
@@ -52,7 +53,7 @@ describe("unit of work", () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     let applied = false;
     await expect(
-      withTransaction(outbox, (uow) => {
+      withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox: outbox }, (uow) => {
         uow.stage(() => {
           applied = true;
         });
@@ -61,20 +62,20 @@ describe("unit of work", () => {
       }),
     ).rejects.toThrow("domain rule violated");
     expect(applied).toBe(false);
-    expect(outbox.all()).toHaveLength(0);
+    expect(await outbox.all()).toHaveLength(0);
   });
 
   it("commits state and event together", async () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     let applied = false;
-    await withTransaction(outbox, (uow) => {
+    await withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox: outbox }, (uow) => {
       uow.stage(() => {
         applied = true;
       });
       uow.emit(event());
     });
     expect(applied).toBe(true);
-    expect(outbox.byStatus("pending")).toHaveLength(1);
+    expect(await outbox.byStatus("pending")).toHaveLength(1);
   });
 });
 
@@ -87,12 +88,12 @@ describe("outbox publisher", () => {
     bus.subscribe("test-consumer", "core.test.happened", (e) => {
       received.push(e.event_id);
     });
-    outbox.append(event());
+    await outbox.append(event());
 
     const result = await new OutboxPublisher(outbox, bus, clock).drainOnce();
     expect(result.published).toBe(1);
     expect(received).toHaveLength(1);
-    expect(outbox.byStatus("published")).toHaveLength(1);
+    expect(await outbox.byStatus("published")).toHaveLength(1);
 
     // A second drain must not re-publish.
     const second = await new OutboxPublisher(outbox, bus, clock).drainOnce();
@@ -105,11 +106,11 @@ describe("outbox publisher", () => {
     const outbox = new InMemoryOutbox(clock);
     const bus = { publish: vi.fn().mockRejectedValue(new Error("bus down")), subscribe: vi.fn() };
     const publisher = new OutboxPublisher(outbox, bus as never, clock, 3, 1000);
-    outbox.append(event());
+    await outbox.append(event());
 
     let last = await publisher.drainOnce();
     expect(last.failed).toBe(1);
-    expect(outbox.byStatus("pending")).toHaveLength(1);
+    expect(await outbox.byStatus("pending")).toHaveLength(1);
 
     clock.advance(1000);
     last = await publisher.drainOnce();
@@ -118,7 +119,7 @@ describe("outbox publisher", () => {
     clock.advance(2000);
     last = await publisher.drainOnce();
     expect(last.dead).toBe(1);
-    expect(outbox.byStatus("dead")).toHaveLength(1);
+    expect(await outbox.byStatus("dead")).toHaveLength(1);
   });
 
   it("does not retry before the backoff window elapses", async () => {
@@ -126,7 +127,7 @@ describe("outbox publisher", () => {
     const outbox = new InMemoryOutbox(clock);
     const publish = vi.fn().mockRejectedValue(new Error("bus down"));
     const publisher = new OutboxPublisher(outbox, { publish } as never, clock, 5, 1000);
-    outbox.append(event());
+    await outbox.append(event());
     await publisher.drainOnce();
     await publisher.drainOnce(); // still inside the backoff window
     expect(publish).toHaveBeenCalledTimes(1);

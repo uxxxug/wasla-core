@@ -1,3 +1,4 @@
+import type { TransactionScope } from "../../platform/persistence/transaction.js";
 import type { ChannelType, Identity, IdentityLink, Membership, Principal, Session } from "./domain.js";
 import type { IdentityRepository } from "./ports.js";
 
@@ -17,63 +18,63 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     return `${channelType}::${externalId}`;
   }
 
-  insertIdentity(identity: Identity): void {
+  async insertIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
     this.identities.set(identity.identity_id, identity);
   }
-  getIdentity(identityId: string): Identity | undefined {
+  async getIdentity(identityId: string): Promise<Identity | undefined> {
     return this.identities.get(identityId);
   }
-  updateIdentity(identity: Identity): void {
+  async updateIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
     this.identities.set(identity.identity_id, identity);
   }
-  listIdentities(): Identity[] {
+  async listIdentities(): Promise<Identity[]> {
     return [...this.identities.values()];
   }
 
-  insertLink(link: IdentityLink): void {
+  async insertLink(link: IdentityLink, _scope?: TransactionScope): Promise<void> {
     const key = this.linkKey(link.channel_type, link.external_id);
     if (this.links.has(key)) {
       throw new Error(`identity link already exists: ${key}`);
     }
     this.links.set(key, link);
   }
-  findLink(channelType: ChannelType, externalId: string): IdentityLink | undefined {
+  async findLink(channelType: ChannelType, externalId: string): Promise<IdentityLink | undefined> {
     return this.links.get(this.linkKey(channelType, externalId));
   }
-  listLinksForIdentity(identityId: string): IdentityLink[] {
+  async listLinksForIdentity(identityId: string): Promise<IdentityLink[]> {
     return [...this.links.values()].filter((l) => l.identity_id === identityId);
   }
 
-  insertPrincipal(principal: Principal): void {
+  async insertPrincipal(principal: Principal, _scope?: TransactionScope): Promise<void> {
     this.principals.set(principal.principal_id, principal);
   }
-  getPrincipal(principalId: string): Principal | undefined {
+  async getPrincipal(principalId: string): Promise<Principal | undefined> {
     return this.principals.get(principalId);
   }
-  findPrincipalByIdentity(identityId: string): Principal | undefined {
+  async findPrincipalByIdentity(identityId: string): Promise<Principal | undefined> {
     return [...this.principals.values()].find((p) => p.identity_id === identityId);
   }
 
-  insertSession(session: Session): void {
+  async insertSession(session: Session, _scope?: TransactionScope): Promise<void> {
     this.sessions.set(session.session_id, session);
   }
-  getSessionByTokenHash(tokenHash: string): Session | undefined {
+  async getSessionByTokenHash(tokenHash: string): Promise<Session | undefined> {
     return [...this.sessions.values()].find((s) => s.token_hash === tokenHash);
   }
-  getSession(sessionId: string): Session | undefined {
+  async getSession(sessionId: string): Promise<Session | undefined> {
     return this.sessions.get(sessionId);
   }
-  updateSession(session: Session): void {
+  async updateSession(session: Session, _scope?: TransactionScope): Promise<void> {
     this.sessions.set(session.session_id, session);
   }
 
-  insertMembership(membership: Membership): void {
+  async insertMembership(membership: Membership, _scope?: TransactionScope): Promise<void> {
     this.memberships.set(membership.membership_id, membership);
   }
-  listMemberships(principalId: string): Membership[] {
+  async listMemberships(principalId: string): Promise<Membership[]> {
     return [...this.memberships.values()].filter((m) => m.principal_id === principalId);
   }
-  findMembership(principalId: string, organizationId: string): Membership | undefined {
+  async findMembership(principalId: string, organizationId: string): Promise<Membership | undefined> {
     return [...this.memberships.values()].find(
       (m) => m.principal_id === principalId && m.organization_id === organizationId,
     );

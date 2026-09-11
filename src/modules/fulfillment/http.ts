@@ -12,25 +12,25 @@ export function registerFulfillmentRoutes(
   // Registered before the parameterised route so it is never read as an id.
   // Reconciliation read: execution state versus money state. An empty list is
   // the invariant CORE is expected to hold.
-  router.get("/v1/fulfillments/reconciliation/inconsistent", (ctx) => {
+  router.get("/v1/fulfillments/reconciliation/inconsistent", async (ctx) => {
     const organizationId = ctx.query.get("organization_id") ?? "";
     if (!organizationId) throw invalid("organization_id is required");
-    requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
-    const items = fulfillment.listFinanciallyInconsistent(organizationId);
+    await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
+    const items = await fulfillment.listFinanciallyInconsistent(organizationId);
     return { status: 200, body: { count: items.length, items } };
   });
 
-  router.get("/v1/fulfillments/:fulfillment_id", (ctx) => {
-    const record = fulfillment.require(ctx.params["fulfillment_id"] ?? "");
-    requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);
+  router.get("/v1/fulfillments/:fulfillment_id", async (ctx) => {
+    const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
+    await requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);
     return { status: 200, body: record };
   });
 
   // Cancel before execution closes. Idempotent: cancelling twice returns the
   // same cancelled fulfillment.
   router.post("/v1/fulfillments/:fulfillment_id/cancel", async (ctx) => {
-    const record = fulfillment.require(ctx.params["fulfillment_id"] ?? "");
-    requirePrincipal(ctx, identity, "fulfillment.request", record.organization_id);
+    const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
+    await requirePrincipal(ctx, identity, "fulfillment.request", record.organization_id);
     const input = (ctx.body ?? {}) as Record<string, unknown>;
     const cancelled = await fulfillment.cancel({
       fulfillment_id: record.fulfillment_id,

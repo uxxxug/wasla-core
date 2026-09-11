@@ -21,12 +21,12 @@ function requiredAmount(input: Record<string, unknown>): number {
 }
 
 export function registerMoneyRoutes(router: Router, money: MoneyService, identity: IdentityService): void {
-  router.post("/v1/wallets", (ctx) => {
-    requirePrincipal(ctx, identity, "money.authorize");
+  router.post("/v1/wallets", async (ctx) => {
+    await requirePrincipal(ctx, identity, "money.authorize");
     const input = objectBody(ctx);
     const ownerType = requiredString(input, "owner_type");
     if (ownerType !== "identity" && ownerType !== "organization") throw invalid("unsupported owner_type");
-    const result = money.createWallet({
+    const result = await money.createWallet({
       owner_type: ownerType as WalletOwnerType,
       owner_id: requiredString(input, "owner_id"),
       currency: requiredString(input, "currency"),
@@ -35,13 +35,13 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
     return { status: result.created ? 201 : 200, body: result.wallet };
   });
 
-  router.get("/v1/wallets/:wallet_id/balance", (ctx) => {
-    requirePrincipal(ctx, identity, "money.authorize");
-    return { status: 200, body: money.balance(ctx.params["wallet_id"] ?? "") };
+  router.get("/v1/wallets/:wallet_id/balance", async (ctx) => {
+    await requirePrincipal(ctx, identity, "money.authorize");
+    return { status: 200, body: await money.balance(ctx.params["wallet_id"] ?? "") };
   });
 
   router.post("/v1/payment-authorizations", async (ctx) => {
-    requirePrincipal(ctx, identity, "money.authorize");
+    await requirePrincipal(ctx, identity, "money.authorize");
     const input = objectBody(ctx);
     return {
       status: 201,
@@ -56,7 +56,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
   });
 
   router.post("/v1/payment-authorizations/:authorization_id/void", async (ctx) => {
-    requirePrincipal(ctx, identity, "money.authorize");
+    await requirePrincipal(ctx, identity, "money.authorize");
     const input = objectBody(ctx);
     return {
       status: 200,
@@ -69,7 +69,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
   });
 
   router.post("/v1/payment-authorizations/:authorization_id/capture", async (ctx) => {
-    requirePrincipal(ctx, identity, "money.authorize");
+    await requirePrincipal(ctx, identity, "money.authorize");
     const transaction = await money.capture({
       authorization_id: ctx.params["authorization_id"] ?? "",
       correlation_id: ctx.correlation_id,

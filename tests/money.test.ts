@@ -6,7 +6,7 @@ import { assertBalanced } from "../src/modules/money/domain.js";
 describe("money", () => {
   it("posts immutable balanced entries and reports available balance", async () => {
     const core = createCoreApp({ clock: new FixedClock() });
-    const { wallet } = core.money.createWallet({
+    const { wallet } = await core.money.createWallet({
       owner_type: "identity",
       owner_id: "identity-1",
       currency: "sar",
@@ -19,7 +19,7 @@ describe("money", () => {
       correlation_id: "corr-money",
     });
     expect(() => assertBalanced(credit.entries)).not.toThrow();
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 10_000,
       held_minor: 0,
       available_minor: 10_000,
@@ -29,7 +29,7 @@ describe("money", () => {
 
   it("authorizes, holds and captures funds exactly once", async () => {
     const core = createCoreApp({ clock: new FixedClock() });
-    const { wallet } = core.money.createWallet({
+    const { wallet } = await core.money.createWallet({
       owner_type: "organization",
       owner_id: "org-1",
       currency: "SAR",
@@ -54,13 +54,13 @@ describe("money", () => {
       correlation_id: "another-correlation",
     });
     expect(duplicate.authorization_id).toBe(first.authorization_id);
-    expect(core.money.balance(wallet.wallet_id).available_minor).toBe(3_750);
+    expect((await core.money.balance(wallet.wallet_id)).available_minor).toBe(3_750);
 
     const capture = await core.money.capture({ authorization_id: first.authorization_id, correlation_id: "c" });
     const repeated = await core.money.capture({ authorization_id: first.authorization_id, correlation_id: "c-2" });
     expect(repeated.transaction_id).toBe(capture.transaction_id);
     expect(() => assertBalanced(capture.entries)).not.toThrow();
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 3_750,
       held_minor: 0,
       available_minor: 3_750,
@@ -70,15 +70,15 @@ describe("money", () => {
 
   it("rejects invalid amounts, currencies and insufficient funds", async () => {
     const core = createCoreApp({ clock: new FixedClock() });
-    expect(() =>
+    await expect(
       core.money.createWallet({
         owner_type: "identity",
         owner_id: "i-1",
         currency: "riyals",
         correlation_id: "c",
       }),
-    ).toThrow(/currency/);
-    const { wallet } = core.money.createWallet({
+    ).rejects.toThrow(/currency/);
+    const { wallet } = await core.money.createWallet({
       owner_type: "identity",
       owner_id: "i-1",
       currency: "SAR",
@@ -95,7 +95,7 @@ describe("money", () => {
   });
   it("voids a hold idempotently and refuses to void a captured hold", async () => {
     const core = createCoreApp({ clock: new FixedClock() });
-    const { wallet } = core.money.createWallet({
+    const { wallet } = await core.money.createWallet({
       owner_type: "identity",
       owner_id: "i-void",
       currency: "SAR",
@@ -113,7 +113,7 @@ describe("money", () => {
       business_reference: "order-void",
       correlation_id: "c",
     });
-    expect(core.money.balance(wallet.wallet_id).available_minor).toBe(1_200);
+    expect((await core.money.balance(wallet.wallet_id)).available_minor).toBe(1_200);
 
     const voided = await core.money.voidAuthorization({
       authorization_id: hold.authorization_id,
@@ -127,7 +127,7 @@ describe("money", () => {
     });
     expect(voided.status).toBe("voided");
     expect(repeated.voided_at).toBe(voided.voided_at);
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 2_000,
       held_minor: 0,
       available_minor: 2_000,
@@ -153,7 +153,7 @@ describe("money", () => {
   it("expires due holds without moving money and blocks capture after expiry", async () => {
     const clock = new FixedClock();
     const core = createCoreApp({ clock });
-    const { wallet } = core.money.createWallet({
+    const { wallet } = await core.money.createWallet({
       owner_type: "identity",
       owner_id: "i-expiry",
       currency: "SAR",
@@ -182,7 +182,7 @@ describe("money", () => {
     const expired = await core.money.expireDueAuthorizations("sweep");
     expect(expired).toHaveLength(1);
     expect(expired[0]?.void_reason).toBe("expired");
-    expect(core.money.balance(wallet.wallet_id)).toEqual({
+    expect(await core.money.balance(wallet.wallet_id)).toEqual({
       posted_minor: 3_000,
       held_minor: 0,
       available_minor: 3_000,
@@ -190,14 +190,14 @@ describe("money", () => {
     });
     expect(await core.money.expireDueAuthorizations("sweep")).toHaveLength(0);
     expect(
-      core.outbox.byStatus("pending").filter((row) => row.event.event_type === "core.payment.voided"),
+      (await core.outbox.byStatus("pending")).filter((row) => row.event.event_type === "core.payment.voided"),
     ).toHaveLength(1);
   });
 
   it("rejects an expiry in the past", async () => {
     const clock = new FixedClock();
     const core = createCoreApp({ clock });
-    const { wallet } = core.money.createWallet({
+    const { wallet } = await core.money.createWallet({
       owner_type: "identity",
       owner_id: "i-past",
       currency: "SAR",

@@ -1,4 +1,5 @@
 import type { AuditLog } from "../../platform/audit/audit.js";
+import { NO_SCOPE } from "../../platform/persistence/transaction.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
 import { newId } from "../../platform/ids.js";
 import {
@@ -26,12 +27,12 @@ export class GeographyService {
     private readonly audit: AuditLog,
   ) {}
 
-  registerCountry(input: {
+  async registerCountry(input: {
     country_code: string;
     name: string;
     default_currency: string;
     correlation_id: string;
-  }): Country {
+  }): Promise<Country> {
     const countryCode = this.countryCode(input.country_code);
     if (!input.name.trim()) throw invalid("name is required");
     const currency = input.default_currency.trim().toUpperCase();
@@ -42,8 +43,8 @@ export class GeographyService {
       default_currency: currency,
       status: "active",
     };
-    this.repo.upsertCountry(country);
-    this.audit.record({
+    await this.repo.upsertCountry(country, NO_SCOPE);
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action: "geography.country.registered",
@@ -55,12 +56,12 @@ export class GeographyService {
     return country;
   }
 
-  addRegion(input: { country_code: string; code: string; name: string; correlation_id: string }): Region {
+  async addRegion(input: { country_code: string; code: string; name: string; correlation_id: string }): Promise<Region> {
     const countryCode = this.countryCode(input.country_code);
-    this.requireCountry(countryCode);
+    await this.requireCountry(countryCode);
     const code = input.code.trim().toUpperCase();
     if (!code) throw invalid("code is required");
-    const existing = this.repo.findRegion(countryCode, code);
+    const existing = await this.repo.findRegion(countryCode, code);
     if (existing) return existing;
     const region: Region = {
       region_id: newId(),
@@ -69,8 +70,8 @@ export class GeographyService {
       name: input.name.trim() || code,
       status: "active",
     };
-    this.repo.insertRegion(region);
-    this.audit.record({
+    await this.repo.insertRegion(region, NO_SCOPE);
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action: "geography.region.added",
@@ -82,14 +83,14 @@ export class GeographyService {
     return region;
   }
 
-  addCity(input: {
+  async addCity(input: {
     region_id: string;
     name: string;
     latitude: number;
     longitude: number;
     correlation_id: string;
-  }): City {
-    const region = this.repo.getRegion(input.region_id);
+  }): Promise<City> {
+    const region = await this.repo.getRegion(input.region_id);
     if (!region) throw notFound("region not found");
     if (!input.name.trim()) throw invalid("name is required");
     this.point({ latitude: input.latitude, longitude: input.longitude });
@@ -102,8 +103,8 @@ export class GeographyService {
       longitude: input.longitude,
       status: "active",
     };
-    this.repo.insertCity(city);
-    this.audit.record({
+    await this.repo.insertCity(city, NO_SCOPE);
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action: "geography.city.added",
@@ -115,15 +116,15 @@ export class GeographyService {
     return city;
   }
 
-  defineServiceArea(input: {
+  async defineServiceArea(input: {
     city_id: string;
     name: string;
     radius_metres: number;
     centre_latitude?: number;
     centre_longitude?: number;
     correlation_id: string;
-  }): ServiceArea {
-    const city = this.repo.getCity(input.city_id);
+  }): Promise<ServiceArea> {
+    const city = await this.repo.getCity(input.city_id);
     if (!city) throw notFound("city not found");
     if (!input.name.trim()) throw invalid("name is required");
     if (!Number.isFinite(input.radius_metres) || input.radius_metres <= 0) {
@@ -144,8 +145,8 @@ export class GeographyService {
       radius_metres: Math.round(input.radius_metres),
       status: "active",
     };
-    this.repo.insertServiceArea(area);
-    this.audit.record({
+    await this.repo.insertServiceArea(area, NO_SCOPE);
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action: "geography.service_area.defined",
@@ -157,23 +158,23 @@ export class GeographyService {
     return area;
   }
 
-  countries(): readonly Country[] {
-    return this.repo.listCountries();
+  async countries(): Promise<readonly Country[]> {
+    return await this.repo.listCountries();
   }
 
-  regions(countryCode: string): readonly Region[] {
+  async regions(countryCode: string): Promise<readonly Region[]> {
     const code = this.countryCode(countryCode);
-    this.requireCountry(code);
-    return this.repo.listRegions(code);
+    await this.requireCountry(code);
+    return await this.repo.listRegions(code);
   }
 
-  cities(regionId: string): readonly City[] {
-    if (!this.repo.getRegion(regionId)) throw notFound("region not found");
-    return this.repo.listCities(regionId);
+  async cities(regionId: string): Promise<readonly City[]> {
+    if (!await this.repo.getRegion(regionId)) throw notFound("region not found");
+    return await this.repo.listCities(regionId);
   }
 
-  requireServiceArea(serviceAreaId: string): ServiceArea {
-    const area = this.repo.getServiceArea(serviceAreaId);
+  async requireServiceArea(serviceAreaId: string): Promise<ServiceArea> {
+    const area = await this.repo.getServiceArea(serviceAreaId);
     if (!area) throw notFound("service area not found");
     return area;
   }
@@ -183,14 +184,14 @@ export class GeographyService {
    * This is a reference lookup, not dispatch: it says where the platform
    * operates, never who is available or how to get there.
    */
-  resolve(point: Point, options: { country_code?: string } = {}): readonly {
-    service_area: ServiceArea;
-    distance_metres: number;
-  }[] {
+  async resolve(
+    point: Point,
+    options: { country_code?: string } = {},
+  ): Promise<readonly { service_area: ServiceArea; distance_metres: number }[]> {
     const target = this.point(point);
-    const scope = options.country_code ? this.countryCode(options.country_code) : undefined;
-    return this.repo
-      .listServiceAreas(scope)
+    const within = options.country_code ? this.countryCode(options.country_code) : undefined;
+    const areas = await this.repo.listServiceAreas(within);
+    return areas
       .filter((area) => covers(area, target))
       .map((area) => ({
         service_area: area,
@@ -202,8 +203,8 @@ export class GeographyService {
       .sort((a, b) => a.distance_metres - b.distance_metres);
   }
 
-  private requireCountry(countryCode: string): Country {
-    const country = this.repo.getCountry(countryCode);
+  private async requireCountry(countryCode: string): Promise<Country> {
+    const country = await this.repo.getCountry(countryCode);
     if (!country) throw notFound("country not found");
     return country;
   }

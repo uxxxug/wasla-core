@@ -1,3 +1,4 @@
+import { NO_SCOPE, type TransactionBoundary } from "../../platform/persistence/transaction.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
@@ -22,16 +23,17 @@ export class MoneyService {
   constructor(
     private readonly repo: MoneyRepository,
     private readonly outbox: OutboxStore,
+    private readonly boundary: TransactionBoundary,
     private readonly audit: AuditLog,
     private readonly clock: Clock,
   ) {}
 
-  createWallet(input: {
+  async createWallet(input: {
     owner_type: WalletOwnerType;
     owner_id: string;
     currency: string;
     correlation_id: string;
-  }): { wallet: Wallet; created: boolean } {
+  }): Promise<{ wallet: Wallet; created: boolean }> {
     if (!input.owner_id.trim()) throw invalid("owner_id is required");
     let currency: string;
     try {
@@ -39,7 +41,7 @@ export class MoneyService {
     } catch (error) {
       throw invalid(error instanceof Error ? error.message : "invalid currency");
     }
-    const existing = this.repo.findWallet(input.owner_type, input.owner_id, currency);
+    const existing = await this.repo.findWallet(input.owner_type, input.owner_id, currency);
     if (existing) return { wallet: existing, created: false };
     const wallet: Wallet = {
       wallet_id: newId(),
@@ -49,8 +51,8 @@ export class MoneyService {
       status: "active",
       created_at: this.clock.now().toISOString(),
     };
-    this.repo.insertWallet(wallet);
-    this.audit.record({
+    await this.repo.insertWallet(wallet, NO_SCOPE);
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action: "wallet.created",
@@ -72,20 +74,18 @@ export class MoneyService {
    * afford. `expired_hold_minor` keeps that transitional amount observable
    * until `expireDueAuthorizations` releases it.
    */
-  balance(walletId: string): {
+  async balance(walletId: string): Promise<{
     posted_minor: number;
     held_minor: number;
     available_minor: number;
     expired_hold_minor: number;
-  } {
-    const wallet = this.requireWallet(walletId);
-    const posted = this.repo
-      .transactions()
+  }> {
+    const wallet = await this.requireWallet(walletId);
+    const posted = (await this.repo.transactions())
       .flatMap((transaction) => transaction.entries)
       .filter((entry) => entry.account_reference === `wallet:${wallet.wallet_id}`)
       .reduce((sum, entry) => sum + entry.amount_minor, 0);
-    const open = this.repo
-      .listAuthorizations(wallet.wallet_id)
+    const open = (await this.repo.listAuthorizations(wallet.wallet_id))
       .filter((item) => item.status === "authorized");
     const heldMinor = open
       .filter((item) => !this.isExpired(item))
@@ -107,9 +107,9 @@ export class MoneyService {
     business_reference: string;
     correlation_id: string;
   }): Promise<LedgerTransaction> {
-    const wallet = this.requireWallet(input.wallet_id);
+    const wallet = await this.requireWallet(input.wallet_id);
     this.assertAmount(input.amount_minor);
-    const existing = this.repo.findTransactionByReference(input.business_reference);
+    const existing = await this.repo.findTransactionByReference(input.business_reference);
     if (existing) return existing;
     const transaction = this.transaction(
       "credit",
@@ -119,8 +119,8 @@ export class MoneyService {
       "clearing:external",
       input.amount_minor,
     );
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.insertTransaction(transaction));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.insertTransaction(transaction, scope));
       uow.emit(
         makeEvent({
           event_type: "core.money.credited",
@@ -140,7 +140,7 @@ export class MoneyService {
         }),
       );
     });
-    this.auditMoney("wallet.credited", wallet.wallet_id, input.correlation_id, input.amount_minor, wallet.currency);
+    await this.auditMoney("wallet.credited", wallet.wallet_id, input.correlation_id, input.amount_minor, wallet.currency);
     return transaction;
   }
 
@@ -151,12 +151,12 @@ export class MoneyService {
     correlation_id: string;
     expires_at?: Date | string | null;
   }): Promise<PaymentAuthorization> {
-    const wallet = this.requireWallet(input.wallet_id);
+    const wallet = await this.requireWallet(input.wallet_id);
     this.assertAmount(input.amount_minor);
-    const existing = this.repo.findAuthorizationByReference(input.business_reference);
+    const existing = await this.repo.findAuthorizationByReference(input.business_reference);
     if (existing) return existing;
     if (wallet.status !== "active") throw conflict("wallet is not active");
-    if (this.balance(wallet.wallet_id).available_minor < input.amount_minor) {
+    if ((await this.balance(wallet.wallet_id)).available_minor < input.amount_minor) {
       throw conflict("insufficient available balance");
     }
     const authorization: PaymentAuthorization = {
@@ -172,8 +172,8 @@ export class MoneyService {
       expires_at: this.expiry(input.expires_at ?? null),
       void_reason: null,
     };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.insertAuthorization(authorization));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.insertAuthorization(authorization, scope));
       uow.emit(
         makeEvent({
           event_type: "core.payment.authorized",
@@ -193,7 +193,7 @@ export class MoneyService {
         }),
       );
     });
-    this.auditMoney(
+    await this.auditMoney(
       "payment.authorization.created",
       authorization.authorization_id,
       input.correlation_id,
@@ -204,13 +204,13 @@ export class MoneyService {
   }
 
   async capture(input: { authorization_id: string; correlation_id: string }): Promise<LedgerTransaction> {
-    const authorization = this.repo.getAuthorization(input.authorization_id);
+    const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
-    const existing = this.repo.findTransactionByReference(`capture:${authorization.authorization_id}`);
+    const existing = await this.repo.findTransactionByReference(`capture:${authorization.authorization_id}`);
     if (existing) return existing;
     if (authorization.status !== "authorized") throw conflict("authorization cannot be captured");
     if (this.isExpired(authorization)) throw conflict("authorization has expired and can only be voided");
-    const wallet = this.requireWallet(authorization.wallet_id);
+    const wallet = await this.requireWallet(authorization.wallet_id);
     const transaction = this.transaction(
       "capture",
       `capture:${authorization.authorization_id}`,
@@ -220,10 +220,10 @@ export class MoneyService {
       authorization.amount_minor,
     );
     const updated = { ...authorization, status: "captured" as const, captured_at: this.clock.now().toISOString() };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => {
-        this.repo.updateAuthorization(updated);
-        this.repo.insertTransaction(transaction);
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage(async (scope) => {
+        await this.repo.updateAuthorization(updated, scope);
+        await this.repo.insertTransaction(transaction, scope);
       });
       uow.emit(
         makeEvent({
@@ -245,7 +245,7 @@ export class MoneyService {
         }),
       );
     });
-    this.auditMoney(
+    await this.auditMoney(
       "payment.authorization.captured",
       authorization.authorization_id,
       input.correlation_id,
@@ -264,7 +264,7 @@ export class MoneyService {
     reason: string;
     correlation_id: string;
   }): Promise<PaymentAuthorization> {
-    const authorization = this.repo.getAuthorization(input.authorization_id);
+    const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
     if (authorization.status === "voided") return authorization;
     if (authorization.status === "captured") throw conflict("a captured authorization cannot be voided");
@@ -277,8 +277,7 @@ export class MoneyService {
    * is released and the funds return to the available balance.
    */
   async expireDueAuthorizations(correlationId: string): Promise<readonly PaymentAuthorization[]> {
-    const due = this.repo
-      .allAuthorizations()
+    const due = (await this.repo.allAuthorizations())
       .filter((authorization) => authorization.status === "authorized" && this.isExpired(authorization));
     const expired: PaymentAuthorization[] = [];
     for (const authorization of due) {
@@ -298,8 +297,8 @@ export class MoneyService {
       voided_at: this.clock.now().toISOString(),
       void_reason: reason,
     };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.updateAuthorization(updated));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.updateAuthorization(updated, scope));
       uow.emit(
         makeEvent({
           event_type: "core.payment.voided",
@@ -320,7 +319,7 @@ export class MoneyService {
         }),
       );
     });
-    this.auditMoney(
+    await this.auditMoney(
       "payment.authorization.voided",
       updated.authorization_id,
       correlationId,
@@ -343,14 +342,14 @@ export class MoneyService {
     return at.toISOString();
   }
 
-  getAuthorization(authorizationId: string): PaymentAuthorization {
-    const authorization = this.repo.getAuthorization(authorizationId);
+  async getAuthorization(authorizationId: string): Promise<PaymentAuthorization> {
+    const authorization = await this.repo.getAuthorization(authorizationId);
     if (!authorization) throw notFound("payment authorization not found");
     return authorization;
   }
 
-  private requireWallet(walletId: string): Wallet {
-    const wallet = this.repo.getWallet(walletId);
+  private async requireWallet(walletId: string): Promise<Wallet> {
+    const wallet = await this.repo.getWallet(walletId);
     if (!wallet) throw notFound("wallet not found");
     return wallet;
   }
@@ -382,8 +381,14 @@ export class MoneyService {
     };
   }
 
-  private auditMoney(action: string, entityId: string, correlationId: string, amount: number, currency: string): void {
-    this.audit.record({
+  private async auditMoney(
+    action: string,
+    entityId: string,
+    correlationId: string,
+    amount: number,
+    currency: string,
+  ): Promise<void> {
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action,

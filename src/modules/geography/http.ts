@@ -32,25 +32,25 @@ export function registerGeographyRoutes(
   identity: IdentityService,
 ): void {
   // Reference reads are open to any authenticated principal.
-  router.get("/v1/geography/countries", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.read");
-    return { status: 200, body: { countries: geography.countries() } };
+  router.get("/v1/geography/countries", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
+    return { status: 200, body: { countries: await geography.countries() } };
   });
 
-  router.get("/v1/geography/countries/:country_code/regions", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.read");
-    return { status: 200, body: { regions: geography.regions(ctx.params["country_code"] ?? "") } };
+  router.get("/v1/geography/countries/:country_code/regions", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
+    return { status: 200, body: { regions: await geography.regions(ctx.params["country_code"] ?? "") } };
   });
 
-  router.get("/v1/geography/regions/:region_id/cities", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.read");
-    return { status: 200, body: { cities: geography.cities(ctx.params["region_id"] ?? "") } };
+  router.get("/v1/geography/regions/:region_id/cities", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
+    return { status: 200, body: { cities: await geography.cities(ctx.params["region_id"] ?? "") } };
   });
 
-  router.get("/v1/geography/service-areas/resolve", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.read");
+  router.get("/v1/geography/service-areas/resolve", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
     const countryCode = ctx.query.get("country_code");
-    const matches = geography.resolve(
+    const matches = await geography.resolve(
       { latitude: numberParam(ctx, "latitude"), longitude: numberParam(ctx, "longitude") },
       countryCode !== null && countryCode.trim() !== "" ? { country_code: countryCode } : {},
     );
@@ -58,12 +58,12 @@ export function registerGeographyRoutes(
   });
 
   // Reference writes are administrative.
-  router.post("/v1/geography/countries", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.write");
+  router.post("/v1/geography/countries", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
     const input = objectBody(ctx);
     return {
       status: 201,
-      body: geography.registerCountry({
+      body: await geography.registerCountry({
         country_code: requiredString(input, "country_code"),
         name: requiredString(input, "name"),
         default_currency: requiredString(input, "default_currency"),
@@ -72,12 +72,12 @@ export function registerGeographyRoutes(
     };
   });
 
-  router.post("/v1/geography/regions", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.write");
+  router.post("/v1/geography/regions", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
     const input = objectBody(ctx);
     return {
       status: 201,
-      body: geography.addRegion({
+      body: await geography.addRegion({
         country_code: requiredString(input, "country_code"),
         code: requiredString(input, "code"),
         name: requiredString(input, "name"),
@@ -86,12 +86,12 @@ export function registerGeographyRoutes(
     };
   });
 
-  router.post("/v1/geography/cities", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.write");
+  router.post("/v1/geography/cities", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
     const input = objectBody(ctx);
     return {
       status: 201,
-      body: geography.addCity({
+      body: await geography.addCity({
         region_id: requiredString(input, "region_id"),
         name: requiredString(input, "name"),
         latitude: requiredNumber(input, "latitude"),
@@ -101,14 +101,14 @@ export function registerGeographyRoutes(
     };
   });
 
-  router.post("/v1/geography/service-areas", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.write");
+  router.post("/v1/geography/service-areas", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
     const input = objectBody(ctx);
     const latitude = input["centre_latitude"];
     const longitude = input["centre_longitude"];
     return {
       status: 201,
-      body: geography.defineServiceArea({
+      body: await geography.defineServiceArea({
         city_id: requiredString(input, "city_id"),
         name: requiredString(input, "name"),
         radius_metres: requiredNumber(input, "radius_metres"),

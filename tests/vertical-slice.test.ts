@@ -35,30 +35,27 @@ describe("WASLA vertical slice", () => {
     }
   }
 
-  function fundedHold(reference: string, expiresAt?: string) {
-    const { wallet } = core.money.createWallet({
+  async function fundedHold(reference: string, expiresAt?: string) {
+    const { wallet } = await core.money.createWallet({
       owner_type: "organization",
       owner_id: ORG,
       currency: "SAR",
       correlation_id: "corr-setup",
     });
-    return core.money
-      .credit({
-        wallet_id: wallet.wallet_id,
-        amount_minor: 20_000,
-        business_reference: `deposit-${reference}`,
-        correlation_id: "corr-setup",
-      })
-      .then(() =>
-        core.money.authorize({
-          wallet_id: wallet.wallet_id,
-          amount_minor: 5_000,
-          business_reference: reference,
-          correlation_id: "corr-setup",
-          expires_at: expiresAt ?? null,
-        }),
-      )
-      .then((authorization) => ({ wallet, authorization }));
+    await core.money.credit({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 20_000,
+      business_reference: `deposit-${reference}`,
+      correlation_id: "corr-setup",
+    });
+    const authorization = await core.money.authorize({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 5_000,
+      business_reference: reference,
+      correlation_id: "corr-setup",
+      expires_at: expiresAt ?? null,
+    });
+    return { wallet, authorization };
   }
 
   it("1. happy path: order → fulfillment → job → execution → closure on both sides", async () => {
@@ -74,7 +71,7 @@ describe("WASLA vertical slice", () => {
     );
     await settle();
 
-    const fulfillment = core.fulfillment.findByOrderReference("order-1")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-1"))!;
     expect(fulfillment.status).toBe("dispatched");
     const job = move.jobFor(fulfillment.fulfillment_id)!;
     expect(job.status).toBe("created");
@@ -82,15 +79,15 @@ describe("WASLA vertical slice", () => {
     await core.bus.publish(move.completion(job.job_id, "completed", "corr-1"));
     await settle();
 
-    expect(core.fulfillment.require(fulfillment.fulfillment_id).status).toBe("completed");
+    expect((await core.fulfillment.require(fulfillment.fulfillment_id)).status).toBe("completed");
     expect(market.orders.get("order-1")!.status).toBe("completed");
     // Money moved exactly once, on success only.
-    expect(core.money.balance(wallet.wallet_id).held_minor).toBe(0);
-    expect(core.money.balance(wallet.wallet_id).posted_minor).toBe(15_000);
+    expect((await core.money.balance(wallet.wallet_id)).held_minor).toBe(0);
+    expect((await core.money.balance(wallet.wallet_id)).posted_minor).toBe(15_000);
     // MOVE never received order contents; MARKET never received job details.
-    const created = core.outbox
-      .all()
-      .find((r) => r.event.event_type === "core.fulfillment.created")!;
+    const created = (await core.outbox.all()).find(
+      (r) => r.event.event_type === "core.fulfillment.created",
+    )!;
     expect(Object.keys(created.event.payload as object)).toEqual([
       "fulfillment_id",
       "organization_id",
@@ -112,7 +109,7 @@ describe("WASLA vertical slice", () => {
     await core.bus.publish(order);
     await settle();
 
-    const fulfillment = core.fulfillment.findByOrderReference("order-2")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-2"))!;
     const job = move.jobFor(fulfillment.fulfillment_id)!;
     expect(move.jobs.size).toBe(1);
 
@@ -122,7 +119,7 @@ describe("WASLA vertical slice", () => {
     await settle();
 
     expect(
-      core.outbox.all().filter((r) => r.event.event_type === "core.fulfillment.completed"),
+      (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.completed"),
     ).toHaveLength(1);
     expect(market.orders.get("order-2")!.status).toBe("completed");
   });
@@ -145,7 +142,7 @@ describe("WASLA vertical slice", () => {
 
     expect(attempts).toBe(3);
     expect(core.bus.deadLetters).toHaveLength(0);
-    expect(core.fulfillment.findByOrderReference("order-3")!.status).toBe("dispatched");
+    expect((await core.fulfillment.findByOrderReference("order-3"))!.status).toBe("dispatched");
   });
 
   it("4. a network failure after a successful write loses nothing — the outbox replays", async () => {
@@ -166,14 +163,14 @@ describe("WASLA vertical slice", () => {
     };
     const failed = await core.publisher.drainOnce();
     expect(failed.published).toBe(0);
-    expect(core.outbox.byStatus("pending").length).toBeGreaterThan(0);
-    expect(core.fulfillment.findByOrderReference("order-4")!.status).toBe("coordinating");
+    expect((await core.outbox.byStatus("pending")).length).toBeGreaterThan(0);
+    expect((await core.fulfillment.findByOrderReference("order-4"))!.status).toBe("coordinating");
 
     // Transport returns; the relay replays the pending record.
     down = false;
     clock.advance(60_000);
     await settle();
-    expect(core.fulfillment.findByOrderReference("order-4")!.status).toBe("dispatched");
+    expect((await core.fulfillment.findByOrderReference("order-4"))!.status).toBe("dispatched");
   });
 
   it("5. an expired money hold blocks a success claim and closes the order as failed", async () => {
@@ -189,19 +186,19 @@ describe("WASLA vertical slice", () => {
       }),
     );
     await settle();
-    const fulfillment = core.fulfillment.findByOrderReference("order-5")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-5"))!;
     const job = move.jobFor(fulfillment.fulfillment_id)!;
 
     clock.advance(120_000); // the hold expires while the job is running
     await core.bus.publish(move.completion(job.job_id, "completed", "corr-5"));
     await settle();
 
-    const closed = core.fulfillment.require(fulfillment.fulfillment_id);
+    const closed = await core.fulfillment.require(fulfillment.fulfillment_id);
     expect(closed.status).toBe("failed");
     expect(closed.closure_reason).toContain("payment_settlement_failed");
     expect(market.orders.get("order-5")!.status).toBe("failed");
     // No money moved and the hold is released.
-    expect(core.money.balance(wallet.wallet_id)).toMatchObject({
+    expect(await core.money.balance(wallet.wallet_id)).toMatchObject({
       posted_minor: 20_000,
       held_minor: 0,
     });
@@ -219,7 +216,7 @@ describe("WASLA vertical slice", () => {
       }),
     );
     await settle();
-    const fulfillment = core.fulfillment.findByOrderReference("order-6")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-6"))!;
 
     await core.fulfillment.cancel({
       fulfillment_id: fulfillment.fulfillment_id,
@@ -234,15 +231,15 @@ describe("WASLA vertical slice", () => {
     });
     await settle();
 
-    expect(core.fulfillment.require(fulfillment.fulfillment_id).status).toBe("cancelled");
+    expect((await core.fulfillment.require(fulfillment.fulfillment_id)).status).toBe("cancelled");
     expect(market.orders.get("order-6")!.status).toBe("cancelled");
     expect(move.jobFor(fulfillment.fulfillment_id)!.status).toBe("cancelled");
-    expect(core.money.balance(wallet.wallet_id)).toMatchObject({
+    expect(await core.money.balance(wallet.wallet_id)).toMatchObject({
       posted_minor: 20_000,
       held_minor: 0,
     });
     expect(
-      core.outbox.all().filter((r) => r.event.event_type === "core.fulfillment.cancelled"),
+      (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.cancelled"),
     ).toHaveLength(1);
     // A late completion for a cancelled fulfillment is refused.
     await expect(
@@ -264,11 +261,11 @@ describe("WASLA vertical slice", () => {
     );
     await settle();
 
-    const fulfillment = core.fulfillment.findByOrderReference("order-7")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-7"))!;
     expect(fulfillment.status).toBe("failed");
     expect(fulfillment.closure_reason).toBe("no_capacity");
     expect(market.orders.get("order-7")!.status).toBe("failed");
-    expect(core.money.balance(wallet.wallet_id)).toMatchObject({
+    expect(await core.money.balance(wallet.wallet_id)).toMatchObject({
       posted_minor: 20_000,
       held_minor: 0,
     });
@@ -286,27 +283,27 @@ describe("WASLA vertical slice", () => {
       }),
     );
     await settle();
-    const fulfillment = core.fulfillment.findByOrderReference("order-8")!;
+    const fulfillment = (await core.fulfillment.findByOrderReference("order-8"))!;
     const job = move.jobFor(fulfillment.fulfillment_id)!;
     await core.bus.publish(move.completion(job.job_id, "completed", "corr-8"));
     await settle();
 
     const before = {
-      fulfillment: core.fulfillment.require(fulfillment.fulfillment_id),
+      fulfillment: await core.fulfillment.require(fulfillment.fulfillment_id),
       order: { ...market.orders.get("order-8")! },
       jobs: move.jobs.size,
-      events: core.outbox.all().length,
+      events: (await core.outbox.all()).length,
     };
 
     // Restart of the relay: every published event is delivered a second time.
-    for (const record of core.outbox.all()) {
+    for (const record of await core.outbox.all()) {
       await core.bus.publish(record.event);
     }
 
-    expect(core.fulfillment.require(fulfillment.fulfillment_id)).toEqual(before.fulfillment);
+    expect(await core.fulfillment.require(fulfillment.fulfillment_id)).toEqual(before.fulfillment);
     expect(market.orders.get("order-8")).toEqual(before.order);
     expect(move.jobs.size).toBe(before.jobs);
-    expect(core.outbox.all().length).toBe(before.events);
+    expect((await core.outbox.all()).length).toBe(before.events);
     expect(core.bus.deadLetters).toHaveLength(0);
   });
 });

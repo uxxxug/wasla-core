@@ -1,3 +1,4 @@
+import type { TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
 import { newId } from "../ids.js";
 
@@ -18,9 +19,9 @@ export interface AuditEntry {
 }
 
 export interface AuditLog {
-  record(entry: Omit<AuditEntry, "audit_id" | "occurred_at">): AuditEntry;
-  entries(): readonly AuditEntry[];
-  forEntity(entityType: string, entityId: string): AuditEntry[];
+  record(entry: Omit<AuditEntry, "audit_id" | "occurred_at">, scope?: TransactionScope): Promise<AuditEntry>;
+  entries(): Promise<readonly AuditEntry[]>;
+  forEntity(entityType: string, entityId: string): Promise<AuditEntry[]>;
 }
 
 const SENSITIVE = /token|secret|password|authorization|api[_-]?key/i;
@@ -38,7 +39,7 @@ export class InMemoryAuditLog implements AuditLog {
   private log: AuditEntry[] = [];
   constructor(private readonly clock: Clock) {}
 
-  record(entry: Omit<AuditEntry, "audit_id" | "occurred_at">): AuditEntry {
+  async record(entry: Omit<AuditEntry, "audit_id" | "occurred_at">, _scope?: TransactionScope): Promise<AuditEntry> {
     const full: AuditEntry = {
       ...entry,
       metadata: scrub(entry.metadata),
@@ -49,11 +50,11 @@ export class InMemoryAuditLog implements AuditLog {
     return full;
   }
 
-  entries(): readonly AuditEntry[] {
+  async entries(): Promise<readonly AuditEntry[]> {
     return this.log;
   }
 
-  forEntity(entityType: string, entityId: string): AuditEntry[] {
+  async forEntity(entityType: string, entityId: string): Promise<AuditEntry[]> {
     return this.log.filter((e) => e.entity_type === entityType && e.entity_id === entityId);
   }
 }

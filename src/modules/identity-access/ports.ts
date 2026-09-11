@@ -1,25 +1,26 @@
+import type { TransactionScope } from "../../platform/persistence/transaction.js";
 import type { ChannelType, Identity, IdentityLink, Membership, Principal, Session } from "./domain.js";
 
 export interface IdentityRepository {
-  insertIdentity(identity: Identity): void;
-  getIdentity(identityId: string): Identity | undefined;
-  updateIdentity(identity: Identity): void;
-  listIdentities(): Identity[];
+  insertIdentity(identity: Identity, scope: TransactionScope): Promise<void>;
+  getIdentity(identityId: string): Promise<Identity | undefined>;
+  updateIdentity(identity: Identity, scope: TransactionScope): Promise<void>;
+  listIdentities(): Promise<Identity[]>;
 
-  insertLink(link: IdentityLink): void;
-  findLink(channelType: ChannelType, externalId: string): IdentityLink | undefined;
-  listLinksForIdentity(identityId: string): IdentityLink[];
+  insertLink(link: IdentityLink, scope: TransactionScope): Promise<void>;
+  findLink(channelType: ChannelType, externalId: string): Promise<IdentityLink | undefined>;
+  listLinksForIdentity(identityId: string): Promise<IdentityLink[]>;
 
-  insertPrincipal(principal: Principal): void;
-  getPrincipal(principalId: string): Principal | undefined;
-  findPrincipalByIdentity(identityId: string): Principal | undefined;
+  insertPrincipal(principal: Principal, scope: TransactionScope): Promise<void>;
+  getPrincipal(principalId: string): Promise<Principal | undefined>;
+  findPrincipalByIdentity(identityId: string): Promise<Principal | undefined>;
 
-  insertSession(session: Session): void;
-  getSessionByTokenHash(tokenHash: string): Session | undefined;
-  getSession(sessionId: string): Session | undefined;
-  updateSession(session: Session): void;
+  insertSession(session: Session, scope: TransactionScope): Promise<void>;
+  getSessionByTokenHash(tokenHash: string): Promise<Session | undefined>;
+  getSession(sessionId: string): Promise<Session | undefined>;
+  updateSession(session: Session, scope: TransactionScope): Promise<void>;
 
-  insertMembership(membership: Membership): void;
-  listMemberships(principalId: string): Membership[];
-  findMembership(principalId: string, organizationId: string): Membership | undefined;
+  insertMembership(membership: Membership, scope: TransactionScope): Promise<void>;
+  listMemberships(principalId: string): Promise<Membership[]>;
+  findMembership(principalId: string, organizationId: string): Promise<Membership | undefined>;
 }

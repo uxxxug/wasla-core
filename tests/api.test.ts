@@ -9,7 +9,7 @@ async function bootstrapAdmin() {
     external_id: "root-admin",
     correlation_id: "bootstrap",
   });
-  core.identity.grantMembership({
+  await core.identity.grantMembership({
     principal_id: registered.principal.principal_id,
     organization_id: "org-root",
     roles: ["platform_admin"],
@@ -103,7 +103,7 @@ describe("HTTP surface", () => {
       external_id: "owner",
       correlation_id: "c",
     });
-    core.identity.grantMembership({
+    await core.identity.grantMembership({
       principal_id: owner.principal.principal_id,
       organization_id: "org-a",
       roles: ["org_admin"],
@@ -115,7 +115,7 @@ describe("HTTP surface", () => {
       correlation_id: "c",
     });
 
-    const organization = core.organization.create({
+    const organization = await core.organization.create({
       name: "Other Org",
       country_code: "SA",
       correlation_id: "c",
@@ -151,11 +151,11 @@ describe("HTTP surface", () => {
 describe("audit trail", () => {
   it("records every state change and redacts sensitive metadata", async () => {
     const { core } = await bootstrapAdmin();
-    const actions = core.audit.entries().map((e) => e.action);
+    const actions = (await core.audit.entries()).map((e) => e.action);
     expect(actions).toContain("identity.registered");
     expect(actions).toContain("membership.granted");
     expect(actions).toContain("session.issued");
-    for (const entry of core.audit.entries()) {
+    for (const entry of await core.audit.entries()) {
       expect(JSON.stringify(entry.metadata)).not.toMatch(/Bearer /);
     }
   });

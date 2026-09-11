@@ -20,7 +20,7 @@ describe("identity registration", () => {
     expect(result.identity.status).toBe("active");
     expect(result.identity.canonical_identity_id).toBeNull();
 
-    const events = core.outbox.all();
+    const events = await core.outbox.all();
     expect(events).toHaveLength(1);
     expect(events[0]!.event.event_type).toBe("core.identity.verified");
     expect(events[0]!.event.correlation_id).toBe("corr-1");
@@ -44,7 +44,7 @@ describe("identity registration", () => {
     expect(second.created).toBe(false);
     expect(second.identity.identity_id).toBe(first.identity.identity_id);
     expect(second.principal.principal_id).toBe(first.principal.principal_id);
-    expect(core.outbox.all()).toHaveLength(1);
+    expect(await core.outbox.all()).toHaveLength(1);
   });
 
   it("never merges two identities automatically", async () => {
@@ -89,7 +89,7 @@ describe("sessions and authentication", () => {
     });
 
     expect(session.token_hash).not.toBe(token);
-    const actor = core.identity.authenticate(token);
+    const actor = await core.identity.authenticate(token);
     expect(actor.principal_id).toBe(registered.principal.principal_id);
     expect(actor.session_id).toBe(session.session_id);
   });
@@ -107,13 +107,13 @@ describe("sessions and authentication", () => {
       correlation_id: "c",
     });
 
-    expect(() => core.identity.authenticate("not-a-token")).toThrow(/unknown session token/);
+    await expect(core.identity.authenticate("not-a-token")).rejects.toThrow(/unknown session token/);
 
     core.clock.advance(13 * 60 * 60 * 1000);
-    expect(() => core.identity.authenticate(token)).toThrow(/expired or revoked/);
+    await expect(core.identity.authenticate(token)).rejects.toThrow(/expired or revoked/);
 
-    core.identity.revokeSession(session.session_id, "c");
-    expect(() => core.identity.authenticate(token)).toThrow();
+    await core.identity.revokeSession(session.session_id, "c");
+    await expect(core.identity.authenticate(token)).rejects.toThrow();
   });
 });
 
@@ -125,7 +125,7 @@ describe("authorization and tenant isolation", () => {
       external_id: "member",
       correlation_id: "c",
     });
-    core.identity.grantMembership({
+    await core.identity.grantMembership({
       principal_id: registered.principal.principal_id,
       organization_id: "org-1",
       roles: ["org_member"],
@@ -136,12 +136,10 @@ describe("authorization and tenant isolation", () => {
       channel_type: "web",
       correlation_id: "c",
     });
-    const actor = core.identity.authenticate(token);
+    const actor = await core.identity.authenticate(token);
 
     expect(() => core.identity.authorize(actor, "organization.read", "org-1")).not.toThrow();
-    expect(() => core.identity.authorize(actor, "organization.write", "org-1")).toThrow(
-      /missing permission/,
-    );
+    expect(() => core.identity.authorize(actor, "organization.write", "org-1")).toThrow(/missing permission/);
   });
 
   it("blocks access to an organization the principal does not belong to", async () => {
@@ -151,7 +149,7 @@ describe("authorization and tenant isolation", () => {
       external_id: "admin-of-org-1",
       correlation_id: "c",
     });
-    core.identity.grantMembership({
+    await core.identity.grantMembership({
       principal_id: registered.principal.principal_id,
       organization_id: "org-1",
       roles: ["org_admin"],
@@ -162,10 +160,8 @@ describe("authorization and tenant isolation", () => {
       channel_type: "web",
       correlation_id: "c",
     });
-    const actor = core.identity.authenticate(token);
+    const actor = await core.identity.authenticate(token);
 
-    expect(() => core.identity.authorize(actor, "organization.read", "org-2")).toThrow(
-      /not a member/,
-    );
+    expect(() => core.identity.authorize(actor, "organization.read", "org-2")).toThrow(/not a member/);
   });
 });

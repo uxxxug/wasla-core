@@ -9,8 +9,8 @@ export function registerOrganizationRoutes(
   organizations: OrganizationService,
   identity: IdentityService,
 ): void {
-  router.post("/v1/organizations", (ctx) => {
-    requirePrincipal(ctx, identity, "organization.write");
+  router.post("/v1/organizations", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
     if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
     const input = ctx.body as Record<string, unknown>;
     const name = input["name"];
@@ -25,9 +25,9 @@ export function registerOrganizationRoutes(
     return { status: 201, body: organization };
   });
 
-  router.get("/v1/organizations/:organization_id", (ctx) => {
+  router.get("/v1/organizations/:organization_id", async (ctx) => {
     const organizationId = ctx.params["organization_id"]!;
-    requirePrincipal(ctx, identity, "organization.read", organizationId);
+    await requirePrincipal(ctx, identity, "organization.read", organizationId);
     return { status: 200, body: organizations.require(organizationId) };
   });
 }

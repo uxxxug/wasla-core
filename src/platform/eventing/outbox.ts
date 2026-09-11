@@ -1,4 +1,5 @@
 import type { Clock } from "../clock.js";
+import type { TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
@@ -17,20 +18,21 @@ export interface OutboxRecord {
  * exposing append only through a unit of work.
  */
 export interface OutboxStore {
-  append(event: EventEnvelope): void;
-  claimDue(now: Date, limit: number): OutboxRecord[];
-  markPublished(eventId: string): void;
-  markFailed(eventId: string, error: string, nextAttemptAt: Date): void;
-  markDead(eventId: string, error: string): void;
-  all(): OutboxRecord[];
-  byStatus(status: OutboxStatus): OutboxRecord[];
+  /** MUST run inside the caller's transaction; the scope is how it joins it. */
+  append(event: EventEnvelope, scope: TransactionScope): Promise<void>;
+  claimDue(now: Date, limit: number): Promise<OutboxRecord[]>;
+  markPublished(eventId: string): Promise<void>;
+  markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
+  markDead(eventId: string, error: string): Promise<void>;
+  all(): Promise<OutboxRecord[]>;
+  byStatus(status: OutboxStatus): Promise<OutboxRecord[]>;
 }
 
 export class InMemoryOutbox implements OutboxStore {
   private records = new Map<string, OutboxRecord>();
   constructor(private readonly clock: Clock) {}
 
-  append(event: EventEnvelope): void {
+  async append(event: EventEnvelope, _scope?: TransactionScope): Promise<void> {
     if (this.records.has(event.event_id)) return;
     this.records.set(event.event_id, {
       event,
@@ -41,7 +43,7 @@ export class InMemoryOutbox implements OutboxStore {
     });
   }
 
-  claimDue(now: Date, limit: number): OutboxRecord[] {
+  async claimDue(now: Date, limit: number): Promise<OutboxRecord[]> {
     const due: OutboxRecord[] = [];
     for (const record of this.records.values()) {
       if (record.status !== "pending") continue;
@@ -52,14 +54,14 @@ export class InMemoryOutbox implements OutboxStore {
     return due;
   }
 
-  markPublished(eventId: string): void {
+  async markPublished(eventId: string): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
     record.status = "published";
     record.last_error = null;
   }
 
-  markFailed(eventId: string, error: string, nextAttemptAt: Date): void {
+  async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
     record.attempts += 1;
@@ -67,7 +69,7 @@ export class InMemoryOutbox implements OutboxStore {
     record.next_attempt_at = nextAttemptAt.toISOString();
   }
 
-  markDead(eventId: string, error: string): void {
+  async markDead(eventId: string, error: string): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
     record.attempts += 1;
@@ -75,11 +77,11 @@ export class InMemoryOutbox implements OutboxStore {
     record.last_error = error;
   }
 
-  all(): OutboxRecord[] {
+  async all(): Promise<OutboxRecord[]> {
     return [...this.records.values()];
   }
 
-  byStatus(status: OutboxStatus): OutboxRecord[] {
-    return this.all().filter((r) => r.status === status);
+  async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {
+    return (await this.all()).filter((r: OutboxRecord) => r.status === status);
   }
 }

@@ -5,10 +5,10 @@
  */
 export interface InboxStore {
   /** Returns true when this consumer has not seen the event before. */
-  claim(consumer: string, eventId: string): boolean;
-  seen(consumer: string, eventId: string): boolean;
-  release(consumer: string, eventId: string): void;
-  size(): number;
+  claim(consumer: string, eventId: string): Promise<boolean>;
+  seen(consumer: string, eventId: string): Promise<boolean>;
+  release(consumer: string, eventId: string): Promise<void>;
+  size(): Promise<number>;
 }
 
 export class InMemoryInbox implements InboxStore {
@@ -16,20 +16,20 @@ export class InMemoryInbox implements InboxStore {
   private key(consumer: string, eventId: string) {
     return `${consumer}::${eventId}`;
   }
-  claim(consumer: string, eventId: string): boolean {
+  async claim(consumer: string, eventId: string): Promise<boolean> {
     const key = this.key(consumer, eventId);
     if (this.entries.has(key)) return false;
     this.entries.add(key);
     return true;
   }
-  seen(consumer: string, eventId: string): boolean {
+  async seen(consumer: string, eventId: string): Promise<boolean> {
     return this.entries.has(this.key(consumer, eventId));
   }
   /** Used when a handler fails so the event can be retried. */
-  release(consumer: string, eventId: string): void {
+  async release(consumer: string, eventId: string): Promise<void> {
     this.entries.delete(this.key(consumer, eventId));
   }
-  size(): number {
+  async size(): Promise<number> {
     return this.entries.size;
   }
 }

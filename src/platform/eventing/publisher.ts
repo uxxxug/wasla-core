@@ -23,22 +23,22 @@ export class OutboxPublisher {
 
   async drainOnce(limit = 100): Promise<PublisherResult> {
     const now = this.clock.now();
-    const due = this.outbox.claimDue(now, limit);
+    const due = await this.outbox.claimDue(now, limit);
     const result: PublisherResult = { published: 0, failed: 0, dead: 0 };
 
     for (const record of due) {
       try {
         await this.bus.publish(record.event);
-        this.outbox.markPublished(record.event.event_id);
+        await this.outbox.markPublished(record.event.event_id);
         result.published += 1;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (record.attempts + 1 >= this.maxAttempts) {
-          this.outbox.markDead(record.event.event_id, message);
+          await this.outbox.markDead(record.event.event_id, message);
           result.dead += 1;
         } else {
           const delay = this.baseBackoffMs * 2 ** record.attempts;
-          this.outbox.markFailed(
+          await this.outbox.markFailed(
             record.event.event_id,
             message,
             new Date(now.getTime() + delay),

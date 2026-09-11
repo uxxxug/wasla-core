@@ -1,3 +1,4 @@
+import { NO_SCOPE, type TransactionScope } from "../../platform/persistence/transaction.js";
 import type { Clock } from "../../platform/clock.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import { invalid, notFound } from "../../platform/errors.js";
@@ -5,20 +6,20 @@ import { newId } from "../../platform/ids.js";
 import type { Organization } from "./domain.js";
 
 export interface OrganizationRepository {
-  insert(organization: Organization): void;
-  get(organizationId: string): Organization | undefined;
-  list(): Organization[];
+  insert(organization: Organization, scope: TransactionScope): Promise<void>;
+  get(organizationId: string): Promise<Organization | undefined>;
+  list(): Promise<Organization[]>;
 }
 
 export class InMemoryOrganizationRepository implements OrganizationRepository {
   private rows = new Map<string, Organization>();
-  insert(organization: Organization): void {
+  async insert(organization: Organization, _scope?: TransactionScope): Promise<void> {
     this.rows.set(organization.organization_id, organization);
   }
-  get(organizationId: string): Organization | undefined {
+  async get(organizationId: string): Promise<Organization | undefined> {
     return this.rows.get(organizationId);
   }
-  list(): Organization[] {
+  async list(): Promise<Organization[]> {
     return [...this.rows.values()];
   }
 }
@@ -30,13 +31,13 @@ export class OrganizationService {
     private readonly clock: Clock,
   ) {}
 
-  create(input: {
+  async create(input: {
     name: string;
     country_code: string;
     correlation_id: string;
     source_system?: string;
     legacy_id?: string | null;
-  }): Organization {
+  }): Promise<Organization> {
     if (!input.name.trim()) throw invalid("name is required");
     if (!/^[A-Z]{2}$/.test(input.country_code)) throw invalid("country_code must be ISO 3166-1 alpha-2");
     const now = this.clock.now().toISOString();
@@ -50,8 +51,8 @@ export class OrganizationService {
       source_system: input.source_system ?? "wasla-core",
       legacy_id: input.legacy_id ?? null,
     };
-    this.repo.insert(organization);
-    this.audit.record({
+    await this.repo.insert(organization, NO_SCOPE);
+    await this.audit.record({
       actor_type: "system",
       actor_id: null,
       action: "organization.created",
@@ -63,8 +64,8 @@ export class OrganizationService {
     return organization;
   }
 
-  require(organizationId: string): Organization {
-    const organization = this.repo.get(organizationId);
+  async require(organizationId: string): Promise<Organization> {
+    const organization = await this.repo.get(organizationId);
     if (!organization) throw notFound("organization not found");
     return organization;
   }

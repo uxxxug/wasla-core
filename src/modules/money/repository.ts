@@ -1,18 +1,19 @@
+import type { TransactionScope } from "../../platform/persistence/transaction.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
 
 export interface MoneyRepository {
-  insertWallet(wallet: Wallet): void;
-  getWallet(walletId: string): Wallet | undefined;
-  findWallet(ownerType: Wallet["owner_type"], ownerId: string, currency: string): Wallet | undefined;
-  insertAuthorization(authorization: PaymentAuthorization): void;
-  getAuthorization(authorizationId: string): PaymentAuthorization | undefined;
-  findAuthorizationByReference(reference: string): PaymentAuthorization | undefined;
-  listAuthorizations(walletId: string): readonly PaymentAuthorization[];
-  allAuthorizations(): readonly PaymentAuthorization[];
-  updateAuthorization(authorization: PaymentAuthorization): void;
-  insertTransaction(transaction: LedgerTransaction): void;
-  findTransactionByReference(reference: string): LedgerTransaction | undefined;
-  transactions(): readonly LedgerTransaction[];
+  insertWallet(wallet: Wallet, scope: TransactionScope): Promise<void>;
+  getWallet(walletId: string): Promise<Wallet | undefined>;
+  findWallet(ownerType: Wallet["owner_type"], ownerId: string, currency: string): Promise<Wallet | undefined>;
+  insertAuthorization(authorization: PaymentAuthorization, scope: TransactionScope): Promise<void>;
+  getAuthorization(authorizationId: string): Promise<PaymentAuthorization | undefined>;
+  findAuthorizationByReference(reference: string): Promise<PaymentAuthorization | undefined>;
+  listAuthorizations(walletId: string): Promise<readonly PaymentAuthorization[]>;
+  allAuthorizations(): Promise<readonly PaymentAuthorization[]>;
+  updateAuthorization(authorization: PaymentAuthorization, scope: TransactionScope): Promise<void>;
+  insertTransaction(transaction: LedgerTransaction, scope: TransactionScope): Promise<void>;
+  findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined>;
+  transactions(): Promise<readonly LedgerTransaction[]>;
 }
 
 export class InMemoryMoneyRepository implements MoneyRepository {
@@ -20,42 +21,42 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   private authorizations = new Map<string, PaymentAuthorization>();
   private ledger = new Map<string, LedgerTransaction>();
 
-  insertWallet(wallet: Wallet): void {
+  async insertWallet(wallet: Wallet, _scope?: TransactionScope): Promise<void> {
     this.wallets.set(wallet.wallet_id, wallet);
   }
-  getWallet(walletId: string): Wallet | undefined {
+  async getWallet(walletId: string): Promise<Wallet | undefined> {
     return this.wallets.get(walletId);
   }
-  findWallet(ownerType: Wallet["owner_type"], ownerId: string, currency: string): Wallet | undefined {
+  async findWallet(ownerType: Wallet["owner_type"], ownerId: string, currency: string): Promise<Wallet | undefined> {
     return [...this.wallets.values()].find(
       (wallet) => wallet.owner_type === ownerType && wallet.owner_id === ownerId && wallet.currency === currency,
     );
   }
-  insertAuthorization(authorization: PaymentAuthorization): void {
+  async insertAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.authorizations.set(authorization.authorization_id, authorization);
   }
-  getAuthorization(authorizationId: string): PaymentAuthorization | undefined {
+  async getAuthorization(authorizationId: string): Promise<PaymentAuthorization | undefined> {
     return this.authorizations.get(authorizationId);
   }
-  findAuthorizationByReference(reference: string): PaymentAuthorization | undefined {
+  async findAuthorizationByReference(reference: string): Promise<PaymentAuthorization | undefined> {
     return [...this.authorizations.values()].find((item) => item.business_reference === reference);
   }
-  listAuthorizations(walletId: string): readonly PaymentAuthorization[] {
+  async listAuthorizations(walletId: string): Promise<readonly PaymentAuthorization[]> {
     return [...this.authorizations.values()].filter((item) => item.wallet_id === walletId);
   }
-  allAuthorizations(): readonly PaymentAuthorization[] {
+  async allAuthorizations(): Promise<readonly PaymentAuthorization[]> {
     return [...this.authorizations.values()];
   }
-  updateAuthorization(authorization: PaymentAuthorization): void {
+  async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.authorizations.set(authorization.authorization_id, authorization);
   }
-  insertTransaction(transaction: LedgerTransaction): void {
+  async insertTransaction(transaction: LedgerTransaction, _scope?: TransactionScope): Promise<void> {
     this.ledger.set(transaction.transaction_id, transaction);
   }
-  findTransactionByReference(reference: string): LedgerTransaction | undefined {
+  async findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined> {
     return [...this.ledger.values()].find((item) => item.business_reference === reference);
   }
-  transactions(): readonly LedgerTransaction[] {
+  async transactions(): Promise<readonly LedgerTransaction[]> {
     return [...this.ledger.values()];
   }
 }

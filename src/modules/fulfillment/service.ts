@@ -1,3 +1,7 @@
+import type {
+  TransactionBoundary,
+  TransactionScope,
+} from "../../platform/persistence/transaction.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
@@ -20,29 +24,29 @@ import { isClosed, isFinanciallyConsistent } from "./domain.js";
 const PRODUCER = "wasla-core";
 
 export interface FulfillmentRepository {
-  insert(fulfillment: Fulfillment): void;
-  update(fulfillment: Fulfillment): void;
-  get(fulfillmentId: string): Fulfillment | undefined;
-  findByOrderReference(orderReference: string): Fulfillment | undefined;
+  insert(fulfillment: Fulfillment, scope: TransactionScope): Promise<void>;
+  update(fulfillment: Fulfillment, scope: TransactionScope): Promise<void>;
+  get(fulfillmentId: string): Promise<Fulfillment | undefined>;
+  findByOrderReference(orderReference: string): Promise<Fulfillment | undefined>;
   /** Used by reconciliation reads only; a Postgres adapter must filter in SQL. */
-  all(): readonly Fulfillment[];
+  all(): Promise<readonly Fulfillment[]>;
 }
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   private rows = new Map<string, Fulfillment>();
-  insert(fulfillment: Fulfillment): void {
+  async insert(fulfillment: Fulfillment, _scope?: TransactionScope): Promise<void> {
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
-  update(fulfillment: Fulfillment): void {
+  async update(fulfillment: Fulfillment, _scope?: TransactionScope): Promise<void> {
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
-  get(fulfillmentId: string): Fulfillment | undefined {
+  async get(fulfillmentId: string): Promise<Fulfillment | undefined> {
     return this.rows.get(fulfillmentId);
   }
-  findByOrderReference(orderReference: string): Fulfillment | undefined {
+  async findByOrderReference(orderReference: string): Promise<Fulfillment | undefined> {
     return [...this.rows.values()].find((item) => item.market_order_reference === orderReference);
   }
-  all(): readonly Fulfillment[] {
+  async all(): Promise<readonly Fulfillment[]> {
     return [...this.rows.values()];
   }
 }
@@ -62,10 +66,10 @@ export interface FulfillmentPaymentPort {
    * Reads a hold without changing it. Used at intake to refuse work that can
    * never be settled. Throws when the authorization does not exist.
    */
-  getAuthorization?(authorizationId: string): {
+  getAuthorization?(authorizationId: string): Promise<{
     status: string;
     expires_at: string | null;
-  };
+  }>;
 }
 
 interface HoldInspection {
@@ -78,6 +82,7 @@ export class FulfillmentService {
   constructor(
     private readonly repo: FulfillmentRepository,
     private readonly outbox: OutboxStore,
+    private readonly boundary: TransactionBoundary,
     private readonly audit: AuditLog,
     private readonly clock: Clock,
     private readonly payments?: FulfillmentPaymentPort,
@@ -100,10 +105,10 @@ export class FulfillmentService {
     if (!payload.order_id || !payload.organization_id || !payload.requested_service) {
       throw invalid("market.order.created payload is incomplete");
     }
-    const existing = this.repo.findByOrderReference(payload.order_id);
+    const existing = await this.repo.findByOrderReference(payload.order_id);
     if (existing) return existing;
     const authorizationId = payload.payment_authorization_id ?? null;
-    const hold = this.inspectHold(authorizationId);
+    const hold = await this.inspectHold(authorizationId);
     const fulfillment: Fulfillment = {
       fulfillment_id: newId(),
       organization_id: payload.organization_id,
@@ -132,16 +137,16 @@ export class FulfillmentService {
         completed_at: this.clock.now().toISOString(),
         closure_reason: hold.reason,
       };
-      await withTransaction(this.outbox, (uow) => {
-        uow.stage(() => this.repo.insert(refused));
+      await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+        uow.stage((scope) => this.repo.insert(refused, scope));
         uow.emit(this.closureEvent(refused, event.correlation_id, event.event_id));
       });
-      this.recordAudit("fulfillment.refused", refused, event.correlation_id);
+      await this.recordAudit("fulfillment.refused", refused, event.correlation_id);
       return refused;
     }
 
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.insert(fulfillment));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.insert(fulfillment, scope));
       uow.emit(
         makeEvent({
           event_type: "core.fulfillment.created",
@@ -161,7 +166,7 @@ export class FulfillmentService {
         }),
       );
     });
-    this.recordAudit("fulfillment.created", fulfillment, event.correlation_id);
+    await this.recordAudit("fulfillment.created", fulfillment, event.correlation_id);
     return fulfillment;
   }
 
@@ -187,14 +192,14 @@ export class FulfillmentService {
     if (!payload.fulfillment_id || !payload.job_id || !payload.accepted_at) {
       throw invalid("move.job.accepted payload is incomplete");
     }
-    const current = this.require(payload.fulfillment_id);
+    const current = await this.require(payload.fulfillment_id);
     if (current.status === "cancelled") {
       if (current.move_job_reference === payload.job_id) return current;
       const traced: Fulfillment = { ...current, move_job_reference: payload.job_id };
-      await withTransaction(this.outbox, (uow) => {
-        uow.stage(() => this.repo.update(traced));
+      await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+        uow.stage((scope) => this.repo.update(traced, scope));
       });
-      this.recordAudit("fulfillment.acceptance_after_cancellation", traced, event.correlation_id);
+      await this.recordAudit("fulfillment.acceptance_after_cancellation", traced, event.correlation_id);
       return traced;
     }
     if (isClosed(current.status)) {
@@ -211,8 +216,8 @@ export class FulfillmentService {
       move_job_reference: payload.job_id,
       status: "dispatched",
     };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.update(updated));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.update(updated, scope));
       uow.emit(
         makeEvent({
           event_type: "core.fulfillment.dispatched",
@@ -232,7 +237,7 @@ export class FulfillmentService {
         }),
       );
     });
-    this.recordAudit("fulfillment.dispatched", updated, event.correlation_id);
+    await this.recordAudit("fulfillment.dispatched", updated, event.correlation_id);
     return updated;
   }
 
@@ -245,7 +250,7 @@ export class FulfillmentService {
     if (!payload.fulfillment_id || !payload.reason) {
       throw invalid("move.job.rejected payload is incomplete");
     }
-    const current = this.require(payload.fulfillment_id);
+    const current = await this.require(payload.fulfillment_id);
     if (current.status === "failed") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
     const settlement = await this.release(current, `move_rejected:${payload.reason}`, event.correlation_id);
@@ -266,7 +271,7 @@ export class FulfillmentService {
     if (!payload.fulfillment_id || !payload.job_id || !payload.outcome || !payload.completed_at) {
       throw invalid("move.job.completed payload is incomplete");
     }
-    const current = this.require(payload.fulfillment_id);
+    const current = await this.require(payload.fulfillment_id);
     if (isClosed(current.status)) {
       if (current.status === "cancelled") throw conflict("fulfillment was cancelled");
       if (current.move_job_reference !== payload.job_id) {
@@ -298,11 +303,11 @@ export class FulfillmentService {
       completed_at: payload.completed_at,
       closure_reason: reason,
     };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.update(closed));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.update(closed, scope));
       uow.emit(this.closureEvent(closed, event.correlation_id, event.event_id));
     });
-    this.recordAudit("fulfillment.closed", closed, event.correlation_id);
+    await this.recordAudit("fulfillment.closed", closed, event.correlation_id);
     return closed;
   }
 
@@ -312,7 +317,7 @@ export class FulfillmentService {
     reason: string;
     correlation_id: string;
   }): Promise<Fulfillment> {
-    const current = this.require(input.fulfillment_id);
+    const current = await this.require(input.fulfillment_id);
     if (!input.reason.trim()) throw invalid("reason is required");
     if (current.status === "cancelled") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
@@ -335,21 +340,20 @@ export class FulfillmentService {
    * Reconciliation read: fulfillments whose execution state and money state
    * disagree. An empty result is the invariant CORE is expected to hold.
    */
-  listFinanciallyInconsistent(organizationId?: string): readonly Fulfillment[] {
-    return this.repo
-      .all()
+  async listFinanciallyInconsistent(organizationId?: string): Promise<readonly Fulfillment[]> {
+    return (await this.repo.all())
       .filter((item) => !organizationId || item.organization_id === organizationId)
       .filter((item) => !isFinanciallyConsistent(item));
   }
 
-  require(fulfillmentId: string): Fulfillment {
-    const fulfillment = this.repo.get(fulfillmentId);
+  async require(fulfillmentId: string): Promise<Fulfillment> {
+    const fulfillment = await this.repo.get(fulfillmentId);
     if (!fulfillment) throw notFound("fulfillment not found");
     return fulfillment;
   }
 
-  findByOrderReference(orderReference: string): Fulfillment | undefined {
-    return this.repo.findByOrderReference(orderReference);
+  async findByOrderReference(orderReference: string): Promise<Fulfillment | undefined> {
+    return await this.repo.findByOrderReference(orderReference);
   }
 
   private async close(
@@ -367,11 +371,11 @@ export class FulfillmentService {
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
-    await withTransaction(this.outbox, (uow) => {
-      uow.stage(() => this.repo.update(closed));
+    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      uow.stage((scope) => this.repo.update(closed, scope));
       uow.emit(this.closureEvent(closed, correlationId, causationId));
     });
-    this.recordAudit(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId);
+    await this.recordAudit(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId);
     return closed;
   }
 
@@ -455,7 +459,7 @@ export class FulfillmentService {
       });
       return "released";
     } catch (err) {
-      this.audit.record({
+      await this.audit.record({
         actor_type: "service",
         actor_id: null,
         action: "fulfillment.settlement_inconsistent",
@@ -481,14 +485,14 @@ export class FulfillmentService {
    * cannot verify, so the declared hold is trusted and capture-time failure
    * remains the backstop.
    */
-  private inspectHold(authorizationId: string | null): HoldInspection {
+  private async inspectHold(authorizationId: string | null): Promise<HoldInspection> {
     if (!authorizationId) return { usable: true, settlement: "none", reason: null };
     if (!this.payments?.getAuthorization) {
       return { usable: true, settlement: "held", reason: null };
     }
     let authorization: { status: string; expires_at: string | null };
     try {
-      authorization = this.payments.getAuthorization(authorizationId);
+      authorization = await this.payments.getAuthorization(authorizationId);
     } catch {
       return { usable: false, settlement: "none", reason: "payment_hold_not_found" };
     }
@@ -509,8 +513,8 @@ export class FulfillmentService {
     return { usable: true, settlement: "held", reason: null };
   }
 
-  private recordAudit(action: string, fulfillment: Fulfillment, correlationId: string): void {
-    this.audit.record({
+  private async recordAudit(action: string, fulfillment: Fulfillment, correlationId: string): Promise<void> {
+    await this.audit.record({
       actor_type: "service",
       actor_id: null,
       action,

@@ -18,7 +18,7 @@ const files = walk(SRC).filter((f) => f.endsWith(".ts"));
  * fails CI.
  */
 describe("architecture governance", () => {
-  it("CORE contains no MOVE- or MARKET-owned domain entities", () => {
+  it("CORE contains no MOVE- or MARKET-owned domain entities", async () => {
     const forbidden = [
       /\bdriver\b/i,
       /\bdispatch\b/i,
@@ -45,7 +45,7 @@ describe("architecture governance", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("no secrets, tokens or credentials are hardcoded", () => {
+  it("no secrets, tokens or credentials are hardcoded", async () => {
     const patterns = [
       /sk_live_[A-Za-z0-9]/,
       /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
@@ -61,7 +61,7 @@ describe("architecture governance", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("modules do not reach into each other's internals", () => {
+  it("modules do not reach into each other's internals", async () => {
     const offenders: string[] = [];
     for (const file of files) {
       if (!file.includes("/modules/")) continue;
@@ -83,7 +83,7 @@ describe("architecture governance", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("has no TODO or FIXME masquerading as an implementation", () => {
+  it("has no TODO or FIXME masquerading as an implementation", async () => {
     const offenders = files.filter((file) => /TODO|FIXME|XXX/.test(readFileSync(file, "utf8")));
     expect(offenders).toEqual([]);
   });

@@ -1,7 +1,7 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** Migrations 0001–0005 executed against a real PostgreSQL instance for the first time, which exposed and closed a ledger-integrity hole (0006).
+**Last milestone:** Every persistence port converted to an asynchronous contract with an explicit transaction boundary, which is what a database adapter needs in order to exist at all.
 **Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
@@ -75,17 +75,18 @@ Nothing is mid-change in the working tree. Remote publication and remote CI are
 fast-forward, and the CI workflow runs and passes there — confirmed against the
 Actions API on 2026-09-11 rather than assumed from the previous text.
 
-The next substantial step is the Postgres repository adapters. They are no
-longer blocked: a database was provided, migrations 0001–0006 are applied and
-verified on it, and `tests/db-schema.test.ts` asserts the schema-level
-guarantees whenever `DATABASE_URL` is present.
+The Postgres adapters themselves are the next step, and the port refactor
+described below is what makes them possible. The composition root still wires
+the in-memory adapters; nothing has changed about which implementation runs.
 
 ## Remaining, in dependency order
 
-1. Postgres adapters for the identity and organization ports; run migration
-   0001 against a provisioned database.
+1. Postgres adapters behind the now-asynchronous ports, starting with identity
+   and organization. The schema and the transaction boundary they need both
+   exist; what remains is the SQL and the row mapping.
 2. Settlement (payment authorization void/expiry now implemented, ADR 0005).
-3. Postgres adapter for the geography and money ports.
+3. Postgres adapters for the geography, money and fulfillment ports, plus the
+   outbox and inbox, so a unit of work never spans two backends.
 4. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
 5. Channels and notifications; Telegram adapter.
 6. Durable external event ingress/transport for the implemented Fulfillment contracts.
@@ -117,6 +118,7 @@ Nothing.
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
+| B-9 | Audit entries and geography writes happen outside the unit of work. With in-memory adapters this is invisible; with Postgres adapters an audit entry could survive a rolled-back command | Audit trail could record a state change that never committed | Thread the scope through `AuditLog.record` and give geography a boundary, as part of the adapter work rather than before it |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -353,3 +355,56 @@ published at all.
 - Any production or staging deployment.
 - Any data migration, reconciliation or cutover.
 - Performance and load characteristics.
+
+### The ports could not have had a database adapter
+
+This cycle's finding is not a bug in behaviour. It is that the next roadmap item
+was impossible as written, and the roadmap did not say so.
+
+Every persistence port was synchronous:
+
+```ts
+getIdentity(identityId: string): Identity | undefined;
+insertIdentity(identity: Identity): void;
+append(event: EventEnvelope): void;
+```
+
+No database adapter can implement those signatures. A query returns a promise,
+so `getIdentity` cannot hand back an `Identity` in the same tick, and `void`
+gives an adapter nowhere to report that a write failed. The unit of work had the
+same problem from the other direction: `stage(mutation: () => void)` buffered
+closures that took no argument, so two staged writes had no shared handle and
+therefore no way to land in one transaction. Its own comment said the Postgres
+implementation "will map onto a real transaction" — with that signature it
+could not have.
+
+So the ports were the blocker, not the schema and not the missing database.
+
+| Change | Why |
+|---|---|
+| Every repository, outbox, inbox and audit method returns a promise | A durable adapter cannot answer synchronously |
+| `TransactionBoundary.run(work)` in `src/platform/persistence/transaction.ts` | Gives `withTransaction` something to open and close; the in-memory boundary keeps the existing staged-rollback semantics, a Postgres boundary maps to `BEGIN`/`COMMIT`/`ROLLBACK` |
+| Writes take a `TransactionScope`; staged mutations receive it | Two writes in one unit of work now share a handle, which is what makes them atomic in a real engine. A write that ignores the scope escapes the transaction — that is now visible in the signature rather than impossible to express |
+| `TransactionContext { boundary, outbox }` passed to `withTransaction` | The commit point stays one obvious place instead of spreading into the services |
+
+Deliberately left synchronous: `IdentityService.authorize`, which is a pure
+check against an already-authenticated actor and reads no repository. Making it
+async would have added an await to every route for nothing.
+
+Also honest about what this did not fix: audit entries are still written
+outside the unit of work, and geography writes one row per command with no
+transaction at all. Neither is wrong today — audit is append-only and geography
+is reference data — but when the Postgres adapters land, an audit entry for a
+rolled-back command would survive. That is recorded as B-9 rather than quietly
+fixed in a refactor commit.
+
+`tests/transaction-boundary.test.ts` (6 tests) asserts the boundary is really
+used: a recording boundary proves `begin`/`commit` wrap both the mutation and
+the outbox append, that every staged mutation receives the same scope, that a
+throw in the work *or* in a staged mutation produces `rollback` with nothing
+appended, and that mutations are applied before the append rather than after.
+
+The refactor touched all five modules, the eventing platform, the composition
+root and all 11 test files. The suite result is unchanged — 71 passing, same
+tests, same assertions — which is the point: this is a contract change with no
+behavioural change.

@@ -51,7 +51,7 @@ export class LocalEventBus implements EventBus {
   }
 
   private async deliver(sub: Subscription, event: EventEnvelope): Promise<void> {
-    if (!this.inbox.claim(sub.consumer, event.event_id)) return; // duplicate delivery
+    if (!(await this.inbox.claim(sub.consumer, event.event_id))) return; // duplicate delivery
     let attempts = 0;
     let lastError = "";
     while (attempts < this.maxAttempts) {
@@ -61,7 +61,7 @@ export class LocalEventBus implements EventBus {
         return;
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
-        this.inbox.release(sub.consumer, event.event_id);
+        await this.inbox.release(sub.consumer, event.event_id);
         if (attempts < this.maxAttempts) {
           this.inbox.claim(sub.consumer, event.event_id);
         }

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { createCoreApp, type CoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
+import { InMemoryTransactionBoundary } from "../src/platform/persistence/transaction.js";
 import { makeEvent, type EventEnvelope } from "../src/platform/eventing/envelope.js";
 import { isFinanciallyConsistent } from "../src/modules/fulfillment/domain.js";
 import {
@@ -65,7 +66,7 @@ function completion(
 
 /** A wallet funded with `amount` minor units plus a hold of the same amount. */
 async function fundedHold(core: CoreApp, reference: string, amount = 5_000) {
-  const { wallet } = core.money.createWallet({
+  const { wallet } = await core.money.createWallet({
     owner_type: "organization",
     owner_id: `org-${reference}`,
     currency: "SAR",
@@ -86,9 +87,8 @@ async function fundedHold(core: CoreApp, reference: string, amount = 5_000) {
   return { wallet, authorization };
 }
 
-function closureEvent(core: CoreApp, fulfillmentId: string) {
-  const record = core.outbox
-    .all()
+async function closureEvent(core: CoreApp, fulfillmentId: string) {
+  const record = (await core.outbox.all())
     .find(
       (r) =>
         r.event.entity_id === fulfillmentId &&
@@ -107,19 +107,19 @@ describe("settlement state binds money to execution", () => {
       fundedOrder(core, "order-s1", authorization.authorization_id),
     );
     expect(created.settlement_state).toBe("held");
-    expect(core.money.balance(wallet.wallet_id).held_minor).toBe(5_000);
+    expect((await core.money.balance(wallet.wallet_id)).held_minor).toBe(5_000);
 
     const closed = await core.fulfillment.consumeMoveCompletion(
       completion(core, created.fulfillment_id, "job-s1", "completed"),
     );
     expect(closed).toMatchObject({ status: "completed", settlement_state: "captured" });
-    expect(core.money.getAuthorization(authorization.authorization_id).status).toBe("captured");
-    expect(core.money.balance(wallet.wallet_id)).toMatchObject({
+    expect((await core.money.getAuthorization(authorization.authorization_id)).status).toBe("captured");
+    expect(await core.money.balance(wallet.wallet_id)).toMatchObject({
       held_minor: 0,
       posted_minor: 0,
     });
     expect(isFinanciallyConsistent(closed)).toBe(true);
-    expect(core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+    expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
   });
 
   it("releases the hold when MOVE reports a failed execution", async () => {
@@ -134,9 +134,9 @@ describe("settlement state binds money to execution", () => {
     );
 
     expect(closed).toMatchObject({ status: "failed", settlement_state: "released" });
-    expect(core.money.getAuthorization(authorization.authorization_id).status).toBe("voided");
-    expect(core.money.balance(wallet.wallet_id).available_minor).toBe(5_000);
-    expect(core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+    expect((await core.money.getAuthorization(authorization.authorization_id)).status).toBe("voided");
+    expect((await core.money.balance(wallet.wallet_id)).available_minor).toBe(5_000);
+    expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
   });
 
   it("releases the hold on cancellation and on MOVE rejection", async () => {
@@ -153,7 +153,7 @@ describe("settlement state binds money to execution", () => {
       correlation_id: CORRELATION,
     });
     expect(cancelled).toMatchObject({ status: "cancelled", settlement_state: "released" });
-    expect(core.money.balance(cancelHold.wallet.wallet_id).held_minor).toBe(0);
+    expect((await core.money.balance(cancelHold.wallet.wallet_id)).held_minor).toBe(0);
 
     const toReject = await core.fulfillment.consumeMarketOrder(
       fundedOrder(core, "order-s4", rejectHold.authorization.authorization_id),
@@ -175,8 +175,8 @@ describe("settlement state binds money to execution", () => {
       }),
     );
     expect(rejected).toMatchObject({ status: "failed", settlement_state: "released" });
-    expect(core.money.balance(rejectHold.wallet.wallet_id).held_minor).toBe(0);
-    expect(core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+    expect((await core.money.balance(rejectHold.wallet.wallet_id)).held_minor).toBe(0);
+    expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
   });
 
   it("publishes the settlement state on the closure contract", async () => {
@@ -189,7 +189,7 @@ describe("settlement state binds money to execution", () => {
       completion(core, created.fulfillment_id, "job-s5", "completed"),
     );
 
-    const event = closureEvent(core, created.fulfillment_id);
+    const event = await closureEvent(core, created.fulfillment_id);
     expect(event?.payload).toMatchObject({ outcome: "completed", settlement_state: "captured" });
   });
 });
@@ -207,13 +207,13 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
       closure_reason: "payment_hold_not_found",
     });
     expect(
-      core.outbox.all().filter((r) => r.event.event_type === "core.fulfillment.created"),
+      (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.created"),
     ).toHaveLength(0);
-    expect(closureEvent(core, refused.fulfillment_id)?.payload).toMatchObject({
+    expect((await closureEvent(core, refused.fulfillment_id))?.payload).toMatchObject({
       outcome: "failed",
       reason: "payment_hold_not_found",
     });
-    expect(core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+    expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
   });
 
   it("refuses an order whose hold has already expired and releases it", async () => {
@@ -246,8 +246,8 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
       settlement_state: "released",
       closure_reason: "payment_hold_expired",
     });
-    expect(core.money.getAuthorization(shortHold.authorization_id).status).toBe("voided");
-    expect(core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+    expect((await core.money.getAuthorization(shortHold.authorization_id)).status).toBe("voided");
+    expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
   });
 
   it("refuses an order whose hold was already voided", async () => {
@@ -274,7 +274,7 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
     const created = await core.fulfillment.consumeMarketOrder(fundedOrder(core, "order-s9", null));
     expect(created).toMatchObject({ status: "coordinating", settlement_state: "none" });
     expect(
-      core.outbox.all().filter((r) => r.event.event_type === "core.fulfillment.created"),
+      (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.created"),
     ).toHaveLength(1);
   });
 });
@@ -289,7 +289,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
       voidAuthorization: async () => {
         throw new Error("a captured authorization cannot be voided");
       },
-      getAuthorization: () => ({ status: "authorized", expires_at: null }),
+      getAuthorization: async () => ({ status: "authorized", expires_at: null }),
     };
   }
 
@@ -300,6 +300,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
     const service = new FulfillmentService(
       new InMemoryFulfillmentRepository(),
       outbox,
+      new InMemoryTransactionBoundary(),
       audit,
       clock,
       brokenPort(),
@@ -338,12 +339,12 @@ describe("an unreleasable hold is reported, never swallowed", () => {
 
     expect(cancelled).toMatchObject({ status: "cancelled", settlement_state: "unsettled" });
     expect(isFinanciallyConsistent(cancelled)).toBe(false);
-    const inconsistency = audit
-      .forEntity("fulfillment", created.fulfillment_id)
-      .find((entry) => entry.action === "fulfillment.settlement_inconsistent");
+    const inconsistency = (await audit.forEntity("fulfillment", created.fulfillment_id)).find(
+      (entry) => entry.action === "fulfillment.settlement_inconsistent",
+    );
     expect(inconsistency).toBeDefined();
     expect(inconsistency?.metadata).toMatchObject({ attempted: "void" });
-    expect(service.listFinanciallyInconsistent()).toHaveLength(1);
+    expect(await service.listFinanciallyInconsistent()).toHaveLength(1);
   });
 
   it("never reports success when the hold could not be captured", async () => {
@@ -400,7 +401,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
       correlation_id: CORRELATION,
     });
 
-    expect(service.listFinanciallyInconsistent("org-1")).toHaveLength(1);
-    expect(service.listFinanciallyInconsistent("org-other")).toHaveLength(0);
+    expect(await service.listFinanciallyInconsistent("org-1")).toHaveLength(1);
+    expect(await service.listFinanciallyInconsistent("org-other")).toHaveLength(0);
   });
 });
