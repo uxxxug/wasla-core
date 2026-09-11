@@ -28,6 +28,18 @@ import {
   NO_SCOPE,
   type TransactionBoundary,
 } from "../src/platform/persistence/transaction.js";
+import {
+  InMemoryFulfillmentRepository,
+  type FulfillmentRepository,
+} from "../src/modules/fulfillment/service.js";
+import { PgFulfillmentRepository } from "../src/modules/fulfillment/pg-repository.js";
+import {
+  InMemoryGeographyRepository,
+  type GeographyRepository,
+} from "../src/modules/geography/repository.js";
+import { PgGeographyRepository } from "../src/modules/geography/pg-repository.js";
+import { InMemoryMoneyRepository, type MoneyRepository } from "../src/modules/money/repository.js";
+import { PgMoneyRepository } from "../src/modules/money/pg-repository.js";
 import { InMemoryIdentityRepository } from "../src/modules/identity-access/memory-repository.js";
 import { PgIdentityRepository } from "../src/modules/identity-access/pg-repository.js";
 import type { IdentityRepository } from "../src/modules/identity-access/ports.js";
@@ -43,6 +55,9 @@ const AT = "2026-01-01T00:00:00.000Z";
 interface Backend {
   identity: IdentityRepository;
   organization: OrganizationRepository;
+  geography: GeographyRepository;
+  money: MoneyRepository;
+  fulfillment: FulfillmentRepository;
   outbox: OutboxStore;
   inbox: InboxStore;
   boundary: TransactionBoundary;
@@ -102,6 +117,9 @@ function memoryHarness(): Harness {
       return {
         identity: new InMemoryIdentityRepository(),
         organization: new InMemoryOrganizationRepository(),
+        geography: new InMemoryGeographyRepository(),
+        money: new InMemoryMoneyRepository(),
+        fulfillment: new InMemoryFulfillmentRepository(),
         outbox: new InMemoryOutbox(clock),
         inbox: new InMemoryInbox(),
         boundary: new InMemoryTransactionBoundary(),
@@ -132,6 +150,9 @@ function postgresHarness(url: string): Harness {
       return {
         identity: new PgIdentityRepository(p),
         organization: new PgOrganizationRepository(p),
+        geography: new PgGeographyRepository(p),
+        money: new PgMoneyRepository(p),
+        fulfillment: new PgFulfillmentRepository(p),
         outbox: new PgOutbox(p, clock),
         inbox: new PgInbox(p, clock),
         boundary: new PgTransactionBoundary(p),
@@ -141,7 +162,9 @@ function postgresHarness(url: string): Harness {
       const p = await getPool();
       await p.query(
         `truncate membership, session, principal, identity_link, identity,
-         organization, outbox, inbox restart identity cascade`,
+         organization, outbox, inbox, fulfillment, ledger_entry,
+         ledger_transaction, payment_authorization, wallet, service_area,
+         city, region, country restart identity cascade`,
       );
     },
     async close() {
@@ -345,6 +368,229 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       await backend.inbox.release("move", id);
       expect(await backend.inbox.seen("move", id)).toBe(false);
       expect(await backend.inbox.claim("move", id)).toBe(true);
+    });
+  });
+
+  describe("geography", () => {
+    it("round-trips a country, region, city and service area", async () => {
+      const country = {
+        country_code: "SA",
+        name: "Saudi Arabia",
+        default_currency: "SAR",
+        status: "active" as const,
+      };
+      await backend.geography.upsertCountry(country, NO_SCOPE);
+      expect(await backend.geography.getCountry("SA")).toEqual(country);
+
+      const region = {
+        region_id: randomUUID(),
+        country_code: "SA",
+        code: "MAKKAH",
+        name: "Mecca Region",
+        status: "active" as const,
+      };
+      await backend.geography.insertRegion(region, NO_SCOPE);
+      expect(await backend.geography.getRegion(region.region_id)).toEqual(region);
+      expect(await backend.geography.findRegion("SA", "MAKKAH")).toEqual(region);
+      expect(await backend.geography.listRegions("SA")).toEqual([region]);
+
+      const city = {
+        city_id: randomUUID(),
+        region_id: region.region_id,
+        country_code: "SA",
+        name: "Jeddah",
+        latitude: 21.4858,
+        longitude: 39.1925,
+        status: "active" as const,
+      };
+      await backend.geography.insertCity(city, NO_SCOPE);
+      expect(await backend.geography.getCity(city.city_id)).toEqual(city);
+      expect(await backend.geography.listCities(region.region_id)).toEqual([city]);
+
+      const area = {
+        service_area_id: randomUUID(),
+        city_id: city.city_id,
+        country_code: "SA",
+        name: "Jeddah North",
+        centre_latitude: 21.6,
+        centre_longitude: 39.15,
+        radius_metres: 15_000,
+        status: "active" as const,
+      };
+      await backend.geography.insertServiceArea(area, NO_SCOPE);
+      expect(await backend.geography.getServiceArea(area.service_area_id)).toEqual(area);
+      expect(await backend.geography.listServiceAreas("SA")).toEqual([area]);
+      expect(await backend.geography.listServiceAreas()).toEqual([area]);
+      expect(await backend.geography.listServiceAreas("AE")).toEqual([]);
+    });
+
+    it("treats upsertCountry as an update, not a duplicate", async () => {
+      const country = {
+        country_code: "SA",
+        name: "Saudi Arabia",
+        default_currency: "SAR",
+        status: "active" as const,
+      };
+      await backend.geography.upsertCountry(country, NO_SCOPE);
+      await backend.geography.upsertCountry({ ...country, status: "inactive" }, NO_SCOPE);
+
+      expect(await backend.geography.listCountries()).toHaveLength(1);
+      expect((await backend.geography.getCountry("SA"))?.status).toBe("inactive");
+    });
+  });
+
+  describe("money", () => {
+    it("round-trips a wallet and finds it by owner and currency", async () => {
+      const wallet = {
+        wallet_id: randomUUID(),
+        owner_type: "organization" as const,
+        owner_id: randomUUID(),
+        currency: "SAR",
+        status: "active" as const,
+        created_at: AT,
+      };
+      await backend.money.insertWallet(wallet, NO_SCOPE);
+
+      expect(await backend.money.getWallet(wallet.wallet_id)).toEqual(wallet);
+      expect(
+        await backend.money.findWallet("organization", wallet.owner_id, "SAR"),
+      ).toEqual(wallet);
+      expect(await backend.money.findWallet("organization", wallet.owner_id, "USD")).toBeUndefined();
+    });
+
+    it("keeps an authorization's amount an integer through the round trip", async () => {
+      const wallet = {
+        wallet_id: randomUUID(),
+        owner_type: "organization" as const,
+        owner_id: randomUUID(),
+        currency: "SAR",
+        status: "active" as const,
+        created_at: AT,
+      };
+      await backend.money.insertWallet(wallet, NO_SCOPE);
+
+      const authorization = {
+        authorization_id: randomUUID(),
+        wallet_id: wallet.wallet_id,
+        amount_minor: 5_000,
+        currency: "SAR",
+        status: "authorized" as const,
+        business_reference: "order-1",
+        created_at: AT,
+        captured_at: null,
+        voided_at: null,
+        expires_at: "2026-01-02T00:00:00.000Z",
+        void_reason: null,
+      };
+      await backend.money.insertAuthorization(authorization, NO_SCOPE);
+
+      const stored = await backend.money.getAuthorization(authorization.authorization_id);
+      expect(stored).toEqual(authorization);
+      // bigint arrives from the driver as a string; a missed conversion would
+      // make this a "5000" that still passes a loose comparison.
+      expect(typeof stored?.amount_minor).toBe("number");
+
+      expect(await backend.money.findAuthorizationByReference("order-1")).toEqual(authorization);
+      expect(await backend.money.listAuthorizations(wallet.wallet_id)).toEqual([authorization]);
+      expect(await backend.money.allAuthorizations()).toEqual([authorization]);
+
+      const captured = { ...authorization, status: "captured" as const, captured_at: AT };
+      await backend.money.updateAuthorization(captured, NO_SCOPE);
+      expect(await backend.money.getAuthorization(authorization.authorization_id)).toEqual(
+        captured,
+      );
+    });
+
+    it("stores a balanced ledger transaction with its entries", async () => {
+      const transactionId = randomUUID();
+      const transaction = {
+        transaction_id: transactionId,
+        kind: "credit" as const,
+        business_reference: "deposit-1",
+        occurred_at: AT,
+        entries: [
+          {
+            entry_id: randomUUID(),
+            transaction_id: transactionId,
+            account_reference: "wallet:funds",
+            amount_minor: 20_000,
+            currency: "SAR",
+          },
+          {
+            entry_id: randomUUID(),
+            transaction_id: transactionId,
+            account_reference: "external:topup",
+            amount_minor: -20_000,
+            currency: "SAR",
+          },
+        ],
+      };
+
+      // The ledger balance trigger is checked at COMMIT, so the header and its
+      // entries have to reach it together. Writing through a unit of work is
+      // the only correct way, and the adapter refuses anything else.
+      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        uow.stage((scope) => backend.money.insertTransaction(transaction, scope));
+      });
+
+      const stored = await backend.money.findTransactionByReference("deposit-1");
+      expect(stored?.transaction_id).toBe(transactionId);
+      expect(stored?.entries).toHaveLength(2);
+      expect(stored?.entries.reduce((sum, entry) => sum + entry.amount_minor, 0)).toBe(0);
+      expect(await backend.money.transactions()).toHaveLength(1);
+    });
+  });
+
+  describe("fulfillment", () => {
+    it("round-trips a fulfillment and updates it in place", async () => {
+      const org = organization();
+      await backend.organization.insert(org, NO_SCOPE);
+
+      const created = {
+        fulfillment_id: randomUUID(),
+        organization_id: org.organization_id,
+        market_order_reference: "order-1",
+        move_job_reference: null,
+        payment_authorization_id: null,
+        status: "coordinating" as const,
+        settlement_state: "none" as const,
+        created_at: AT,
+        completed_at: null,
+        closure_reason: null,
+      };
+      await backend.fulfillment.insert(created, NO_SCOPE);
+      expect(await backend.fulfillment.get(created.fulfillment_id)).toEqual(created);
+      expect(await backend.fulfillment.findByOrderReference("order-1")).toEqual(created);
+      expect(await backend.fulfillment.findByOrderReference("absent")).toBeUndefined();
+
+      const dispatched = {
+        ...created,
+        status: "dispatched" as const,
+        move_job_reference: "job-1",
+      };
+      await backend.fulfillment.update(dispatched, NO_SCOPE);
+      expect(await backend.fulfillment.get(created.fulfillment_id)).toEqual(dispatched);
+      expect(await backend.fulfillment.all()).toHaveLength(1);
+    });
+
+    it("stores a completed fulfillment with its captured settlement state", async () => {
+      const org = organization();
+      await backend.organization.insert(org, NO_SCOPE);
+
+      const completed = {
+        fulfillment_id: randomUUID(),
+        organization_id: org.organization_id,
+        market_order_reference: "order-2",
+        move_job_reference: "job-2",
+        payment_authorization_id: null,
+        status: "completed" as const,
+        settlement_state: "captured" as const,
+        created_at: AT,
+        completed_at: "2026-01-01T03:00:00.000Z",
+        closure_reason: "delivered",
+      };
+      await backend.fulfillment.insert(completed, NO_SCOPE);
+      expect(await backend.fulfillment.get(completed.fulfillment_id)).toEqual(completed);
     });
   });
 

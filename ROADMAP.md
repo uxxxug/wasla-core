@@ -1,7 +1,7 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** First real persistence adapters — identity, organization, outbox and inbox on Postgres, behind a `BEGIN`/`COMMIT`/`ROLLBACK` transaction boundary, verified by running identical assertions against the in-memory and Postgres adapters.
+**Last milestone:** Every port has a Postgres adapter and the whole coordination flow — MARKET → CORE → MOVE → CORE → MARKET, including the money capture — now runs against a real database. 155 tests pass with `DATABASE_URL` set.
 **Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
@@ -81,24 +81,20 @@ the in-memory adapters; nothing has changed about which implementation runs.
 
 ## Remaining, in dependency order
 
-1. Postgres adapters for the geography, money and fulfillment ports. Identity,
-   organization, outbox and inbox are done; until the rest follow, the
-   composition root stays on the in-memory adapters, because a unit of work
-   split across two backends would not be atomic and pretending otherwise
-   would be worse than waiting.
-2. Settlement (payment authorization void/expiry now implemented, ADR 0005).
-3. A composition-root switch selecting the persistence backend, once every
-   port has an adapter, so a unit of work never spans two backends.
-4. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
-5. Channels and notifications; Telegram adapter.
-6. Durable external event ingress/transport for the implemented Fulfillment contracts.
-7. Publish and adopt the versioned contracts in MOVE and MARKET.
-8. End-to-end vertical slice: identity → commercial order → fulfillment →
-   operational job → execution → completion → commercial reaction.
-9. Event normalisation and historical replay tooling.
-10. Migration and reconciliation tooling; dry runs.
-11. Security hardening pass and observability export.
-12. Staging readiness, cutover and rollback rehearsal.
+1. Settlement beyond the single hold-per-fulfillment case: partial capture,
+   refunds and multi-hold orders. The states exist in the schema; the service
+   only drives `held -> captured | released` today.
+2. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
+3. Channels and notifications; Telegram adapter.
+4. Durable external event ingress/transport for the implemented Fulfillment contracts.
+5. Publish and adopt the versioned contracts in MOVE and MARKET.
+6. Event normalisation and historical replay tooling.
+7. Migration and reconciliation tooling; dry runs.
+8. Security hardening pass and observability export.
+9. Staging readiness, cutover and rollback rehearsal.
+
+The end-to-end vertical slice that used to sit in this list is done, on both
+backends: `tests/vertical-slice.test.ts` and `tests/vertical-slice-postgres.test.ts`.
 
 ## Migrated
 
@@ -445,3 +441,40 @@ Two things this cycle deliberately did not do:
   only defers writes, it does not journal them. Postgres has no such gap. Both
   behaviours are now asserted explicitly and the difference is recorded as
   B-10.
+
+### Every port has a Postgres adapter, and the slice runs on it
+
+The remaining adapters — geography, money, fulfillment and the audit trail —
+are implemented, and the composition root can now select a backend.
+
+| File | Notes |
+|---|---|
+| `src/modules/geography/pg-repository.ts` | Reference data. `char` columns are trimmed on read, otherwise a value written as `SA` comes back padded and compares unequal |
+| `src/modules/money/pg-repository.ts` | `amount_minor` is `bigint`, which the driver returns as a string; converting in one named place is why the conformance test asserts `typeof amount_minor === "number"`. `insertTransaction` **refuses to run outside a transaction**: the balance trigger is deferred to `COMMIT`, so a header written by itself would trip it and the error would read like a balance bug instead of a missing transaction |
+| `src/modules/fulfillment/pg-repository.ts` | MARKET and MOVE references stay opaque strings, exactly as in the domain. `fulfillment_settlement_alignment_check` means the database refuses any status/settlement pair the service should never have produced |
+| `src/platform/audit/pg-audit.ts` | Append-only, with the same metadata scrubber as the in-memory log, so a credential cannot reach the table through this path either |
+| `src/platform/persistence/backends.ts` | `memoryPersistence(clock)` and `postgresPersistence(pool, clock)` return one bundle. Selecting adapters individually is deliberately not possible: a `Map` repository next to a Postgres outbox compiles, runs, and is not atomic |
+
+`createCoreApp({ clock, persistence })` takes the bundle and `/ready` reports
+which one is wired, so the backend is observable rather than assumed. CORE
+still never reads an environment variable or imports the driver in `src/`: the
+caller builds the pool and owns its lifetime.
+
+**`tests/vertical-slice-postgres.test.ts`** is the test this whole sequence was
+for. The in-memory slice proves the coordination logic; it cannot prove that
+logic survives a real database, because a `Map` never rejects a row, never
+enforces a foreign key and never applies a check constraint. The same
+MARKET → CORE → MOVE → CORE → MARKET flow now runs on Postgres and covers
+completion with capture, rejection with release, duplicate delivery of every
+event, a fully drained outbox with nothing dead, and the audit trail landing in
+the table.
+
+Result with `DATABASE_URL` set: **155 tests pass**, 100 of them in the
+dependency-free default run.
+
+One thing the database changed that the in-memory suite never could: the
+existing tests use identifiers like `"org-1"`, which Postgres rejects because
+`organization_id` is a `uuid` with a foreign key. The Postgres slice creates a
+real organization first. That is not a test inconvenience — it is the schema
+refusing a reference that was never valid, which is the reason to run the
+suite against it.
