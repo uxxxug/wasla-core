@@ -10,6 +10,7 @@ import type { EventEnvelope } from "../../platform/eventing/envelope.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
 import { withTransaction } from "../../platform/eventing/unit-of-work.js";
+import { journalMapWrite } from "../../platform/persistence/transaction.js";
 import type {
   Fulfillment,
   FulfillmentStatus,
@@ -34,10 +35,12 @@ export interface FulfillmentRepository {
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   private rows = new Map<string, Fulfillment>();
-  async insert(fulfillment: Fulfillment, _scope?: TransactionScope): Promise<void> {
+  async insert(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
+    journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
-  async update(fulfillment: Fulfillment, _scope?: TransactionScope): Promise<void> {
+  async update(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
+    journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
   async get(fulfillmentId: string): Promise<Fulfillment | undefined> {

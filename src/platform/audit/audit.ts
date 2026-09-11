@@ -1,4 +1,4 @@
-import type { TransactionScope } from "../persistence/transaction.js";
+import { journalAppend, type TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
 import { newId } from "../ids.js";
 
@@ -39,13 +39,17 @@ export class InMemoryAuditLog implements AuditLog {
   private log: AuditEntry[] = [];
   constructor(private readonly clock: Clock) {}
 
-  async record(entry: Omit<AuditEntry, "audit_id" | "occurred_at">, _scope?: TransactionScope): Promise<AuditEntry> {
+  async record(
+    entry: Omit<AuditEntry, "audit_id" | "occurred_at">,
+    scope?: TransactionScope,
+  ): Promise<AuditEntry> {
     const full: AuditEntry = {
       ...entry,
       metadata: scrub(entry.metadata),
       audit_id: newId(),
       occurred_at: this.clock.now().toISOString(),
     };
+    journalAppend(scope, this.log);
     this.log.push(full);
     return full;
   }

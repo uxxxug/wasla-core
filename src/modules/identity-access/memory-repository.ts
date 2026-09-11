@@ -1,4 +1,7 @@
-import type { TransactionScope } from "../../platform/persistence/transaction.js";
+import {
+  journalMapWrite,
+  type TransactionScope,
+} from "../../platform/persistence/transaction.js";
 import type { ChannelType, Identity, IdentityLink, Membership, Principal, Session } from "./domain.js";
 import type { IdentityRepository } from "./ports.js";
 
@@ -19,12 +22,14 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.identities, identity.identity_id);
     this.identities.set(identity.identity_id, identity);
   }
   async getIdentity(identityId: string): Promise<Identity | undefined> {
     return this.identities.get(identityId);
   }
   async updateIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.identities, identity.identity_id);
     this.identities.set(identity.identity_id, identity);
   }
   async listIdentities(): Promise<Identity[]> {
@@ -36,6 +41,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     if (this.links.has(key)) {
       throw new Error(`identity link already exists: ${key}`);
     }
+    journalMapWrite(_scope, this.links, key);
     this.links.set(key, link);
   }
   async findLink(channelType: ChannelType, externalId: string): Promise<IdentityLink | undefined> {
@@ -46,6 +52,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertPrincipal(principal: Principal, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.principals, principal.principal_id);
     this.principals.set(principal.principal_id, principal);
   }
   async getPrincipal(principalId: string): Promise<Principal | undefined> {
@@ -56,6 +63,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertSession(session: Session, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.sessions, session.session_id);
     this.sessions.set(session.session_id, session);
   }
   async getSessionByTokenHash(tokenHash: string): Promise<Session | undefined> {
@@ -65,10 +73,12 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     return this.sessions.get(sessionId);
   }
   async updateSession(session: Session, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.sessions, session.session_id);
     this.sessions.set(session.session_id, session);
   }
 
   async insertMembership(membership: Membership, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.memberships, membership.membership_id);
     this.memberships.set(membership.membership_id, membership);
   }
   async listMemberships(principalId: string): Promise<Membership[]> {

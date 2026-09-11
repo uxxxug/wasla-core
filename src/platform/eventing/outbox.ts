@@ -1,5 +1,5 @@
 import type { Clock } from "../clock.js";
-import type { TransactionScope } from "../persistence/transaction.js";
+import { journalMapWrite, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
@@ -32,8 +32,9 @@ export class InMemoryOutbox implements OutboxStore {
   private records = new Map<string, OutboxRecord>();
   constructor(private readonly clock: Clock) {}
 
-  async append(event: EventEnvelope, _scope?: TransactionScope): Promise<void> {
+  async append(event: EventEnvelope, scope?: TransactionScope): Promise<void> {
     if (this.records.has(event.event_id)) return;
+    journalMapWrite(scope, this.records, event.event_id);
     this.records.set(event.event_id, {
       event,
       status: "pending",

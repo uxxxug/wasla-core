@@ -1,4 +1,7 @@
-import type { TransactionScope } from "../../platform/persistence/transaction.js";
+import {
+  journalMapWrite,
+  type TransactionScope,
+} from "../../platform/persistence/transaction.js";
 import type { City, Country, Region, ServiceArea } from "./domain.js";
 
 export interface GeographyRepository {
@@ -24,6 +27,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   private areas = new Map<string, ServiceArea>();
 
   async upsertCountry(country: Country, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.countries, country.country_code);
     this.countries.set(country.country_code, country);
   }
   async getCountry(countryCode: string): Promise<Country | undefined> {
@@ -33,6 +37,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
     return [...this.countries.values()];
   }
   async insertRegion(region: Region, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.regions, region.region_id);
     this.regions.set(region.region_id, region);
   }
   async getRegion(regionId: string): Promise<Region | undefined> {
@@ -45,6 +50,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
     return [...this.regions.values()].filter((row) => row.country_code === countryCode);
   }
   async insertCity(city: City, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.cities, city.city_id);
     this.cities.set(city.city_id, city);
   }
   async getCity(cityId: string): Promise<City | undefined> {
@@ -54,6 +60,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
     return [...this.cities.values()].filter((row) => row.region_id === regionId);
   }
   async insertServiceArea(area: ServiceArea, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.areas, area.service_area_id);
     this.areas.set(area.service_area_id, area);
   }
   async getServiceArea(serviceAreaId: string): Promise<ServiceArea | undefined> {

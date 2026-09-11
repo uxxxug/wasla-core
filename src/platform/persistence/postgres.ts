@@ -1,5 +1,11 @@
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
-import { NO_SCOPE, type TransactionBoundary, type TransactionScope } from "./transaction.js";
+import {
+  assertNotNested,
+  insideTransaction,
+  NO_SCOPE,
+  type TransactionBoundary,
+  type TransactionScope,
+} from "./transaction.js";
 
 /**
  * The narrow slice of `pg` the adapters actually use. Declaring it here keeps
@@ -49,10 +55,13 @@ export class PgTransactionBoundary implements TransactionBoundary {
   constructor(private readonly pool: Pool) {}
 
   async run<T>(work: (scope: TransactionScope) => Promise<T>): Promise<T> {
+    // A nested run would take a *second* pooled connection and commit
+    // independently while the outer transaction was still open.
+    assertNotNested();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      const result = await work({ handle: client });
+      const result = await insideTransaction(() => work({ handle: client }));
       await client.query("commit");
       return result;
     } catch (error) {

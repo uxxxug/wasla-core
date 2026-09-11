@@ -1,4 +1,7 @@
-import type { TransactionScope } from "../../platform/persistence/transaction.js";
+import {
+  journalMapWrite,
+  type TransactionScope,
+} from "../../platform/persistence/transaction.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
 
 export interface MoneyRepository {
@@ -22,6 +25,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   private ledger = new Map<string, LedgerTransaction>();
 
   async insertWallet(wallet: Wallet, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.wallets, wallet.wallet_id);
     this.wallets.set(wallet.wallet_id, wallet);
   }
   async getWallet(walletId: string): Promise<Wallet | undefined> {
@@ -33,6 +37,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     );
   }
   async insertAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
     this.authorizations.set(authorization.authorization_id, authorization);
   }
   async getAuthorization(authorizationId: string): Promise<PaymentAuthorization | undefined> {
@@ -48,9 +53,11 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     return [...this.authorizations.values()];
   }
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
     this.authorizations.set(authorization.authorization_id, authorization);
   }
   async insertTransaction(transaction: LedgerTransaction, _scope?: TransactionScope): Promise<void> {
+    journalMapWrite(_scope, this.ledger, transaction.transaction_id);
     this.ledger.set(transaction.transaction_id, transaction);
   }
   async findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined> {

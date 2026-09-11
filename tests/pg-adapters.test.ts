@@ -25,6 +25,7 @@ import { withTransaction } from "../src/platform/eventing/unit-of-work.js";
 import { PgTransactionBoundary, type Queryable } from "../src/platform/persistence/postgres.js";
 import {
   InMemoryTransactionBoundary,
+  NestedTransactionError,
   NO_SCOPE,
   type TransactionBoundary,
 } from "../src/platform/persistence/transaction.js";
@@ -93,6 +94,17 @@ function identity(id = randomUUID()) {
     updated_at: AT,
     source_system: "core",
     legacy_id: null,
+  };
+}
+
+function identityLink(identityId: string, externalId = randomUUID()) {
+  return {
+    identity_link_id: randomUUID(),
+    identity_id: identityId,
+    channel_type: "telegram" as const,
+    external_id: externalId,
+    verified_at: null,
+    created_at: AT,
   };
 }
 
@@ -642,25 +654,101 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       // does, so a failure before it means no event was ever written.
       expect(await backend.outbox.all()).toHaveLength(0);
     });
+
+    /**
+     * This was B-10, and it used to be a Postgres-only assertion.
+     *
+     * Staging is not rollback: once the commit point starts applying staged
+     * writes, an earlier one has already landed when a later one throws.
+     * `InMemoryTransactionBoundary` now journals the inverse of every write it
+     * is given a scope for, so it unwinds like Postgres does, and this test
+     * therefore runs against both adapters instead of documenting a gap.
+     *
+     * The trigger is a duplicate identity link, which both adapters reject:
+     * the reference one on its own uniqueness check, Postgres on the unique
+     * index. Two writes have already succeeded at that point.
+     */
+    it("discards writes already applied earlier in the same transaction", async () => {
+      const org = organization();
+      const person = identity();
+      const link = identityLink(person.identity_id);
+
+      await expect(
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) => backend.organization.insert(org, scope));
+          uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+          uow.stage((scope) => backend.identity.insertLink(link, scope));
+          uow.stage((scope) => backend.identity.insertLink(link, scope));
+          uow.emit(event(org.organization_id));
+        }),
+      ).rejects.toThrow();
+
+      expect(await backend.organization.get(org.organization_id)).toBeUndefined();
+      expect(await backend.identity.getIdentity(person.identity_id)).toBeUndefined();
+      expect(await backend.identity.findLink("telegram", link.external_id)).toBeUndefined();
+      expect(await backend.outbox.all()).toHaveLength(0);
+    });
+
+    it("restores the previous value of a row the transaction overwrote", async () => {
+      const person = identity();
+      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+      });
+
+      await expect(
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) =>
+            backend.identity.updateIdentity({ ...person, display_name: "Renamed" }, scope),
+          );
+          uow.stage(async () => {
+            throw new Error("failed after the update");
+          });
+        }),
+      ).rejects.toThrow(/failed after the update/);
+
+      // Not merely absent — back to the committed value. A journal that only
+      // deleted keys would pass the previous test and fail this one.
+      expect((await backend.identity.getIdentity(person.identity_id))?.display_name).toBe("Sara");
+    });
+
+    it("refuses a transaction opened inside another one", async () => {
+      await expect(
+        backend.boundary.run(async () => {
+          await backend.boundary.run(async () => undefined);
+        }),
+      ).rejects.toThrow(NestedTransactionError);
+    });
+
+    it("keeps two concurrent transactions independent", async () => {
+      const kept = organization();
+      const discarded = organization();
+
+      const [, rejected] = await Promise.allSettled([
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) => backend.organization.insert(kept, scope));
+        }),
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) => backend.organization.insert(discarded, scope));
+          uow.stage(async () => {
+            throw new Error("second transaction fails");
+          });
+        }),
+      ]);
+
+      // The nesting guard keys off async context, not a flag on the boundary,
+      // so concurrency is not mistaken for nesting and one rollback does not
+      // reach into the other transaction.
+      expect(rejected.status).toBe("rejected");
+      expect(await backend.organization.get(kept.organization_id)).toEqual(kept);
+      expect(await backend.organization.get(discarded.organization_id)).toBeUndefined();
+    });
   });
 });
 
 /**
- * A divergence between the two adapters, asserted rather than assumed.
- *
- * `InMemoryTransactionBoundary` gets its rollback from the staging in
- * `withTransaction`: nothing is applied until the work returns. That covers a
- * command rejected by a domain rule, which is the common case, but it does not
- * cover a failure *between* two staged writes — the first one has already been
- * applied to the map and there is nothing to undo it with.
- *
- * Postgres has no such gap: ROLLBACK discards the earlier write too.
- *
- * The consequence is worth stating plainly. A test that passes against the
- * in-memory adapter has not proven the system is atomic under a mid-write
- * failure; only the Postgres pass proves that. Recorded as B-10.
+ * Postgres-only: the things a reference adapter cannot be asked to prove.
  */
-describe.skipIf(!DATABASE_URL)("postgres rolls back writes the reference adapter cannot", () => {
+describe.skipIf(!DATABASE_URL)("postgres transaction guarantees", () => {
   const harness = postgresHarness(DATABASE_URL ?? "");
   let backend: Backend;
 
@@ -673,7 +761,7 @@ describe.skipIf(!DATABASE_URL)("postgres rolls back writes the reference adapter
     await harness.close();
   });
 
-  it("discards a write already made earlier in the same transaction", async () => {
+  it("discards a write the database itself refused on a primary key", async () => {
     const org = organization();
     const person = identity();
 
@@ -681,7 +769,8 @@ describe.skipIf(!DATABASE_URL)("postgres rolls back writes the reference adapter
       withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
         uow.stage((scope) => backend.organization.insert(org, scope));
         uow.stage((scope) => backend.identity.insertIdentity(person, scope));
-        // Same primary key twice: the database refuses it.
+        // Same primary key twice. The reference adapter's map would simply
+        // overwrite, so only the database can reject this.
         uow.stage((scope) => backend.identity.insertIdentity(person, scope));
         uow.emit(event(org.organization_id));
       }),

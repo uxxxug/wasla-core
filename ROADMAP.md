@@ -117,7 +117,7 @@ Nothing.
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
 | B-9 | Audit entries and geography writes happen outside the unit of work. With in-memory adapters this is invisible; with Postgres adapters an audit entry could survive a rolled-back command | Audit trail could record a state change that never committed | Thread the scope through `AuditLog.record` and give geography a boundary, as part of the adapter work rather than before it |
-| B-10 | `InMemoryTransactionBoundary` cannot undo a staged write that already succeeded when a later write in the same unit of work fails. Postgres can, and `tests/pg-adapters.test.ts` asserts the difference instead of hiding it | A test passing on the in-memory adapter does not prove atomicity under a mid-write failure | Either an undo journal in the reference adapter, or accepting it and running the atomicity tests only against Postgres, which is what happens today |
+| B-10 | **Resolved.** `InMemoryTransactionBoundary` journals the inverse of every write it is given a scope for, so it unwinds like `ROLLBACK` does. The rollback tests that used to be Postgres-only now run against both adapters | resolved |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -478,3 +478,50 @@ existing tests use identifiers like `"org-1"`, which Postgres rejects because
 real organization first. That is not a test inconvenience — it is the schema
 refusing a reference that was never valid, which is the reason to run the
 suite against it.
+
+### B-10 resolved: the reference boundary has real rollback
+
+The gap was a specific one, and worth stating precisely because the old
+comment in `unit-of-work.ts` claimed it away: **staging is not rollback.**
+Deferring writes to a single commit point means a command rejected by a domain
+rule leaves nothing behind — that is the common case, and it worked. But once
+the commit point starts applying staged writes, a failure on the third has
+already let the first two land. Deferral narrows the window; it does not close
+it.
+
+`InMemoryTransactionBoundary` now opens a `MemoryJournal` and puts it in the
+scope. Every in-memory adapter calls `journalMapWrite(scope, map, key)` (or
+`journalAppend`) immediately *before* mutating, which records how to undo that
+write while the pre-image is still readable. A throw unwinds the journal in
+reverse order, so two writes to the same key undo last-first.
+
+Two consequences that make this more than a test fix:
+
+- A write given `NO_SCOPE` registers nothing and is not undone. That is not an
+  omission — it is the same thing Postgres does with a statement issued on the
+  pool, which autocommits and is equally impossible to take back. The two
+  implementations now agree about what a scope means.
+- An adapter that ignores the scope is now *provably* non-transactional rather
+  than accidentally fine, because the conformance suite runs the rollback tests
+  against both backends.
+
+Also unified: **nesting is refused by both boundaries.** It used to be refused
+only by Postgres, and only by accident of implementation. A nested
+`PgTransactionBoundary.run` takes a *second pooled connection*, so the inner
+work commits on its own while the outer transaction is still open — two
+transactions that look like one. The guard uses `AsyncLocalStorage`, not a flag
+on the boundary, because two concurrent HTTP requests legitimately open two
+independent transactions and a flag cannot tell that apart from real nesting.
+Both behaviours are asserted: `refuses a transaction opened inside another one`
+and `keeps two concurrent transactions independent`.
+
+New conformance tests, running on both backends:
+
+| Test | What it would catch |
+|---|---|
+| `discards writes already applied earlier in the same transaction` | The original B-10 gap. Trigger is a duplicate identity link, which both adapters reject on their own terms |
+| `restores the previous value of a row the transaction overwrote` | A journal that only deleted keys instead of restoring pre-images. This passes the test above and fails this one |
+| `refuses a transaction opened inside another one` | A service calling another service inside its own unit of work |
+| `keeps two concurrent transactions independent` | A nesting guard implemented as a flag, which would break concurrency |
+
+163 tests pass with `DATABASE_URL` set, 104 without.

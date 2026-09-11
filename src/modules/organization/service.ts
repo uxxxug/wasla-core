@@ -1,4 +1,8 @@
-import { NO_SCOPE, type TransactionScope } from "../../platform/persistence/transaction.js";
+import {
+  journalMapWrite,
+  NO_SCOPE,
+  type TransactionScope,
+} from "../../platform/persistence/transaction.js";
 import type { Clock } from "../../platform/clock.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import { invalid, notFound } from "../../platform/errors.js";
@@ -13,7 +17,8 @@ export interface OrganizationRepository {
 
 export class InMemoryOrganizationRepository implements OrganizationRepository {
   private rows = new Map<string, Organization>();
-  async insert(organization: Organization, _scope?: TransactionScope): Promise<void> {
+  async insert(organization: Organization, scope?: TransactionScope): Promise<void> {
+    journalMapWrite(scope, this.rows, organization.organization_id);
     this.rows.set(organization.organization_id, organization);
   }
   async get(organizationId: string): Promise<Organization | undefined> {
