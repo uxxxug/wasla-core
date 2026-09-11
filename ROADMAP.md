@@ -1,7 +1,7 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** Execution/money consistency made explicit — `settlement_state` on every fulfillment, holds verified at intake, and a reconciliation read.
+**Last milestone:** Migrations 0001–0005 executed against a real PostgreSQL instance for the first time, which exposed and closed a ledger-integrity hole (0006).
 **Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
@@ -75,9 +75,10 @@ Nothing is mid-change in the working tree. Remote publication and remote CI are
 fast-forward, and the CI workflow runs and passes there — confirmed against the
 Actions API on 2026-09-11 rather than assumed from the previous text.
 
-The next substantial step is blocked, not unstarted: migrations 0001–0005 need a
-real PostgreSQL instance (B-1) before the Postgres adapters can be written
-against anything verifiable.
+The next substantial step is the Postgres repository adapters. They are no
+longer blocked: a database was provided, migrations 0001–0006 are applied and
+verified on it, and `tests/db-schema.test.ts` asserts the schema-level
+guarantees whenever `DATABASE_URL` is present.
 
 ## Remaining, in dependency order
 
@@ -109,7 +110,7 @@ Nothing.
 
 | # | Blocker | Impact | What unblocks it |
 |---|---|---|---|
-| B-1 | No CORE database provisioned; no connection credentials | Migrations 0001–0005 are authored with rollbacks but **unexecuted**. Every schema guarantee they add — including the settlement alignment check — is unverified against a real engine; persistence runs on in-memory reference adapters | A PostgreSQL instance and credentials supplied through the environment, never committed. This is the single highest-value blocker to clear: the code is ready for it |
+| B-1 | *Resolved.* A PostgreSQL instance was provided and migrations 0001–0006 were applied and verified on it (PostgreSQL 17.6 managed, and PostgreSQL 18.4 locally). The full rollback chain was exercised. Persistence itself still runs on the in-memory reference adapters | Postgres repository adapters, now unblocked and next in line | — |
 | B-2 | Production data inventory unknown for Ceezr and Wasla | Identity, money and order migrations cannot be planned against real volumes or duplicates | Read access to production, or an exported inventory (row counts, duplicate profile) |
 | B-3 | Duplicate-identity merge policy undecided | Detection tooling can be built; no merge may execute | An owner decision on canonical selection and conflict rules |
 | B-4 | Regulatory pricing policy undecided (ADR 0012) | Pricing engine can be built rule-driven, but no rates may be fixed | A legal/regulatory decision |
@@ -233,6 +234,51 @@ MARKET were not touched; anything they must implement is recorded under
   available again; the sweep still releases it formally and the ledger is never
   touched by expiry. No existing balance field changed meaning for a wallet
   without expiring holds.
+
+### Migrations executed against a real engine for the first time
+
+A PostgreSQL instance was provided, so the migrations stopped being an
+unverified claim. All six were applied to a managed PostgreSQL 17.6 instance
+and to a local PostgreSQL 18.4 instance, and the whole rollback chain
+0006 → 0001 was exercised down to an empty schema. The result: 20 tables, 32
+check constraints, 47 indexes.
+
+Executing them exposed two defects that no amount of in-memory testing could
+have found, because both live in the database layer itself:
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| G-7 | The three trigger functions were created with a **mutable** `search_path`. `ledger_transaction_is_balanced` resolves `ledger_entry` through the caller's search_path, so a session that puts a decoy `ledger_entry` ahead of ours makes the balance check read the wrong table and pass. **Demonstrated, not theorised:** with 0006 rolled back, an unbalanced ledger transaction committed successfully; with 0006 applied, the identical attempt is refused | high | fixed |
+| G-8 | Every table was readable by any role holding USAGE on the schema. On a managed host that exposes the schema over HTTP, identities, wallets, the ledger and the audit trail were reachable without authenticating against CORE at all | high | fixed |
+
+Migration `0006_harden_trigger_functions` pins each function's `search_path`
+to the schema it was installed in and enables row-level security with **no**
+policies on all 20 tables, which is deny-by-default for every role except the
+table owner. CORE connects as the owner, so the application is unaffected; any
+non-owner role must be granted explicit policies. Nothing in the migration
+hardcodes a schema name — it pins to `current_schema()` — so it stays correct
+if the tables do not live in `public`. On the managed instance the security
+advisor went from one ERROR plus one WARN to informational only.
+
+Both the backfill in 0005 and the rollbacks were verified with real rows:
+pre-existing fulfillments correctly derived `held`, `captured`, `released` and
+`none` from their authorization status, and `0005.down` removed the column
+cleanly.
+
+### Tooling added
+
+- `scripts/db-migrate.mjs` — `status`, `up`, `down [--all]`, driven by
+  `DATABASE_URL`, wrapping each file in a transaction so a migration that fails
+  halfway leaves nothing behind. Version bookkeeping stays in the migration
+  files, which already record themselves. Exposed as `npm run db:status|db:up|db:down`.
+- `tests/db-schema.test.ts` — 24 assertions against a live engine: the recorded
+  migration ledger, the `settlement_state` default, all nine execution/money
+  combinations CORE produces, all eight it must never store, the pinned
+  function `search_path`, the decoy-schema ledger bypass, deny-by-default row
+  security, and the partial index behind the reconciliation read. Skipped when
+  `DATABASE_URL` is absent, so the default suite and CI are unchanged.
+- `pg` is a **devDependency** only. The application still has no runtime
+  dependencies; this is tooling, not served code.
 
 ### Integration reviewed from the CORE side only
 

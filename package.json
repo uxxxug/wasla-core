@@ -14,10 +14,15 @@
     "check:roadmap": "node scripts/check-roadmap.mjs",
     "check:contracts": "node scripts/check-contracts.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
-    "verify": "npm run typecheck && npm run test && npm run check:governance && npm run check:contracts"
+    "verify": "npm run typecheck && npm run test && npm run check:governance && npm run check:contracts",
+    "db:status": "node scripts/db-migrate.mjs status",
+    "db:up": "node scripts/db-migrate.mjs up",
+    "db:down": "node scripts/db-migrate.mjs down"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

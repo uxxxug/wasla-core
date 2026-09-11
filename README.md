@@ -39,15 +39,27 @@ package, no cross-database access.
 | Subscriptions, reputation, notifications | **not implemented** |
 
 71 tests pass locally across 11 files, and the same gates run in CI on the
-working remote.
+working remote. A further 24 run against a real PostgreSQL instance when
+`DATABASE_URL` is set, and are skipped otherwise.
 
-Persistence today is the in-memory reference implementation of each repository
-port. The Postgres schema is authored across
-`db/migrations/0001_core_foundation.sql` through
-`0005_fulfillment_settlement_state.sql`, each with a rollback, but **none has
-been executed against any database** — no CORE database has been provisioned
-yet, so the schema-level guarantees (including the settlement alignment check)
-are unverified. See `ROADMAP.md`, blocker B-1.
+Persistence today is still the in-memory reference implementation of each
+repository port, but the schema is no longer a paper exercise: migrations
+`0001`–`0006` have been applied to real PostgreSQL instances (managed 17.6 and
+local 18.4) and the full rollback chain was exercised. Executing them is what
+surfaced the ledger `search_path` hole that `0006` closes. Postgres repository
+adapters are the next step.
+
+### Working against a database
+
+```bash
+export DATABASE_URL=postgres://user:pass@host:5432/db   # never committed
+npm run db:status
+npm run db:up
+npx vitest run tests/db-schema.test.ts
+```
+
+`pg` is a devDependency used only by that runner and that test. The application
+itself still has no runtime dependencies.
 
 ## Development
 
