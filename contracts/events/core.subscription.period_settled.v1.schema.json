@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.period_settled.v1.schema.json",
+  "title": "core.subscription.period_settled v1",
+  "description": "Published when a billing period has been paid for. amount_minor is what the period cost and authorization_id names the payment authorization the money moved through, so a subscriber can reconcile the period against the ledger. authorization_id is null only for a period priced at zero, where nothing moved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "period_id",
+    "sequence",
+    "period_starts_at",
+    "period_ends_at",
+    "currency",
+    "amount_minor",
+    "authorization_id"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "period_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "period_starts_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "period_ends_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "authorization_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "period_id": "7a1b2c3d-4e5f-4061-8172-839405a6b7c8",
+      "sequence": 1,
+      "period_starts_at": "2026-01-01T00:00:00.000Z",
+      "period_ends_at": "2026-02-01T00:00:00.000Z",
+      "currency": "SAR",
+      "amount_minor": 5000,
+      "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f"
+    }
+  ]
+}

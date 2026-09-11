@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.renewed.v1.schema.json",
+  "title": "core.subscription.renewed v1",
+  "description": "Published when CORE opens the next billing period for an active subscription. The new period begins exactly where the previous one ended, so coverage has no gap and no overlap. Renewal and collection are separate facts: this event says the period exists, and core.subscription.period_settled or core.subscription.past_due says what happened to the charge.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "period_id",
+    "sequence",
+    "period_starts_at",
+    "period_ends_at",
+    "currency",
+    "amount_minor"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "period_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "period_starts_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "period_ends_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "period_id": "5c4d3e2f-1a09-4b8c-9d7e-6f5a4b3c2d1e",
+      "sequence": 2,
+      "period_starts_at": "2026-02-01T00:00:00.000Z",
+      "period_ends_at": "2026-03-01T00:00:00.000Z",
+      "currency": "SAR",
+      "amount_minor": 5000
+    }
+  ]
+}

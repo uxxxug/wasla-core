@@ -28,6 +28,8 @@ import { FulfillmentService } from "./modules/fulfillment/service.js";
 import { registerFulfillmentRoutes } from "./modules/fulfillment/http.js";
 import { GeographyService } from "./modules/geography/service.js";
 import { registerGeographyRoutes } from "./modules/geography/http.js";
+import { SubscriptionService } from "./modules/subscription/service.js";
+import { registerSubscriptionRoutes } from "./modules/subscription/http.js";
 
 export interface CoreApp {
   router: Router;
@@ -43,6 +45,13 @@ export interface CoreApp {
   identity: IdentityService;
   organization: OrganizationService;
   money: MoneyService;
+  /**
+   * ADR 0013: plans, subscriptions, periods, usage and the entitlement
+   * decision. Named `billing` on this bundle and not `subscriptions`, because
+   * `subscriptions` above is the event-delivery registry and two unrelated
+   * things answering to one name is how a caller ends up wiring the wrong one.
+   */
+  billing: SubscriptionService;
   fulfillment: FulfillmentService;
   geography: GeographyService;
   clock: Clock;
@@ -86,6 +95,17 @@ export function createCoreApp(
   const organization = new OrganizationService(store.organization, audit, clock, boundary);
   const money = new MoneyService(store.money, outbox, boundary, audit, clock);
   const geography = new GeographyService(store.geography, audit, boundary);
+  // Takes `money` rather than a wallet store: a billing period is collected by
+  // an ordinary payment authorization, and the ledger is the only place that
+  // knows whether the money actually moved.
+  const billing = new SubscriptionService(
+    store.subscription,
+    money,
+    outbox,
+    boundary,
+    audit,
+    clock,
+  );
   const fulfillment = new FulfillmentService(
     store.fulfillment,
     outbox,
@@ -124,6 +144,7 @@ export function createCoreApp(
   registerIngressRoutes(router, ingress, identity);
   registerDeliveryRoutes(router, subscriptions, identity);
   registerGeographyRoutes(router, geography, identity);
+  registerSubscriptionRoutes(router, billing, identity);
 
   return {
     router,
@@ -139,6 +160,7 @@ export function createCoreApp(
     identity,
     organization,
     money,
+    billing,
     fulfillment,
     geography,
     clock,

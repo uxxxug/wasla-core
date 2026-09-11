@@ -363,6 +363,244 @@ paths:
             something did. Only the uncaptured remainder is released.
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/plans:
+    post:
+      summary: Publish a new plan as a draft, with its feature grants
+      description: >
+        A plan is created as a draft and its commercial terms and grants can be
+        edited only while it is one. Once activated they freeze: a price that
+        could be edited after anyone had subscribed would make settled history
+        unreadable, because the period would say one number and the plan
+        another with nothing recording which the customer agreed to. Changing a
+        price means publishing a new plan. amount_minor is operator-configured
+        data and CORE has no opinion about it: no rate is fixed in code, which
+        ADR 0012 requires while regulatory pricing policy is undecided. Each
+        grant's feature_key is an opaque string owned by the product that
+        consumes it, never an enum or a column here (ADR 0018). limit_value
+        MUST be present: null means granted without a quota and 0 means
+        explicitly none, and those are opposites, so an omitted limit is
+        refused rather than guessed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, currency, amount_minor, billing_interval, grants]
+              properties:
+                code: { type: string, minLength: 1 }
+                name: { type: string, minLength: 1 }
+                currency: { type: string, pattern: "^[A-Za-z]{3}$" }
+                amount_minor: { type: integer, minimum: 0 }
+                billing_interval: { type: string, enum: [day, week, month, year] }
+                interval_count: { type: integer, minimum: 1 }
+                grants:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: object
+                    required: [feature_key, limit_value]
+                    properties:
+                      feature_key: { type: string, minLength: 1 }
+                      limit_value:
+                        type: integer
+                        minimum: 0
+                        nullable: true
+                        description: null means granted but unmetered; 0 means none.
+      responses:
+        "201": { description: Draft plan created with its grants. No event is published, because terms that can still change are not a business fact anyone outside CORE can act on. }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    get:
+      summary: List plans, optionally filtered by status
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [draft, active, retired] }
+      responses:
+        "200": { description: Plans, newest first. }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /v1/plans/{plan_id}:
+    get:
+      summary: Read one plan with its feature grants
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: The plan and its grants. }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/plans/{plan_id}/activate:
+    post:
+      summary: Activate a draft plan and freeze its terms
+      description: >
+        Idempotent on an already-active plan. Activation is one-way: an active
+        plan cannot return to draft, because subscriptions may already price
+        periods from it.
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Plan active; terms and grants are now immutable. }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/plans/{plan_id}/retire:
+    post:
+      summary: Stop new subscriptions to a plan without touching existing ones
+      description: >
+        Retiring closes the plan to new subscribers only. Subscriptions already
+        on it keep renewing at the price their periods record, because the
+        period is the invoice and carries its own amount. Retirement is
+        one-way: reviving a plan would silently reopen terms that were
+        withdrawn.
+      parameters:
+        - name: plan_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Plan retired; existing subscriptions are unaffected. }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/subscriptions:
+    post:
+      summary: Subscribe an owner to an active plan and open its first period
+      description: >
+        The subscription and its first period are committed first, and the
+        first charge is attempted afterwards in its own unit of work. That
+        split is deliberate: sharing one transaction would mean an empty wallet
+        rolled the subscription away, leaving nothing to retry and inviting the
+        caller to sign the same owner up twice. So a refused first charge still
+        returns 201, with collected false and the subscription past_due. The
+        wallet must exist, must belong to the same owner, and must hold the
+        plan's currency - CORE does not convert.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner_type, owner_id, plan_id, wallet_id]
+              properties:
+                owner_type: { type: string, enum: [identity, organization] }
+                owner_id: { type: string, format: uuid }
+                plan_id: { type: string, format: uuid }
+                wallet_id: { type: string, format: uuid }
+                starts_at: { type: string, format: date-time }
+      responses:
+        "201": { description: Subscription created with its first period. collected reports whether the first charge was collected; false leaves the subscription past_due and the period retryable. }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/subscriptions/{subscription_id}:
+    get:
+      summary: Read a subscription with its billing periods
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: The subscription and every period it has had, so its billing history can be read without reconstructing it from events. }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /v1/subscriptions/{subscription_id}/cancel:
+    post:
+      summary: Cancel a subscription, keeping coverage to the end of a paid period
+      description: >
+        Cancellation is not expiry. If the current period is paid, coverage
+        runs to its end and the subscription expires only then; if it was never
+        paid, the period is voided and there is no coverage to keep. CORE
+        applies no proration and issues no refund: what a mid-period
+        cancellation is worth is a policy question with no owner decision yet,
+        recorded in ROADMAP.md, and inventing one here would put money on an
+        undecided rule.
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Subscription cancelled. voided_period_id names the period voided when it had not been paid, otherwise null. }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/subscriptions/{subscription_id}/usage:
+    post:
+      summary: Record metered usage against the period covering the instant
+      description: >
+        usage_reference is the reporter's idempotency key: at-least-once
+        reporting counts once, and a repeat returns 200 with the original
+        record rather than 201. Usage is recorded even once the grant's limit
+        is passed - dropping over-quota consumption would leave the billing and
+        dispute basis incomplete, and refusing further work is the entitlement
+        decision's job, not the recorder's. Usage records cannot be changed or
+        deleted afterwards through any route.
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [feature_key, quantity, usage_reference]
+              properties:
+                feature_key: { type: string, minLength: 1 }
+                quantity: { type: integer, minimum: 1 }
+                usage_reference: { type: string, minLength: 1 }
+                at: { type: string, format: date-time }
+      responses:
+        "201": { description: Usage recorded for the first time. }
+        "200": { description: The same usage_reference was already recorded; the original record is returned unchanged. }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/subscription-periods/{period_id}/collect:
+    post:
+      summary: Attempt to collect a billing period through the ledger
+      description: >
+        Used to retry a period that could not be collected, and safe to call
+        any number of times: the hold's business_reference is derived from the
+        period id and ledger_transaction.business_reference is UNIQUE, so the
+        ledger itself refuses a second movement. A refused collection is a
+        recorded outcome rather than a transport failure, so it answers 200
+        with collected false and a reason; the caller asked CORE to attempt a
+        collection and CORE did. A successful collection on a past_due
+        subscription returns it to active.
+      parameters:
+        - name: period_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: The period after the attempt. collected reports whether money moved; reason carries why not when it did not. }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /v1/geography/countries:
     get:
       summary: List reference countries

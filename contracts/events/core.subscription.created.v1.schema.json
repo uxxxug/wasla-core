@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.created.v1.schema.json",
+  "title": "core.subscription.created v1",
+  "description": "Published when CORE creates a subscription together with its first billing period. It does not say the first period was paid: collection is a separate fact reported by core.subscription.period_settled or core.subscription.past_due, because a subscription whose first charge was refused still exists and is still retryable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "owner_type",
+    "owner_id",
+    "plan_id",
+    "plan_code",
+    "period_id",
+    "period_starts_at",
+    "period_ends_at",
+    "currency",
+    "amount_minor"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_type": {
+      "type": "string",
+      "enum": [
+        "identity",
+        "organization"
+      ]
+    },
+    "owner_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan_code": {
+      "type": "string",
+      "minLength": 1
+    },
+    "period_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "period_starts_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "period_ends_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "owner_type": "organization",
+      "owner_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
+      "plan_id": "9d2c1b0a-3e4f-4a5b-8c7d-6e5f4a3b2c1d",
+      "plan_code": "growth-monthly",
+      "period_id": "7a1b2c3d-4e5f-4061-8172-839405a6b7c8",
+      "period_starts_at": "2026-01-01T00:00:00.000Z",
+      "period_ends_at": "2026-02-01T00:00:00.000Z",
+      "currency": "SAR",
+      "amount_minor": 5000
+    }
+  ]
+}

@@ -17,6 +17,12 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.fulfillment.dispatched` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.dispatched.v1.schema.json` |
 | `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
 | `core.fulfillment.cancelled` | 1 | implemented | fulfillment | MARKET, MOVE | `contracts/events/core.fulfillment.cancelled.v1.schema.json` |
+| `core.subscription.created` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.created.v1.schema.json` |
+| `core.subscription.period_settled` | 1 | implemented | subscription | MARKET | `contracts/events/core.subscription.period_settled.v1.schema.json` |
+| `core.subscription.past_due` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.past_due.v1.schema.json` |
+| `core.subscription.renewed` | 1 | implemented | subscription | MARKET | `contracts/events/core.subscription.renewed.v1.schema.json` |
+| `core.subscription.cancelled` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.cancelled.v1.schema.json` |
+| `core.subscription.expired` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.expired.v1.schema.json` |
 
 ## Consumed by CORE
 
@@ -47,6 +53,37 @@ market.order.created            (MARKET -> CORE)
 
 Every transition of the fulfillment lifecycle is published. A consumer that
 replays the CORE stream can reconstruct the exact state without querying CORE.
+
+## Lifecycle of a subscription as seen on the bus
+
+```
+POST /v1/subscriptions            (operator or tenant, via CORE API)
+  └─ core.subscription.created                          status: active | past_due
+       ├─ collection succeeded
+       │    └─ core.subscription.period_settled          period:  settled
+       │         └─ end of period (renewal sweep)
+       │              └─ core.subscription.renewed       period:  pending
+       │                   └─ core.subscription.period_settled | .past_due
+       ├─ collection refused
+       │    └─ core.subscription.past_due                period:  uncollectible
+       │         └─ later collection of the SAME period
+       │              └─ core.subscription.period_settled  status: active
+       └─ cancellation (owner, via CORE API)
+            └─ core.subscription.cancelled               status: cancelled
+                 └─ paid coverage runs out (renewal sweep)
+                      └─ core.subscription.expired       status: expired
+```
+
+`cancelled` and `expired` are separate facts and are published separately. A
+cancelled subscription still entitles its owner until the period it already
+paid for ends; only then does coverage stop. A consumer that treated the two as
+one could not tell a customer who left from one whose payment failed.
+
+Usage is deliberately not on the bus. It is high-volume bookkeeping with no
+consumer outside CORE, and the stream carries business facts (ADR 0009).
+Neither is a draft plan: its terms can still change, so nothing outside CORE
+can act on them. A plan becomes visible to others only through the
+subscriptions that reference it.
 
 ## Compatibility rules
 

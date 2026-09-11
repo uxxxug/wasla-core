@@ -596,6 +596,19 @@ export class MoneyService {
     return authorization;
   }
 
+  /**
+   * Reads a wallet.
+   *
+   * On money's published surface because another module needs to check a
+   * wallet's currency and owner before binding anything to it, and the
+   * alternative was reaching into `MoneyRepository` directly, which the module
+   * boundary rule forbids for good reason. Read-only.
+   */
+  async getWallet(walletId: string): Promise<Wallet | undefined> {
+    assertId("wallet_id", walletId);
+    return this.repo.getWallet(walletId);
+  }
+
   private async requireWallet(walletId: string): Promise<Wallet> {
     assertId("wallet_id", walletId);
     const wallet = await this.repo.getWallet(walletId);

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.expired.v1.schema.json",
+  "title": "core.subscription.expired v1",
+  "description": "Published when a subscription's paid coverage has run out and CORE will not open another period. Distinct from core.subscription.cancelled on purpose: cancelled means the owner asked to stop while coverage continued, expired means coverage ended. Collapsing the two would make it impossible to tell a customer who left from one whose payment ran out.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "owner_type",
+    "owner_id",
+    "plan_id",
+    "ended_at"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_type": {
+      "type": "string",
+      "enum": [
+        "identity",
+        "organization"
+      ]
+    },
+    "owner_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "owner_type": "organization",
+      "owner_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
+      "plan_id": "9d2c1b0a-3e4f-4a5b-8c7d-6e5f4a3b2c1d",
+      "ended_at": "2026-02-01T00:00:00.000Z"
+    }
+  ]
+}

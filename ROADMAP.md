@@ -88,7 +88,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 |---|---|---|---|
 | 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
 | 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete; multi-hold blocked — external dependency** | Migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. Multi-hold needs a MARKET contract decision — see "External dependencies" |
-| 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Not started** | No module, no tables, no contract. No external dependency — CORE can build this alone |
+| 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Complete, except policy decisions that are not CORE's to make** | Migration 0010 adds `plan`, `plan_grant`, `subscription`, `subscription_period`, `usage_record` with RLS, an `EXCLUDE USING gist` constraint against overlapping periods, immutability triggers on an active plan's terms and grants, append-only triggers on usage, and a deferred constraint trigger reconciling a settled period against the hold that settled it. Module: `domain.ts` (entitlement derived, never stored), `repository.ts` + `pg-repository.ts`, `service.ts`, `http.ts`. Ten routes, `subscription.read` / `subscription.write` permissions, six event contracts. 23 tests × 2 backends. **No entitlement-check endpoint** — ADR 0008 requires a new ADR first (B-14). Proration, grace, trials, rollover and comped access are recorded as B-15…B-19 |
 | 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
 | 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
@@ -140,6 +140,12 @@ Nothing.
 | B-11 | **Resolved.** Money and execution state were settled in two separate transactions, so a failure between them left funds captured against a fulfillment still recorded as `dispatched`/`held`. `MoneyService.captureWithin` / `voidWithin` now enlist in the caller's unit of work; `capture`/`voidAuthorization` are thin wrappers that open their own | resolved |
 | B-12 | **Resolved.** The in-memory money store enforced only primary keys, so two concurrent captures both inserted a `capture:<authorization_id>` ledger transaction and the money moved twice, while Postgres refused the second. The reference store now enforces the schema's UNIQUE constraints, synchronously | resolved |
 | B-13 | **Resolved.** `LocalEventBus.publish` resolved successfully even when every subscriber had exhausted its attempts, recording the failure only in an in-process array. Both durable relays decide whether to retry from that answer, so an event could be marked `published`/`processed` in the database while nothing had consumed it. `publish` now throws once any subscriber dead-letters | resolved |
+| B-14 | Entitlement-check endpoint needs a new ADR (ADR 0008) | `SubscriptionService.checkEntitlement` is implemented and tested, but reachable in-process only. MARKET and MOVE cannot ask CORE whether an owner is entitled | An owner ADR opening a new synchronous path, or a decision that entitlement is answered by consuming `core.subscription.*` instead |
+| B-15 | Proration on mid-period cancellation or plan change undecided | CORE cancels without refunding and without prorating, and has no plan-change path at all. Nothing partial is charged or returned | An owner decision on what a partial period is worth |
+| B-16 | Grace policy for `past_due` undecided | CORE's recorded default is that `past_due` entitles nothing. Chosen because it is the reversible direction: grace can be granted retroactively, service already given cannot be recalled | An owner decision on whether, and for how long, an uncollected period keeps entitling |
+| B-17 | Trial periods undecided | No trial exists. A zero-amount plan is expressible and settles without an authorization, which is not the same thing as a trial that converts to a paid plan | An owner decision on trial length, conversion and what a lapsed trial entitles |
+| B-18 | Quota rollover versus reset undecided | Quota resets each period, because usage is counted per period. Unused allowance does not carry forward | An owner decision on whether unused allowance accumulates |
+| B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -1096,3 +1102,176 @@ hold expiring with only its remainder released.
   are all MARKET's decisions, and a join table nobody feeds is worse than none.
   The sketch is in `docs/settlement.md`; nothing in this milestone blocks it,
   and the amounts split here are what make it expressible at all.
+
+## Cycle 2026-09-12 — subscriptions, plans and entitlement (ADR 0013)
+
+ADR 0013 has no body text in this repository: `docs/adr/README.md` carries only
+its title and states that the ADR text is maintained as the project's decision
+record and is not restated here. So the title was the whole brief. Everything
+below was derived from the invariants CORE already enforces and from the
+ownership boundary; every policy question the title does not answer is recorded
+as a blocker above rather than guessed at, because guessing a billing policy
+puts money on an undecided rule.
+
+### The question the module exists to answer
+
+`POST /v1/access/check` answers "may this principal do this?" from roles.
+"Has this owner paid for this?" is a different question, and answering both from
+one mechanism would make an unpaid subscription indistinguishable from a missing
+role — a billing failure that reads as a permissions bug, and the reverse.
+Entitlement is therefore a separate decision that never returns a bare boolean:
+`EntitlementReason` has eight values, and `subscription_past_due`,
+`period_unpaid`, `not_in_plan` and `limit_exhausted` lead to four different
+answers for the customer.
+
+### Entitlement is derived, never stored
+
+There is no entitlement table. CORE owns entitlement by being the only place
+that can answer the question, not by keeping a copy of the answer. A stored
+verdict would be a second source of truth beside the subscription, the period
+and the usage that produced it, and it would drift precisely when it mattered.
+
+### Decisions recorded, with the reasoning
+
+- **Feature keys are rows, not columns or an enum.** ADR 0018 keeps
+  product-specific logic out of CORE; the moment CORE knows a feature's name it
+  has an opinion about a product. `limit_value NULL` (unmetered) and `0` (none)
+  are kept distinguishable, because collapsing them makes a revoked quota read
+  as an unlimited one — and `POST /v1/plans` refuses an absent `limit_value`
+  rather than defaulting it, since the two candidate defaults are opposites.
+- **A plan's terms and grants freeze on activation**, by trigger. A price that
+  could be edited after anyone subscribed would leave the period saying 5000 and
+  the plan saying 9000, with nothing recording which the customer agreed to.
+  Changing a price means publishing a new plan. Retiring closes a plan to new
+  subscribers only, and is one-way.
+- **`amount_minor` is operator data.** No rate is fixed anywhere in code, which
+  is what B-4 requires while regulatory pricing policy is undecided.
+- **The period is the invoice**, so it copies `currency` and `amount_minor` from
+  the plan instead of reading through to it. Otherwise retiring a plan would
+  take the price of settled history with it.
+- **Overlapping periods are refused by an `EXCLUDE USING gist` constraint, not a
+  deferred trigger.** A trigger sees only rows committed before it runs, so two
+  concurrent inserts each see nothing and both succeed — the same hole as B-12.
+  The constraint is what actually closes the race. Adjacent periods are accepted
+  because half-open ranges that touch do not overlap.
+- **Collection is an ordinary payment authorization** whose
+  `business_reference` is derived as `subscription-period:<period_id>`. The
+  UNIQUE constraint on that reference, not any check in the service, is what
+  makes collection exactly-once.
+- **Signup and first charge are separate units of work.** Sharing a transaction
+  would let an empty wallet roll the subscription away, leaving nothing to retry
+  and inviting a second signup. `POST /v1/subscriptions` therefore answers 201
+  with `collected: false`.
+- **A refusal is audited in its own transaction** (B-9), and returns
+  `collected: false` rather than throwing, so one empty wallet cannot abort a
+  renewal sweep for everyone behind it.
+- **`cancelled` and `expired` stay separate facts** — the same argument as
+  `partially_captured` in 0009. A cancelled subscription keeps entitling until
+  the period it paid for ends; an unpaid period is voided instead.
+- **Usage is append-only and recorded past the limit.** The port has no
+  `updateUsage` and no `deleteUsage` at all, which is the strongest form of the
+  rule, and 0010 refuses UPDATE and DELETE by trigger. Over-quota consumption is
+  still recorded, because dropping it would leave the billing and dispute basis
+  incomplete; refusing further work is the entitlement decision's job.
+- **No usage event and no draft-plan event** (ADR 0009): high-volume
+  bookkeeping with no external consumer, and terms nobody outside CORE can act
+  on yet.
+
+### Two real backend differences found and unified, not documented away
+
+The standing rule is that no difference between the in-memory and Postgres
+backends may hide behind the tests. Two were found while making the tests pass
+on both:
+
+1. **The memory money store could not express 0010's deferred agreement
+   trigger**, because it has no view of the ledger. Rather than record the
+   difference, `InMemoryMoneyRepository` gained a synchronous
+   `authorizationSnapshot`, and the composition root hands it to the
+   subscription store. Removing that wiring makes the agreement test fail on
+   memory — verified.
+2. **`audit_entry.actor_id` is a `uuid` column.** The new service was passing
+   the producer name into it; the memory audit log accepted the string and
+   Postgres refused it outright. Fixed to `null`, which is what "no principal"
+   means, with `actor_type` already saying who acted. This one was only ever
+   visible because every test runs against both backends.
+
+A third, smaller one: the memory usage store compared an unparseable
+`recorded_at` instead of refusing it, and `NaN` makes every window comparison
+false — so it accepted a row Postgres refuses for being null.
+
+### Proven, not assumed
+
+Four fixes were reverted in turn:
+
+- Overlap detection disabled in the memory store → the overlap test fails on
+  memory.
+- The money-reader wiring removed from the composition root → the
+  period-versus-hold agreement test fails on memory.
+- `actor_id` restored to the producer name → the first-collection test fails on
+  **Postgres only** while memory still passes, which is the backend-difference
+  class itself.
+- The early return in `chargePeriod` removed → **nothing failed.** That is
+  recorded rather than hidden: the exactly-once guarantee comes from the derived
+  `business_reference` and the UNIQUE constraint beneath it, not from the
+  service check. Removing the early return *and* randomising the reference fails
+  the double-charge test on both backends, which locates the invariant where it
+  actually lives. The test now asserts on the authorization's `captured_minor`
+  as well as the balance, and says all of this in a comment.
+
+### Migration 0010
+
+Applied and rolled back on both real engines (PostgreSQL 18.4 locally,
+PostgreSQL 17.6 managed). Needed `btree_gist`, which was not installed on
+either. All five tables carry explicit `ENABLE ROW LEVEL SECURITY`, because
+migration 0006's RLS list is hardcoded and does not cover tables added later.
+The down migration refuses while any settled period or any usage record exists —
+dropping billing history is not a rollback — and does not drop the extension it
+found missing.
+
+Twenty-one invariants were probed directly against the local database before the
+adapters were written, of which one was wrong on the first attempt and corrected
+in the migration: a free-tier plan priced at zero settles with no authorization,
+so `subscription_period_settlement_fields` had to tie `amount_minor = 0` to
+`authorization_id IS NULL` as an equivalence rather than requiring an
+authorization outright.
+
+### Tests
+
+`tests/subscription.test.ts` — 23 tests on both backends: a first period
+collected through the ledger with the balance to prove it; a subscription that
+survives a wallet with no money, and refuses entitlement while it does; the same
+period collected later returning the subscription to active; a period charged at
+most once across repeated attempts; a second live subscription to one plan
+refused; a plan in one currency refused against a wallet in another; draft and
+retired plans refused; an active plan's price and grants both frozen;
+overlapping periods refused and adjacent ones accepted; a settled period refused
+when it disagrees with the hold that paid it, asserted through a real commit;
+quota counted and exhausted while an unmetered grant on the same plan is
+unaffected; an unmetered grant distinguished from a grant of nothing; a repeated
+usage reference counted once; usage outside the period window and with an
+unparseable instant both refused; the absence of any way to change or delete
+usage; coverage kept to the end of a paid period after cancellation and then
+expired; an unpaid period voided on cancellation; renewal opening and charging
+the next period with no gap and a fresh quota; a sweep not aborted by one empty
+wallet; the reason for a refusal when the owner has no subscription at all; a
+feature the plan does not grant; one event per business fact with none for usage
+or for a draft plan; and an audit entry for a refused collection.
+
+318 tests pass with `DATABASE_URL`, 185 without.
+
+### A note on savepoints
+
+A savepoint release does **not** check `DEFERRABLE INITIALLY DEFERRED`
+constraints; only COMMIT does. Any test of 0010's agreement trigger has to use a
+real transaction rather than `ROLLBACK TO SAVEPOINT`, and 0009's own deferred
+trigger refuses a fabricated authorization whose `captured_minor` has no ledger
+entries behind it — so the fixture goes through the real `MoneyService`.
+
+### External dependencies this records — not implemented
+
+- **MARKET and MOVE reporting usage** belongs on the inbound event path
+  (`POST /v1/events`), which needs an event contract from the producing system.
+  `POST /v1/subscriptions/{id}/usage` is an operator route, not a product
+  integration path, and no MARKET or MOVE code was touched.
+- **Answering entitlement across systems** is B-14 and needs an ADR before any
+  endpoint exists.

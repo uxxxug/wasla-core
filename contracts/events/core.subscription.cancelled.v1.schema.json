@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.cancelled.v1.schema.json",
+  "title": "core.subscription.cancelled v1",
+  "description": "Published when the owner asks to stop a subscription. Cancellation is not expiry: coverage runs to the end of a period already paid for, given by coverage_ends_at, and only then does CORE publish core.subscription.expired. coverage_ends_at is null and voided_period_id names a period when the current period was never paid, in which case there is no coverage to run out. CORE applies no proration, which is an unmade policy decision recorded in ROADMAP.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "owner_type",
+    "owner_id",
+    "plan_id",
+    "reason",
+    "coverage_ends_at",
+    "voided_period_id"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_type": {
+      "type": "string",
+      "enum": [
+        "identity",
+        "organization"
+      ]
+    },
+    "owner_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "plan_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "coverage_ends_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "voided_period_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "owner_type": "organization",
+      "owner_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
+      "plan_id": "9d2c1b0a-3e4f-4a5b-8c7d-6e5f4a3b2c1d",
+      "reason": "owner asked to stop",
+      "coverage_ends_at": "2026-02-01T00:00:00.000Z",
+      "voided_period_id": null
+    }
+  ]
+}

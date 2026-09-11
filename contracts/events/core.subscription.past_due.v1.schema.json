@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.subscription.past_due.v1.schema.json",
+  "title": "core.subscription.past_due v1",
+  "description": "Published when CORE could not collect a billing period. The subscription still exists and the period can still be collected later; past_due records that it has not been. Whether a past_due subscription is granted a grace window is an unmade policy decision recorded in ROADMAP.md, and CORE's recorded default is that it entitles nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subscription_id",
+    "owner_type",
+    "owner_id",
+    "period_id",
+    "currency",
+    "amount_minor",
+    "reason"
+  ],
+  "properties": {
+    "subscription_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "owner_type": {
+      "type": "string",
+      "enum": [
+        "identity",
+        "organization"
+      ]
+    },
+    "owner_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "period_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "examples": [
+    {
+      "subscription_id": "2f7b6d5c-1f43-4f5c-8d31-0f1e2a3b4c5d",
+      "owner_type": "organization",
+      "owner_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
+      "period_id": "7a1b2c3d-4e5f-4061-8172-839405a6b7c8",
+      "currency": "SAR",
+      "amount_minor": 5000,
+      "reason": "insufficient available balance"
+    }
+  ]
+}

@@ -78,7 +78,14 @@ export type Permission =
   | "fulfillment.read"
   | "money.authorize"
   | "support.act"
-  | "events.submit";
+  | "events.submit"
+  // Plans and their prices are operator territory; reading a subscription is
+  // not. Split into two so a tenant can see what it is paying for without
+  // also being able to publish a plan or collect a charge. The names are
+  // CORE's own capabilities, not product features — a plan's `feature_key` is
+  // opaque data and never becomes a permission (ADR 0018).
+  | "subscription.read"
+  | "subscription.write";
 
 /**
  * Role → permission mapping is data, not branching logic scattered in handlers
@@ -95,6 +102,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "money.authorize",
     "support.act",
     "events.submit",
+    "subscription.read",
+    "subscription.write",
   ],
   org_admin: [
     "identity.read",
@@ -102,9 +111,19 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "organization.write",
     "fulfillment.request",
     "fulfillment.read",
+    "subscription.read",
   ],
   org_member: ["organization.read", "fulfillment.read"],
-  support_agent: ["identity.read", "organization.read", "fulfillment.read", "support.act"],
+  // A support agent has to be able to see why a subscription was refused —
+  // that is the whole reason an entitlement decision carries a reason rather
+  // than a bare boolean.
+  support_agent: [
+    "identity.read",
+    "organization.read",
+    "fulfillment.read",
+    "support.act",
+    "subscription.read",
+  ],
   // A service caller exists to feed CORE events; submitting them is the point.
   service: ["fulfillment.request", "fulfillment.read", "identity.read", "events.submit"],
 };

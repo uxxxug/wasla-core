@@ -192,6 +192,28 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   async getAuthorization(authorizationId: string): Promise<PaymentAuthorization | undefined> {
     return this.authorizations.get(authorizationId);
   }
+
+  /**
+   * A synchronous read of a hold, for another reference store's deferred check.
+   *
+   * It exists because `MemoryJournal.verify` is synchronous — it has to be, so
+   * that a deferred check runs at the commit point with no `await` in which
+   * state could move — and migration 0010 gives Postgres a deferred trigger
+   * comparing a subscription period against the hold that settled it. Without
+   * a synchronous accessor the memory backend could not express that check at
+   * all, and the standing rule is that a difference between the two backends
+   * is either unified or documented and tested, never left to the tests to
+   * paper over. This unifies it.
+   *
+   * Deliberately narrow: it returns what the check needs and no way to write.
+   */
+  authorizationSnapshot(
+    authorizationId: string,
+  ): { captured_minor: number; currency: string } | undefined {
+    const authorization = this.authorizations.get(authorizationId);
+    if (!authorization) return undefined;
+    return { captured_minor: authorization.captured_minor, currency: authorization.currency };
+  }
   async findAuthorizationByReference(reference: string): Promise<PaymentAuthorization | undefined> {
     return [...this.authorizations.values()].find((item) => item.business_reference === reference);
   }
