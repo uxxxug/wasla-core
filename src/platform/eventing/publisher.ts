@@ -1,5 +1,7 @@
 import type { Clock } from "../clock.js";
+import type { TransactionBoundary } from "../persistence/transaction.js";
 import type { EventBus } from "./bus.js";
+import type { DeliveryFanOut } from "./delivery.js";
 import type { OutboxStore } from "./outbox.js";
 
 export interface PublisherResult {
@@ -19,6 +21,12 @@ export class OutboxPublisher {
     private readonly clock: Clock,
     private readonly maxAttempts = 5,
     private readonly baseBackoffMs = 1000,
+    /**
+     * Outbound fan-out, optional so the eventing tests can run the relay with
+     * no notion of external subscribers at all.
+     */
+    private readonly fanOut?: DeliveryFanOut,
+    private readonly boundary?: TransactionBoundary,
   ) {}
 
   async drainOnce(limit = 100): Promise<PublisherResult> {
@@ -29,7 +37,21 @@ export class OutboxPublisher {
     for (const record of due) {
       try {
         await this.bus.publish(record.event);
-        await this.outbox.markPublished(record.event.event_id);
+        // Marking the row published and queueing its external deliveries are
+        // one transaction. As two, a crash between them would leave an event
+        // marked published that no subscriber will ever be sent — the
+        // dual-write problem the outbox exists to prevent, moved one step
+        // downstream. Re-running the fan-out is free: the delivery rows are
+        // unique per (event, subscription).
+        if (this.fanOut && this.boundary) {
+          const fanOut = this.fanOut;
+          await this.boundary.run(async (scope) => {
+            await fanOut.queueFor(record.event, scope);
+            await this.outbox.markPublished(record.event.event_id, scope);
+          });
+        } else {
+          await this.outbox.markPublished(record.event.event_id);
+        }
         result.published += 1;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

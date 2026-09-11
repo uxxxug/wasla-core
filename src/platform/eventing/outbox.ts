@@ -1,5 +1,5 @@
 import type { Clock } from "../clock.js";
-import { journalMapWrite, type TransactionScope } from "../persistence/transaction.js";
+import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
@@ -21,7 +21,9 @@ export interface OutboxStore {
   /** MUST run inside the caller's transaction; the scope is how it joins it. */
   append(event: EventEnvelope, scope: TransactionScope): Promise<void>;
   claimDue(now: Date, limit: number): Promise<OutboxRecord[]>;
-  markPublished(eventId: string): Promise<void>;
+  /** One record by id. Outbound delivery needs the envelope long after it was published. */
+  get(eventId: string): Promise<OutboxRecord | undefined>;
+  markPublished(eventId: string, scope?: TransactionScope): Promise<void>;
   markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
   markDead(eventId: string, error: string): Promise<void>;
   all(): Promise<OutboxRecord[]>;
@@ -44,6 +46,10 @@ export class InMemoryOutbox implements OutboxStore {
     });
   }
 
+  async get(eventId: string): Promise<OutboxRecord | undefined> {
+    return this.records.get(eventId);
+  }
+
   async claimDue(now: Date, limit: number): Promise<OutboxRecord[]> {
     const due: OutboxRecord[] = [];
     for (const record of this.records.values()) {
@@ -55,27 +61,42 @@ export class InMemoryOutbox implements OutboxStore {
     return due;
   }
 
-  async markPublished(eventId: string): Promise<void> {
+  /**
+   * These three replace the record instead of mutating it in place.
+   *
+   * In-place mutation used to be harmless because none of them ran inside a
+   * transaction. `markPublished` now does — it commits with the outbound
+   * delivery rows — and the journal records a pre-image by reference, so
+   * mutating the stored object would make the pre-image and the current value
+   * the same object and roll back to nothing. Same bug `revokeSession` had.
+   */
+  async markPublished(eventId: string, scope: TransactionScope = NO_SCOPE): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
-    record.status = "published";
-    record.last_error = null;
+    journalMapWrite(scope, this.records, eventId);
+    this.records.set(eventId, { ...record, status: "published", last_error: null });
   }
 
   async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
-    record.attempts += 1;
-    record.last_error = error;
-    record.next_attempt_at = nextAttemptAt.toISOString();
+    this.records.set(eventId, {
+      ...record,
+      attempts: record.attempts + 1,
+      last_error: error,
+      next_attempt_at: nextAttemptAt.toISOString(),
+    });
   }
 
   async markDead(eventId: string, error: string): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
-    record.attempts += 1;
-    record.status = "dead";
-    record.last_error = error;
+    this.records.set(eventId, {
+      ...record,
+      attempts: record.attempts + 1,
+      status: "dead",
+      last_error: error,
+    });
   }
 
   async all(): Promise<OutboxRecord[]> {

@@ -8,6 +8,15 @@ import { OutboxPublisher } from "./platform/eventing/publisher.js";
 import { EventIngress } from "./platform/eventing/ingress.js";
 import { registerIngressRoutes } from "./platform/eventing/ingress-http.js";
 import { InboundDispatcher } from "./platform/eventing/dispatcher.js";
+import {
+  DeliveryFanOut,
+  DeliveryWorker,
+  SubscriptionRegistry,
+  type EventTransport,
+} from "./platform/eventing/delivery.js";
+import { FetchTransport } from "./platform/eventing/fetch-transport.js";
+import { registerDeliveryRoutes } from "./platform/eventing/delivery-http.js";
+import { newId } from "./platform/ids.js";
 import { Router } from "./platform/http/router.js";
 import { IdentityService } from "./modules/identity-access/service.js";
 import { OrganizationService } from "./modules/organization/service.js";
@@ -28,6 +37,8 @@ export interface CoreApp {
   publisher: OutboxPublisher;
   ingress: EventIngress;
   dispatcher: InboundDispatcher;
+  subscriptions: SubscriptionRegistry;
+  deliveries: DeliveryWorker;
   audit: AuditLog;
   identity: IdentityService;
   organization: OrganizationService;
@@ -44,7 +55,7 @@ export interface CoreApp {
  * imports another module's internals, only its published service interface.
  */
 export function createCoreApp(
-  options: { clock?: Clock; persistence?: Persistence } = {},
+  options: { clock?: Clock; persistence?: Persistence; transport?: EventTransport } = {},
 ): CoreApp {
   const clock = options.clock ?? systemClock;
   // One bundle, never a mix: see `Persistence` for why selecting adapters
@@ -52,7 +63,18 @@ export function createCoreApp(
   const store = options.persistence ?? memoryPersistence(clock);
   const { audit, outbox, inbox, boundary } = store;
   const bus = new LocalEventBus(inbox);
-  const publisher = new OutboxPublisher(outbox, bus, clock);
+  // Outbound: the relay queues one delivery row per interested subscriber in
+  // the same transaction that marks the event published, and the worker sends
+  // them. See `DeliveryFanOut` for why those two are one transaction.
+  const fanOut = new DeliveryFanOut(store.delivery, clock, newId);
+  const publisher = new OutboxPublisher(outbox, bus, clock, 5, 1000, fanOut, boundary);
+  const subscriptions = new SubscriptionRegistry(store.delivery, clock, newId);
+  const deliveries = new DeliveryWorker(
+    store.delivery,
+    outbox,
+    options.transport ?? new FetchTransport(),
+    clock,
+  );
   // Ingress records; the dispatcher is what actually hands the event over.
   // Splitting them is the point: see `EventIngress` and `InboundDispatcher`.
   const ingress = new EventIngress(store.inbound, (work) =>
@@ -100,6 +122,7 @@ export function createCoreApp(
   registerMoneyRoutes(router, money, identity);
   registerFulfillmentRoutes(router, fulfillment, identity);
   registerIngressRoutes(router, ingress, identity);
+  registerDeliveryRoutes(router, subscriptions, identity);
   registerGeographyRoutes(router, geography, identity);
 
   return {
@@ -110,6 +133,8 @@ export function createCoreApp(
     publisher,
     ingress,
     dispatcher,
+    subscriptions,
+    deliveries,
     audit,
     identity,
     organization,

@@ -85,6 +85,15 @@ export class PgOutbox implements OutboxStore {
     );
   }
 
+  async get(eventId: string): Promise<OutboxRecord | undefined> {
+    const result = await this.pool.query<OutboxRow>(
+      `select ${COLUMNS} from outbox where event_id = $1`,
+      [eventId],
+    );
+    const row = result.rows[0];
+    return row ? toRecord(row) : undefined;
+  }
+
   /**
    * Claims pending rows that are due. `for update skip locked` is what lets a
    * second relay run concurrently without publishing the same event twice.
@@ -101,8 +110,9 @@ export class PgOutbox implements OutboxStore {
     return result.rows.map(toRecord);
   }
 
-  async markPublished(eventId: string): Promise<void> {
-    await this.pool.query(
+  /** Takes a scope: it commits with the outbound delivery rows it fans out to. */
+  async markPublished(eventId: string, scope: TransactionScope = NO_SCOPE): Promise<void> {
+    await runner(this.pool, scope).query(
       `update outbox set status = 'published', last_error = null where event_id = $1`,
       [eventId],
     );

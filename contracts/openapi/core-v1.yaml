@@ -450,6 +450,127 @@ paths:
                     description: False when CORE already held this event; no retry needed.
         "400": { description: Invalid envelope, or no consumer for this event type }
         "403": { description: This caller may not submit this event type }
+  /v1/event-subscriptions:
+    post:
+      summary: Register where CORE should deliver one of its own event types
+      description: >-
+        Operator-provisioned only; there is no self-registration. Only core.*
+        event types may be subscribed to, because a subscription to market.* or
+        move.* would hand one external system another's inbound traffic by
+        configuration alone. The endpoint must be https, and the signing secret
+        is never returned by any read path including this one.
+
+        Re-registering an existing (subscriber, event_type) returns the existing
+        subscription and does not rotate its secret: silently rotating would
+        break every in-flight delivery without anyone asking for it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriber, event_type, endpoint_url, signing_secret]
+              properties:
+                subscriber:
+                  type: string
+                  description: The external system, normally its service credential name.
+                event_type: { type: string, pattern: "^core\\." }
+                endpoint_url: { type: string, format: uri, pattern: "^https://" }
+                signing_secret:
+                  type: string
+                  minLength: 32
+                  description: >-
+                    Shared secret CORE signs each body with. Write-only; stored
+                    because HMAC needs the plaintext, never echoed, never logged.
+      responses:
+        "201":
+          description: Subscription registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventSubscription" }
+        "400": { description: Not a core.* type, not https, or secret too short }
+        "403": { description: Caller is not an operator }
+    get:
+      summary: List the endpoints CORE delivers events to
+      responses:
+        "200":
+          description: Subscriptions, without their secrets
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/EventSubscription" }
+        "403": { description: Caller is not an operator }
+  /v1/event-subscriptions/{subscription_id}/deactivate:
+    post:
+      summary: Stop queueing new deliveries for a subscriber
+      description: >-
+        Deliveries already queued stay queued. They were promised, and dropping
+        them silently is worse than delivering them late.
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Subscription deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscription_id, active]
+                properties:
+                  subscription_id: { type: string, format: uuid }
+                  active: { type: boolean }
+        "403": { description: Caller is not an operator }
+        "404": { description: No such subscription }
+  /v1/event-subscriptions/{subscription_id}/activate:
+    post:
+      summary: Resume queueing deliveries for a subscriber
+      parameters:
+        - name: subscription_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Subscription activated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscription_id, active]
+                properties:
+                  subscription_id: { type: string, format: uuid }
+                  active: { type: boolean }
+        "403": { description: Caller is not an operator }
+        "404": { description: No such subscription }
+  /v1/event-deliveries/undelivered:
+    get:
+      summary: List what CORE has promised to deliver and has not
+      description: >-
+        Pending plus dead deliveries. An empty list is the invariant to expect;
+        a dead row is one an operator has to look at, since CORE stopped trying.
+      responses:
+        "200":
+          description: Outstanding deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/EventDelivery" }
+        "403": { description: Caller is not an operator }
 components:
   securitySchemes:
     bearerAuth:
@@ -462,6 +583,43 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    EventSubscription:
+      type: object
+      description: >-
+        Where CORE delivers one event type. signing_secret is deliberately
+        absent: it is write-only and never leaves the database.
+      required: [subscription_id, subscriber, event_type, endpoint_url, active, created_at]
+      properties:
+        subscription_id: { type: string, format: uuid }
+        subscriber: { type: string }
+        event_type: { type: string }
+        endpoint_url: { type: string, format: uri }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    EventDelivery:
+      type: object
+      description: One attempt record per (event, subscription). The unit of outbound work.
+      required:
+        [delivery_id, event_id, subscription_id, status, attempts, next_attempt_at, created_at]
+      properties:
+        delivery_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        subscription_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [pending, delivered, dead]
+          description: >-
+            dead means CORE stopped trying: either the receiver refused the
+            payload, or the attempt budget ran out.
+        attempts: { type: integer }
+        last_error: { type: string, nullable: true }
+        last_status:
+          type: integer
+          nullable: true
+          description: Null when the attempt never got a response at all.
+        next_attempt_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        delivered_at: { type: string, format: date-time, nullable: true }
     EventEnvelope:
       type: object
       description: >-

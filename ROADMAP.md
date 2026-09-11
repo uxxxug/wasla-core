@@ -86,7 +86,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 
 | # | Milestone | Verified status | Evidence / what is missing |
 |---|---|---|---|
-| 1 | External event ingress: MARKET and MOVE can actually reach CORE | **Started this cycle, CORE side substantially complete** | `POST /v1/events`, `inbound_event` (migration 0007) on both backends, `InboundDispatcher`, trust boundary tied to the credential, 11 tests × 2 backends. Outbound delivery to MOVE/MARKET endpoints is still local-bus only — see external dependencies |
+| 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
 | 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partially complete** | `held -> captured \| released` is driven and atomic with execution state (B-11). The schema has the states but the service has no partial-capture, refund or multi-hold path, and no event contract for them |
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Not started** | No module, no tables, no contract. No external dependency — CORE can build this alone |
 | 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
@@ -869,12 +869,8 @@ must remember) is recorded under risks.
   name. Their envelopes are otherwise unchanged.
 - **Both must treat 202 as success and retry on anything else.** Redelivering
   the same `event_id` is free and answers `first_delivery: false`.
-- **Outbound delivery is still local.** CORE's own events reach only in-process
-  subscribers; MOVE and MARKET cannot yet receive `core.fulfillment.created`,
-  `core.fulfillment.dispatched` or `core.fulfillment.cancelled` over the wire.
-  The symmetric outbound edge needs their endpoints, which CORE does not own —
-  this is the next piece of milestone 1 and the reason it is "substantially",
-  not fully, complete.
+- **Outbound delivery exists as of migration 0008** (see the section below).
+  What CORE cannot supply is the other end of the wire.
 - **An operator must provision the two service credentials.** Nothing creates
   them automatically, on purpose: a self-registering service credential would
   be a hole in the boundary described above.
@@ -889,3 +885,99 @@ doing the work only once. Plus a new bus test that a failing consumer does not
 stop the healthy ones.
 
 212 tests pass with `DATABASE_URL`, 131 without.
+
+## Outbound delivery — CORE can now reach MOVE and MARKET
+
+Migration 0007 gave the external systems a way in. Nothing gave CORE a way out:
+`LocalEventBus` reached in-process subscribers only, so a fulfillment could be
+created, dispatched and settled and no system outside CORE's process would ever
+learn of it. The coordination loop had an entrance and no exit, which made the
+loop MARKET → CORE → MOVE → CORE → MARKET unbuildable no matter how correct
+each half was.
+
+Migration 0008 adds `event_subscription` (who wants which event type, and
+where) and `event_delivery` (one row per `(event_id, subscription_id)`).
+`docs/outbound-delivery.md` holds the full reasoning; the decisions that
+constrain future work:
+
+**Queueing the deliveries and marking the outbox row published are one
+transaction.** As two, a crash between them leaves an event marked `published`
+that no subscriber will ever be sent — the dual-write problem the outbox exists
+to prevent, moved one step downstream. The test for this was verified to fail
+when the transaction is removed, rather than assumed to work.
+
+**Fan-out happens at relay time, not emit time**, so an endpoint registered
+today is used by the next event relayed. The consequence is accepted and
+written down: a subscription created after an event was relayed does not
+receive that event. Back-filling is replay, and replay is a decision, not a
+side effect of editing configuration.
+
+**A failed attempt is either worth repeating or it is not.** 5xx, a timeout, a
+refused connection, 408 and 429 are retried with exponential backoff. Every
+other 4xx kills the delivery on the first attempt, because identical bytes get
+the identical refusal and repeating them only delays someone noticing. Dead
+rows stay visible at `GET /v1/event-deliveries/undelivered`.
+
+**Delivery is at-least-once; deduplication is the receiver's job.** CORE can
+only promise it keeps trying and never silently stops. `event_id` travels in
+the `x-wasla-event-id` header as well as the envelope so a receiver can discard
+a repeat before parsing.
+
+**Bodies are HMAC-SHA256 signed over the exact bytes transmitted**, not over
+selected fields — a receiver verifying a reconstruction is verifying its own
+serialiser. `verifyBody` is exported as a reference implementation. The
+plaintext secret therefore lives in the database, and the constraints that
+follow (never returned on any read path, never rotated implicitly,
+`https`-only endpoints, `core.*` types only) are in the doc.
+
+### A difference between the backends, documented rather than hidden
+
+Postgres `claimDue` orders by `(next_attempt_at, created_at)` and leaves ties
+to the planner; the in-memory store drains in insertion order. Under a
+`FixedClock` every timestamp ties, so the two backends attempt deliveries in
+different orders. There is nothing to unify here: CORE makes no cross-subscriber
+ordering promise, and inventing a tie-breaker would imply one. A test written
+during this milestone depended on which subscriber was attempted first, passed
+in memory and failed on Postgres — that is how the difference was found, and the
+test was rewritten to assert the invariant that actually holds (one
+subscriber's outage does not affect another).
+
+### A latent bug found on the way
+
+`InMemoryOutbox.markPublished` mutated the stored record in place. That was
+harmless while it ran outside any transaction, but it now commits together with
+the delivery rows, and `MemoryJournal` records a pre-image by reference — so a
+rollback would have restored the mutated object to itself and undone nothing.
+All three mark methods now replace the record. Same shape as the `revokeSession`
+bug from B-10.
+
+### External dependencies this creates — recorded, not implemented
+
+- **MOVE must expose an HTTPS endpoint** for `core.fulfillment.created` and
+  `core.fulfillment.cancelled`; **MARKET** for `core.fulfillment.dispatched`.
+  CORE will not invent these; an operator registers them.
+- **Both must verify `x-wasla-signature`** as `sha256=HMAC-SHA256(secret, raw
+  body)` over the bytes received, before parsing.
+- **Both must deduplicate on `event_id`.** Delivery is at-least-once; a repeat
+  is normal, not an error.
+- **Both must answer 2xx only once the event is durably recorded**, and a 4xx
+  only when the payload is genuinely unacceptable — a 4xx stops CORE retrying
+  permanently.
+- **An operator must register the subscriptions and hold the secrets.** There
+  is no self-registration, for the same reason there is none for service
+  credentials.
+
+### Tests
+
+`tests/outbound-delivery.test.ts` — 13 tests on both backends plus 3 backend-
+independent: no read path leaks a secret, refused subscriptions (`market.*`,
+plain HTTP, short secret), fan-out to every interested subscriber, a verifiable
+signature over the transmitted body, a second fan-out queueing nothing, retry
+with backoff that does not fire early, a 422 dying on the first attempt and
+never being retried, a timeout recorded as a failure with no status, the
+attempt budget running out with the row left visible, a deactivated subscriber
+queueing nothing, one subscriber's outage not blocking another, the outbox row
+not marked published when queueing fails, and a delivery whose subscription
+vanished dying unsent rather than being sent unsigned.
+
+242 tests pass with `DATABASE_URL`, 147 without.
