@@ -93,6 +93,7 @@ Nothing.
 | B-4 | Regulatory pricing policy undecided (ADR 0012) | Pricing engine can be built rule-driven, but no rates may be fixed | A legal/regulatory decision |
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
+| B-7 | GitHub Actions is blocked on the `noor-seez` account | The CI workflow in this repository cannot run: every job fails at start with "recent account payments have failed or your spending limit needs to be increased". The same block affects the MOVE repository. All gates are therefore verified locally only | Resolve GitHub billing for the account, then re-run the workflow |
 
 ## Open questions
 
