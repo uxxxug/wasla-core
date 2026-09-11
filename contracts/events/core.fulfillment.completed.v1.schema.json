@@ -36,7 +36,18 @@
         "string",
         "null"
       ],
-      "description": "Closure reason when the outcome is failed."
+      "description": "Closure reason when the outcome is failed. Values produced by CORE include move_execution_failed, payment_settlement_failed:*, payment_hold_not_found, payment_hold_already_captured, payment_hold_not_authorized and payment_hold_expired."
+    },
+    "settlement_state": {
+      "type": "string",
+      "enum": [
+        "none",
+        "held",
+        "captured",
+        "released",
+        "unsettled"
+      ],
+      "description": "State of the CORE money hold at closure. A completed outcome is always captured or none; a failed outcome is released, none or unsettled. Optional and additive; consumers may ignore it."
     }
   },
   "examples": [
@@ -44,7 +55,8 @@
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
       "order_reference": "order-2",
       "outcome": "completed",
-      "completed_at": "2026-09-11T03:45:00.000Z"
+      "completed_at": "2026-09-11T03:45:00.000Z",
+      "settlement_state": "captured"
     }
   ]
 }

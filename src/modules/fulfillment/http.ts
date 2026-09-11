@@ -1,3 +1,4 @@
+import { invalid } from "../../platform/errors.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
@@ -8,6 +9,17 @@ export function registerFulfillmentRoutes(
   fulfillment: FulfillmentService,
   identity: IdentityService,
 ): void {
+  // Registered before the parameterised route so it is never read as an id.
+  // Reconciliation read: execution state versus money state. An empty list is
+  // the invariant CORE is expected to hold.
+  router.get("/v1/fulfillments/reconciliation/inconsistent", (ctx) => {
+    const organizationId = ctx.query.get("organization_id") ?? "";
+    if (!organizationId) throw invalid("organization_id is required");
+    requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
+    const items = fulfillment.listFinanciallyInconsistent(organizationId);
+    return { status: 200, body: { count: items.length, items } };
+  });
+
   router.get("/v1/fulfillments/:fulfillment_id", (ctx) => {
     const record = fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);

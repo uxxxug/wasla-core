@@ -13,8 +13,9 @@ import type {
   MoveJobAcceptedPayload,
   MoveJobCompletedPayload,
   MoveJobRejectedPayload,
+  SettlementState,
 } from "./domain.js";
-import { isClosed } from "./domain.js";
+import { isClosed, isFinanciallyConsistent } from "./domain.js";
 
 const PRODUCER = "wasla-core";
 
@@ -23,6 +24,8 @@ export interface FulfillmentRepository {
   update(fulfillment: Fulfillment): void;
   get(fulfillmentId: string): Fulfillment | undefined;
   findByOrderReference(orderReference: string): Fulfillment | undefined;
+  /** Used by reconciliation reads only; a Postgres adapter must filter in SQL. */
+  all(): readonly Fulfillment[];
 }
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
@@ -39,6 +42,9 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   findByOrderReference(orderReference: string): Fulfillment | undefined {
     return [...this.rows.values()].find((item) => item.market_order_reference === orderReference);
   }
+  all(): readonly Fulfillment[] {
+    return [...this.rows.values()];
+  }
 }
 
 /**
@@ -52,6 +58,20 @@ export interface FulfillmentPaymentPort {
     reason: string;
     correlation_id: string;
   }): Promise<unknown>;
+  /**
+   * Reads a hold without changing it. Used at intake to refuse work that can
+   * never be settled. Throws when the authorization does not exist.
+   */
+  getAuthorization?(authorizationId: string): {
+    status: string;
+    expires_at: string | null;
+  };
+}
+
+interface HoldInspection {
+  usable: boolean;
+  settlement: SettlementState;
+  reason: string | null;
 }
 
 export class FulfillmentService {
@@ -63,7 +83,15 @@ export class FulfillmentService {
     private readonly payments?: FulfillmentPaymentPort,
   ) {}
 
-  /** MARKET commercial order → CORE fulfillment request. Idempotent per order. */
+  /**
+   * MARKET commercial order → CORE fulfillment request. Idempotent per order.
+   *
+   * When the order declares a money hold, the hold is verified BEFORE anything
+   * is published. An order guarded by a hold that cannot be captured (missing,
+   * already captured, already voided or expired) is closed immediately as
+   * failed and `core.fulfillment.created` is never published — CORE must not
+   * ask MOVE to execute work it already knows it cannot settle.
+   */
   async consumeMarketOrder(event: EventEnvelope): Promise<Fulfillment> {
     if (event.event_type !== "market.order.created" || event.version !== 1) {
       throw invalid("unsupported market event");
@@ -74,17 +102,44 @@ export class FulfillmentService {
     }
     const existing = this.repo.findByOrderReference(payload.order_id);
     if (existing) return existing;
+    const authorizationId = payload.payment_authorization_id ?? null;
+    const hold = this.inspectHold(authorizationId);
     const fulfillment: Fulfillment = {
       fulfillment_id: newId(),
       organization_id: payload.organization_id,
       market_order_reference: payload.order_id,
       move_job_reference: null,
-      payment_authorization_id: payload.payment_authorization_id ?? null,
+      payment_authorization_id: authorizationId,
       status: "coordinating",
+      settlement_state: hold.settlement,
       created_at: this.clock.now().toISOString(),
       completed_at: null,
       closure_reason: null,
     };
+
+    if (!hold.usable) {
+      // A refused order must not leave money parked: a hold that is still
+      // authorized (for example an expired one awaiting the sweep) is released
+      // as part of the refusal.
+      const settlement =
+        hold.settlement === "held"
+          ? await this.release(fulfillment, `refused:${hold.reason}`, event.correlation_id)
+          : hold.settlement;
+      const refused: Fulfillment = {
+        ...fulfillment,
+        status: "failed",
+        settlement_state: settlement,
+        completed_at: this.clock.now().toISOString(),
+        closure_reason: hold.reason,
+      };
+      await withTransaction(this.outbox, (uow) => {
+        uow.stage(() => this.repo.insert(refused));
+        uow.emit(this.closureEvent(refused, event.correlation_id, event.event_id));
+      });
+      this.recordAudit("fulfillment.refused", refused, event.correlation_id);
+      return refused;
+    }
+
     await withTransaction(this.outbox, (uow) => {
       uow.stage(() => this.repo.insert(fulfillment));
       uow.emit(
@@ -193,8 +248,8 @@ export class FulfillmentService {
     const current = this.require(payload.fulfillment_id);
     if (current.status === "failed") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
-    await this.release(current, `move_rejected:${payload.reason}`, event.correlation_id);
-    return this.close(current, "failed", payload.reason, event.correlation_id, event.event_id);
+    const settlement = await this.release(current, `move_rejected:${payload.reason}`, event.correlation_id);
+    return this.close(current, "failed", payload.reason, settlement, event.correlation_id, event.event_id);
   }
 
   /**
@@ -222,21 +277,24 @@ export class FulfillmentService {
 
     let outcome: FulfillmentStatus = payload.outcome === "completed" ? "completed" : "failed";
     let reason: string | null = payload.outcome === "completed" ? null : "move_execution_failed";
+    let settlement: SettlementState;
 
     if (outcome === "completed") {
-      const settlement = await this.settle(current, event.correlation_id);
-      if (!settlement.ok) {
+      const result = await this.settle(current, event.correlation_id);
+      settlement = result.settlement;
+      if (!result.ok) {
         outcome = "failed";
-        reason = settlement.reason;
+        reason = result.reason;
       }
     } else {
-      await this.release(current, "move_execution_failed", event.correlation_id);
+      settlement = await this.release(current, "move_execution_failed", event.correlation_id);
     }
 
     const closed: Fulfillment = {
       ...current,
       move_job_reference: payload.job_id,
       status: outcome,
+      settlement_state: settlement,
       completed_at: payload.completed_at,
       closure_reason: reason,
     };
@@ -258,8 +316,30 @@ export class FulfillmentService {
     if (!input.reason.trim()) throw invalid("reason is required");
     if (current.status === "cancelled") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
-    await this.release(current, `cancelled:${input.reason.trim()}`, input.correlation_id);
-    return this.close(current, "cancelled", input.reason.trim(), input.correlation_id, null);
+    const settlement = await this.release(
+      current,
+      `cancelled:${input.reason.trim()}`,
+      input.correlation_id,
+    );
+    return this.close(
+      current,
+      "cancelled",
+      input.reason.trim(),
+      settlement,
+      input.correlation_id,
+      null,
+    );
+  }
+
+  /**
+   * Reconciliation read: fulfillments whose execution state and money state
+   * disagree. An empty result is the invariant CORE is expected to hold.
+   */
+  listFinanciallyInconsistent(organizationId?: string): readonly Fulfillment[] {
+    return this.repo
+      .all()
+      .filter((item) => !organizationId || item.organization_id === organizationId)
+      .filter((item) => !isFinanciallyConsistent(item));
   }
 
   require(fulfillmentId: string): Fulfillment {
@@ -276,12 +356,14 @@ export class FulfillmentService {
     current: Fulfillment,
     status: FulfillmentStatus,
     reason: string | null,
+    settlement: SettlementState,
     correlationId: string,
     causationId: string | null,
   ): Promise<Fulfillment> {
     const closed: Fulfillment = {
       ...current,
       status,
+      settlement_state: settlement,
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
@@ -310,6 +392,7 @@ export class FulfillmentService {
             order_reference: fulfillment.market_order_reference,
             reason: fulfillment.closure_reason ?? "cancelled",
             cancelled_at: fulfillment.completed_at,
+            settlement_state: fulfillment.settlement_state,
           }
         : {
             fulfillment_id: fulfillment.fulfillment_id,
@@ -317,6 +400,7 @@ export class FulfillmentService {
             outcome: fulfillment.status,
             completed_at: fulfillment.completed_at,
             reason: fulfillment.closure_reason,
+            settlement_state: fulfillment.settlement_state,
           },
     });
   }
@@ -324,38 +408,105 @@ export class FulfillmentService {
   private async settle(
     fulfillment: Fulfillment,
     correlationId: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string }> {
-    if (!this.payments || !fulfillment.payment_authorization_id) return { ok: true };
+  ): Promise<
+    | { ok: true; settlement: SettlementState }
+    | { ok: false; settlement: SettlementState; reason: string }
+  > {
+    if (!this.payments || !fulfillment.payment_authorization_id) {
+      return { ok: true, settlement: "none" };
+    }
     try {
       await this.payments.capture({
         authorization_id: fulfillment.payment_authorization_id,
         correlation_id: correlationId,
       });
-      return { ok: true };
+      return { ok: true, settlement: "captured" };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.release(fulfillment, `settlement_failed:${message}`, correlationId);
-      return { ok: false, reason: `payment_settlement_failed:${message}` };
+      const settlement = await this.release(
+        fulfillment,
+        `settlement_failed:${message}`,
+        correlationId,
+      );
+      return { ok: false, settlement, reason: `payment_settlement_failed:${message}` };
     }
   }
 
-  /** Releases the money hold, tolerating a hold that is already released. */
+  /**
+   * Releases the money hold and reports where the money ended up.
+   *
+   * A void that cannot be applied (for example because the hold was already
+   * captured out of band) is NOT swallowed silently: the fulfillment is marked
+   * `unsettled` and an audit record names the inconsistency, so closure still
+   * proceeds but the mismatch is visible to reconciliation instead of being
+   * lost.
+   */
   private async release(
     fulfillment: Fulfillment,
     reason: string,
     correlationId: string,
-  ): Promise<void> {
-    if (!this.payments || !fulfillment.payment_authorization_id) return;
+  ): Promise<SettlementState> {
+    if (!this.payments || !fulfillment.payment_authorization_id) return "none";
     try {
       await this.payments.voidAuthorization({
         authorization_id: fulfillment.payment_authorization_id,
         reason,
         correlation_id: correlationId,
       });
-    } catch {
-      // A captured or missing hold cannot be released; closure still proceeds
-      // and the audit trail records the outcome.
+      return "released";
+    } catch (err) {
+      this.audit.record({
+        actor_type: "service",
+        actor_id: null,
+        action: "fulfillment.settlement_inconsistent",
+        entity_type: "fulfillment",
+        entity_id: fulfillment.fulfillment_id,
+        correlation_id: correlationId,
+        metadata: {
+          // Deliberately not named *authorization*: the audit scrubber redacts
+          // such keys, and this reference must survive for reconciliation.
+          hold_reference: fulfillment.payment_authorization_id,
+          attempted: "void",
+          release_reason: reason,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+      return "unsettled";
     }
+  }
+
+  /**
+   * Verifies, without mutating anything, that a declared hold can still guard
+   * this execution. A port without `getAuthorization` (or no port at all)
+   * cannot verify, so the declared hold is trusted and capture-time failure
+   * remains the backstop.
+   */
+  private inspectHold(authorizationId: string | null): HoldInspection {
+    if (!authorizationId) return { usable: true, settlement: "none", reason: null };
+    if (!this.payments?.getAuthorization) {
+      return { usable: true, settlement: "held", reason: null };
+    }
+    let authorization: { status: string; expires_at: string | null };
+    try {
+      authorization = this.payments.getAuthorization(authorizationId);
+    } catch {
+      return { usable: false, settlement: "none", reason: "payment_hold_not_found" };
+    }
+    if (authorization.status === "captured") {
+      // Money already moved for work that has not been coordinated yet: the
+      // order is refused and the mismatch is surfaced for reconciliation.
+      return { usable: false, settlement: "unsettled", reason: "payment_hold_already_captured" };
+    }
+    if (authorization.status !== "authorized") {
+      return { usable: false, settlement: "released", reason: "payment_hold_not_authorized" };
+    }
+    if (
+      authorization.expires_at &&
+      Date.parse(authorization.expires_at) <= this.clock.now().getTime()
+    ) {
+      return { usable: false, settlement: "held", reason: "payment_hold_expired" };
+    }
+    return { usable: true, settlement: "held", reason: null };
   }
 
   private recordAudit(action: string, fulfillment: Fulfillment, correlationId: string): void {
@@ -366,7 +517,10 @@ export class FulfillmentService {
       entity_type: "fulfillment",
       entity_id: fulfillment.fulfillment_id,
       correlation_id: correlationId,
-      metadata: { status: fulfillment.status },
+      metadata: {
+        status: fulfillment.status,
+        settlement_state: fulfillment.settlement_state,
+      },
     });
   }
 }

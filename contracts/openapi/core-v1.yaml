@@ -354,10 +354,30 @@ paths:
       responses:
         "200": { description: Matching service areas ordered by distance }
         "400": { $ref: "#/components/responses/Error" }
+  /v1/fulfillments/reconciliation/inconsistent:
+    get:
+      summary: List fulfillments whose execution state disagrees with their money state
+      description: >-
+        Reconciliation read. Returns fulfillments where execution state and
+        settlement_state do not agree — for example a closed fulfillment whose
+        hold could not be brought to a terminal state (settlement_state
+        `unsettled`). An empty list is the invariant CORE is expected to hold.
+      parameters:
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Count and list of inconsistent fulfillments }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}:
     get:
       summary: Read CORE fulfillment coordination state
-      description: Returns opaque cross-system references, never order or job details.
+      description: >-
+        Returns opaque cross-system references, never order or job details.
+        `status` is the execution state and `settlement_state` is its financial
+        counterpart (none, held, captured, released, unsettled).
       parameters:
         - name: fulfillment_id
           in: path

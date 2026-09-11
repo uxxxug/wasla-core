@@ -1,7 +1,7 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** Fulfillment lifecycle observability — the `dispatched` transition is now a published contract.
+**Last milestone:** Execution/money consistency made explicit — `settlement_state` on every fulfillment, holds verified at intake, and a reconciliation read.
 **Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
@@ -176,6 +176,9 @@ MARKET were not touched; anything they must implement is recorded under
 |---|---|---|---|
 | G-1 | The `coordinating -> dispatched` transition mutated state but published **no** event. MARKET could not observe that work had been assigned, and a stream replay could not reconstruct the intermediate state. | high | fixed |
 | G-2 | A `move.job.accepted` arriving after a cancellation raised a permanent `conflict`, which would dead-letter the MOVE consumer on a legitimate race. | medium | fixed |
+| G-3 | A failed hold release was swallowed by an empty `catch`. A fulfillment could close as cancelled or failed while its money was still held or already captured, with **no** record anywhere — the exact state/money inconsistency CORE is responsible for preventing. | high | fixed |
+| G-4 | Execution state and money state were only comparable through a cross-module join, so no query could answer "is CORE financially consistent?". | high | fixed |
+| G-5 | `market.order.created` could declare any `payment_authorization_id` and CORE never verified it. A hold that was missing, voided, captured or expired was only discovered at capture time — **after** MOVE had already executed the work. | high | fixed |
 
 ### Changes
 
@@ -186,6 +189,28 @@ MARKET were not touched; anything they must implement is recorded under
   traceability, stays `cancelled`, publishes nothing and does not fail the
   consumer.
 - `docs/event-catalog.md` documents the full published lifecycle tree.
+- `settlement_state` (`none` | `held` | `captured` | `released` | `unsettled`)
+  is now part of the fulfillment aggregate and is set on every transition.
+  `unsettled` is the single explicit inconsistent value.
+- A void that cannot be applied is no longer silent: the fulfillment is marked
+  `unsettled` and an audit entry (`fulfillment.settlement_inconsistent`, with
+  the hold reference deliberately named so the audit scrubber keeps it) records
+  the mismatch. Closure still proceeds — CORE reports the truth rather than
+  blocking.
+- Holds are verified at intake through the published money port. An order whose
+  hold is missing, not authorized, already captured or expired is closed as
+  `failed` immediately, `core.fulfillment.created` is never published, and a
+  still-authorized hold is released as part of the refusal. CORE no longer asks
+  MOVE to execute work it already knows it cannot settle.
+- `isFinanciallyConsistent` encodes the invariant; `listFinanciallyInconsistent`
+  and `GET /v1/fulfillments/reconciliation/inconsistent?organization_id=` expose
+  it. An empty result is the expected state.
+- `settlement_state` added as an optional, additive field to
+  `core.fulfillment.completed.v1` and `core.fulfillment.cancelled.v1`; the
+  closure `reason` vocabulary is now documented in the contract.
+- Migration `0005_fulfillment_settlement_state` (additive, with backfill and
+  rollback) adds the column, a value check and an alignment check that stops
+  the database from storing a closed fulfillment that is still holding money.
 
 ## Cycle 2026-09-11 — cross-system vertical slice (CORE side)
 

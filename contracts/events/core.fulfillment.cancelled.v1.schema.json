@@ -10,14 +10,20 @@
     "fulfillment_id": { "type": "string", "format": "uuid" },
     "order_reference": { "type": "string", "minLength": 1 },
     "reason": { "type": "string", "minLength": 1 },
-    "cancelled_at": { "type": "string", "format": "date-time" }
+    "cancelled_at": { "type": "string", "format": "date-time" },
+    "settlement_state": {
+      "type": "string",
+      "enum": ["none", "held", "captured", "released", "unsettled"],
+      "description": "State of the CORE money hold at closure. `released` means the hold was returned; `unsettled` means CORE could not bring the hold to a terminal state and the case needs reconciliation. Optional and additive; consumers may ignore it."
+    }
   },
   "examples": [
     {
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
       "order_reference": "order-1",
       "reason": "customer_cancelled",
-      "cancelled_at": "2026-09-11T03:42:00.000Z"
+      "cancelled_at": "2026-09-11T03:42:00.000Z",
+      "settlement_state": "released"
     }
   ]
 }
