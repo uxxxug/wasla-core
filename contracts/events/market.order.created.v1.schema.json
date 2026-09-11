@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/market.order.created.v1.schema.json",
+  "title": "market.order.created v1",
+  "description": "Consumed by CORE when MARKET creates a commercial order requiring fulfillment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["order_id", "organization_id", "requested_service"],
+  "properties": {
+    "order_id": { "type": "string", "minLength": 1 },
+    "organization_id": { "type": "string", "format": "uuid" },
+    "requested_service": { "type": "string", "minLength": 1 }
+  },
+  "examples": [{ "order_id": "order-2", "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070", "requested_service": "delivery" }]
+}

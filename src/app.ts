@@ -13,6 +13,14 @@ import {
 } from "./modules/organization/service.js";
 import { registerIdentityRoutes } from "./modules/identity-access/http.js";
 import { registerOrganizationRoutes } from "./modules/organization/http.js";
+import { InMemoryMoneyRepository } from "./modules/money/repository.js";
+import { MoneyService } from "./modules/money/service.js";
+import { registerMoneyRoutes } from "./modules/money/http.js";
+import {
+  FulfillmentService,
+  InMemoryFulfillmentRepository,
+} from "./modules/fulfillment/service.js";
+import { registerFulfillmentRoutes } from "./modules/fulfillment/http.js";
 
 export interface CoreApp {
   router: Router;
@@ -22,6 +30,8 @@ export interface CoreApp {
   audit: AuditLog;
   identity: IdentityService;
   organization: OrganizationService;
+  money: MoneyService;
+  fulfillment: FulfillmentService;
   clock: Clock;
 }
 
@@ -43,6 +53,19 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
     audit,
     clock,
   );
+  const money = new MoneyService(new InMemoryMoneyRepository(), outbox, audit, clock);
+  const fulfillment = new FulfillmentService(
+    new InMemoryFulfillmentRepository(),
+    outbox,
+    audit,
+    clock,
+  );
+  bus.subscribe("core.fulfillment.market-order", "market.order.created", async (event) => {
+    await fulfillment.consumeMarketOrder(event);
+  });
+  bus.subscribe("core.fulfillment.move-completion", "move.job.completed", async (event) => {
+    await fulfillment.consumeMoveCompletion(event);
+  });
 
   const router = new Router();
   router.get("/health", () => ({ status: 200, body: { status: "ok" } }));
@@ -52,6 +75,8 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
   }));
   registerIdentityRoutes(router, identity);
   registerOrganizationRoutes(router, organization, identity);
+  registerMoneyRoutes(router, money, identity);
+  registerFulfillmentRoutes(router, fulfillment, identity);
 
-  return { router, bus, outbox, publisher, audit, identity, organization, clock };
+  return { router, bus, outbox, publisher, audit, identity, organization, money, fulfillment, clock };
 }

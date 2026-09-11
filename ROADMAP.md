@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** Foundation cycle — eventing, identity/access, organization, governance gates, CI.
-**Verification at this commit:** `tsc --noEmit` clean; `vitest run` 32/32 passing; governance and contract gates passing.
+**Last milestone:** Money and Fulfillment cycle — balanced ledger, payment holds/capture, event-driven coordination.
+**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` 37/37 passing; governance, contract and migration gates passing. The roadmap diff gate skipped because this isolated working tree has no local commit history.
 
 ## What this project is
 
@@ -51,22 +51,27 @@ orders, marketplace search, store pricing, or any product-specific UI.
 - [x] Contract gate: every emitted event type must have a published schema.
 - [x] Roadmap gate: implementation changes without a roadmap update fail CI.
 - [x] CI pipeline: install, typecheck, tests, governance, contracts, roadmap.
+- [x] CORE-owned wallets using integer minor units and ISO currency codes.
+- [x] Balanced double-entry ledger with append-only database enforcement authored.
+- [x] Idempotent payment authorization and capture with transactional outbox events.
+- [x] Fulfillment coordination using opaque MARKET order and MOVE job references.
+- [x] Idempotent local-bus consumers for `market.order.created` and `move.job.completed`.
+- [x] Versioned JSON Schemas and API contract additions for this cycle.
 
 ## In progress
 
-Nothing is in flight at this commit.
+Remote publication and remote CI evidence remain pending because repository credentials are unavailable in this environment.
 
 ## Remaining, in dependency order
 
 1. Postgres adapters for the identity and organization ports; run migration
    0001 against a provisioned database.
 2. Geography reference module.
-3. Money: payments, wallet, immutable ledger, settlement (ADR 0005).
+3. Settlement and payment authorization void/expiry lifecycle (ADR 0005).
 4. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
 5. Channels and notifications; Telegram adapter.
-6. Fulfillment coordination: `core.fulfillment.created`, `core.fulfillment.completed`,
-   consumption of `market.order.created` and `move.job.completed` (ADR 0006).
-7. Real cross-system contracts with MOVE and MARKET.
+6. Durable external event ingress/transport for the implemented Fulfillment contracts.
+7. Publish and adopt the versioned contracts in MOVE and MARKET.
 8. End-to-end vertical slice: identity → commercial order → fulfillment →
    operational job → execution → completion → commercial reaction.
 9. Event normalisation and historical replay tooling.
@@ -94,6 +99,7 @@ Nothing.
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | GitHub Actions is blocked on the `noor-seez` account | The CI workflow in this repository cannot run: every job fails at start with "recent account payments have failed or your spending limit needs to be increased". The same block affects the MOVE repository. All gates are therefore verified locally only | Resolve GitHub billing for the account, then re-run the workflow |
+| B-8 | Repository credentials are unavailable in the current execution environment | This cycle can be verified locally but cannot be committed or pushed | Restore authorized GitHub access, then publish the verified tree without rewriting history |
 
 ## Open questions
 
@@ -115,7 +121,7 @@ Nothing.
 
 ## Tests that pass at this commit
 
-32 of 32.
+37 of 37 locally.
 
 - Eventing (12): envelope completeness, malformed envelope rejection,
   transaction rollback leaves no event, commit writes state and event together,
@@ -132,11 +138,17 @@ Nothing.
   tenant isolation on reads, token never echoed back, unknown route shape.
 - Governance (4): no MOVE/MARKET entities, no hardcoded secrets, no
   cross-module internal imports, no TODO markers.
+- Money: balanced entries, posted/held/available balances, idempotent authorization
+  and capture, validation and insufficient-funds rejection.
+- Fulfillment: idempotent MARKET order consumption, opaque coordination state,
+  MOVE completion and exactly-once CORE outcome emission on the local bus.
 
 ## Not proven yet
 
 - Behaviour against a real Postgres database (migration 0001 unexecuted).
 - Behaviour under a real message broker (the bus is in-process today).
+- Atomic rollback of in-memory staged mutations if a later staged mutation throws;
+  production persistence must supply a real database transaction boundary.
 - Any production or staging deployment.
 - Any data migration, reconciliation or cutover.
 - Performance and load characteristics.

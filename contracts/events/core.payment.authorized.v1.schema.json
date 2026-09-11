@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.payment.authorized.v1.schema.json",
+  "title": "core.payment.authorized v1",
+  "description": "Published when CORE places a payment hold against available wallet funds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["authorization_id", "wallet_id", "amount_minor", "currency", "business_reference"],
+  "properties": {
+    "authorization_id": { "type": "string", "format": "uuid" },
+    "wallet_id": { "type": "string", "format": "uuid" },
+    "amount_minor": { "type": "integer", "minimum": 1 },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "business_reference": { "type": "string", "minLength": 1 }
+  },
+  "examples": [{ "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f", "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15", "amount_minor": 1250, "currency": "SAR", "business_reference": "order-44" }]
+}

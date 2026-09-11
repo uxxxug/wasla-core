@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.fulfillment.created.v1.schema.json",
+  "title": "core.fulfillment.created v1",
+  "description": "Published by CORE to request MOVE execution using opaque MARKET references.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fulfillment_id", "organization_id", "order_reference", "requested_service"],
+  "properties": {
+    "fulfillment_id": { "type": "string", "format": "uuid" },
+    "organization_id": { "type": "string", "format": "uuid" },
+    "order_reference": { "type": "string", "minLength": 1 },
+    "requested_service": { "type": "string", "minLength": 1 }
+  },
+  "examples": [{ "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d", "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070", "order_reference": "order-2", "requested_service": "delivery" }]
+}

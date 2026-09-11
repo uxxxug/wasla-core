@@ -11,8 +11,8 @@ record and is not restated here.
 | 0002 | CORE ownership boundary | `scripts/check-governance.mjs` rejects MOVE/MARKET tables; `tests/governance.test.ts` rejects their entities in code | enforced |
 | 0003 | CORE is the source of truth for identity | `src/modules/identity-access` + `db/migrations/0001` | implemented (migration not yet executed) |
 | 0004 | Organization = Tenant, flat | `src/modules/organization` — no hierarchy column | implemented |
-| 0005 | Money owned entirely by CORE | not yet implemented | pending |
-| 0006 | Commercial Order / Fulfillment / Operational Job separation | not yet implemented | pending |
+| 0005 | Money owned entirely by CORE | Wallet, authorization and balanced append-only ledger module plus migration 0002 | implemented (migration not yet executed) |
+| 0006 | Commercial Order / Fulfillment / Operational Job separation | Fulfillment stores opaque order/job references and communicates by versioned events | implemented on local bus |
 | 0007 | No direct MOVE ↔ MARKET business communication | Governance gate; no MOVE/MARKET client exists in CORE | enforced |
 | 0008 | Closed list of synchronous paths | Only `/v1/access/check`, `/v1/sessions/current` exposed so far | enforced |
 | 0009 | Event backbone with outbox/inbox | `src/platform/eventing/*`, 12 passing tests | implemented |

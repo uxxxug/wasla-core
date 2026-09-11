@@ -33,7 +33,9 @@ package, no cross-database access.
 | HTTP surface with correlation ids, canonical errors, structured logs, health/readiness | implemented, 8 tests |
 | Append-only audit trail with metadata scrubbing | implemented |
 | Executable architecture governance | implemented, 4 tests |
-| Money, subscriptions, reputation, notifications, fulfillment | **not implemented** |
+| Wallet, balanced append-only ledger, payment authorization/capture | implemented in memory; schema authored, not executed |
+| Fulfillment coordination via MARKET/MOVE events | implemented on local bus; production transport unproven |
+| Subscriptions, reputation, notifications | **not implemented** |
 
 Persistence today is the in-memory reference implementation of each repository
 port. The Postgres schema is authored in `db/migrations/0001_core_foundation.sql`

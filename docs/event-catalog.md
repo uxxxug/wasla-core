@@ -8,19 +8,21 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | Event type | Version | Status | Entity | Consumers | Schema |
 |---|---|---|---|---|---|
 | `core.identity.verified` | 1 | implemented | identity | MOVE, MARKET | `contracts/events/core.identity.verified.v1.schema.json` |
-| `core.fulfillment.created` | 1 | not implemented | fulfillment | MOVE | planned — Fulfillment cycle |
-| `core.fulfillment.completed` | 1 | not implemented | fulfillment | MARKET | planned — Fulfillment cycle |
+| `core.money.credited` | 1 | implemented | wallet | authorized consumers | `contracts/events/core.money.credited.v1.schema.json` |
+| `core.payment.authorized` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.authorized.v1.schema.json` |
+| `core.payment.captured` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.captured.v1.schema.json` |
+| `core.fulfillment.created` | 1 | implemented | fulfillment | MOVE | `contracts/events/core.fulfillment.created.v1.schema.json` |
+| `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
 
 ## Consumed by CORE
 
 | Event type | Version | Producer | Status | Handler |
 |---|---|---|---|---|
-| `market.order.created` | 1 | MARKET | not implemented | planned — Fulfillment cycle |
-| `move.job.completed` | 1 | MOVE | not implemented | planned — Fulfillment cycle |
+| `market.order.created` | 1 | MARKET | implemented in local bus | `core.fulfillment.market-order` |
+| `move.job.completed` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-completion` |
 
-`not implemented` means exactly that: no producer, no consumer, no schema file yet.
-Rows are promoted to `implemented` only when a schema, a producer and a passing
-test all exist.
+`implemented in local bus` means the schema, idempotent consumer and tests exist;
+production transport remains unproven until a broker or durable queue is selected.
 
 ## Compatibility rules
 

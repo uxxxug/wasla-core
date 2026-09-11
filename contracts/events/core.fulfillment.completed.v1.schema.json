@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.fulfillment.completed.v1.schema.json",
+  "title": "core.fulfillment.completed v1",
+  "description": "Published by CORE after MOVE reports the final execution outcome.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fulfillment_id", "order_reference", "outcome", "completed_at"],
+  "properties": {
+    "fulfillment_id": { "type": "string", "format": "uuid" },
+    "order_reference": { "type": "string", "minLength": 1 },
+    "outcome": { "type": "string", "enum": ["completed", "failed"] },
+    "completed_at": { "type": "string", "format": "date-time" }
+  },
+  "examples": [{ "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d", "order_reference": "order-2", "outcome": "completed", "completed_at": "2026-09-11T03:45:00.000Z" }]
+}

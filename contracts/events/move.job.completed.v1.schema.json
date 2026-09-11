@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/move.job.completed.v1.schema.json",
+  "title": "move.job.completed v1",
+  "description": "Consumed by CORE when MOVE reports the final outcome for an opaque fulfillment reference.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fulfillment_id", "job_id", "outcome", "completed_at"],
+  "properties": {
+    "fulfillment_id": { "type": "string", "format": "uuid" },
+    "job_id": { "type": "string", "minLength": 1 },
+    "outcome": { "type": "string", "enum": ["completed", "failed"] },
+    "completed_at": { "type": "string", "format": "date-time" }
+  },
+  "examples": [{ "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d", "job_id": "job-9", "outcome": "completed", "completed_at": "2026-09-11T03:45:00.000Z" }]
+}

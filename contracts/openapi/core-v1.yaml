@@ -201,6 +201,89 @@ paths:
               schema: { $ref: "#/components/schemas/Organization" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/wallets:
+    post:
+      summary: Create or resolve a CORE-owned wallet
+      description: Idempotent by owner type, owner id and ISO 4217 currency.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [owner_type, owner_id, currency]
+              properties:
+                owner_type: { type: string, enum: [identity, organization] }
+                owner_id: { type: string, format: uuid }
+                currency: { type: string, pattern: "^[A-Z]{3}$" }
+      responses:
+        "201": { description: Wallet created }
+        "200": { description: Existing wallet resolved }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/wallets/{wallet_id}/balance:
+    get:
+      summary: Read posted, held and available wallet amounts
+      parameters:
+        - name: wallet_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Balance in integer minor units
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [posted_minor, held_minor, available_minor]
+                properties:
+                  posted_minor: { type: integer }
+                  held_minor: { type: integer, minimum: 0 }
+                  available_minor: { type: integer }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/payment-authorizations:
+    post:
+      summary: Place an idempotent hold on wallet funds
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet_id, amount_minor, business_reference]
+              properties:
+                wallet_id: { type: string, format: uuid }
+                amount_minor: { type: integer, minimum: 1 }
+                business_reference: { type: string, minLength: 1 }
+      responses:
+        "201": { description: Payment authorized }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/payment-authorizations/{authorization_id}/capture:
+    post:
+      summary: Capture an authorized payment into the balanced ledger
+      parameters:
+        - name: authorization_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Capture transaction, idempotent on authorization id }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/fulfillments/{fulfillment_id}:
+    get:
+      summary: Read CORE fulfillment coordination state
+      description: Returns opaque cross-system references, never order or job details.
+      parameters:
+        - name: fulfillment_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Fulfillment coordination record }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     bearerAuth:

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.money.credited.v1.schema.json",
+  "title": "core.money.credited v1",
+  "description": "Published when CORE posts a balanced credit to a wallet ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wallet_id", "transaction_id", "amount_minor", "currency", "business_reference"],
+  "properties": {
+    "wallet_id": { "type": "string", "format": "uuid" },
+    "transaction_id": { "type": "string", "format": "uuid" },
+    "amount_minor": { "type": "integer", "minimum": 1 },
+    "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+    "business_reference": { "type": "string", "minLength": 1 }
+  },
+  "examples": [{ "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15", "transaction_id": "1f05fd37-9944-4469-a2ea-2596fc2fd12e", "amount_minor": 5000, "currency": "SAR", "business_reference": "deposit-2026-1" }]
+}
