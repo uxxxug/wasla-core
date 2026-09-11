@@ -8,6 +8,7 @@ export interface MoneyRepository {
   getAuthorization(authorizationId: string): PaymentAuthorization | undefined;
   findAuthorizationByReference(reference: string): PaymentAuthorization | undefined;
   listAuthorizations(walletId: string): readonly PaymentAuthorization[];
+  allAuthorizations(): readonly PaymentAuthorization[];
   updateAuthorization(authorization: PaymentAuthorization): void;
   insertTransaction(transaction: LedgerTransaction): void;
   findTransactionByReference(reference: string): LedgerTransaction | undefined;
@@ -41,6 +42,9 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   }
   listAuthorizations(walletId: string): readonly PaymentAuthorization[] {
     return [...this.authorizations.values()].filter((item) => item.wallet_id === walletId);
+  }
+  allAuthorizations(): readonly PaymentAuthorization[] {
+    return [...this.authorizations.values()];
   }
   updateAuthorization(authorization: PaymentAuthorization): void {
     this.authorizations.set(authorization.authorization_id, authorization);

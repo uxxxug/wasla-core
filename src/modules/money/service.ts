@@ -124,6 +124,7 @@ export class MoneyService {
     amount_minor: number;
     business_reference: string;
     correlation_id: string;
+    expires_at?: Date | string | null;
   }): Promise<PaymentAuthorization> {
     const wallet = this.requireWallet(input.wallet_id);
     this.assertAmount(input.amount_minor);
@@ -143,6 +144,8 @@ export class MoneyService {
       created_at: this.clock.now().toISOString(),
       captured_at: null,
       voided_at: null,
+      expires_at: this.expiry(input.expires_at ?? null),
+      void_reason: null,
     };
     await withTransaction(this.outbox, (uow) => {
       uow.stage(() => this.repo.insertAuthorization(authorization));
@@ -181,6 +184,7 @@ export class MoneyService {
     const existing = this.repo.findTransactionByReference(`capture:${authorization.authorization_id}`);
     if (existing) return existing;
     if (authorization.status !== "authorized") throw conflict("authorization cannot be captured");
+    if (this.isExpired(authorization)) throw conflict("authorization has expired and can only be voided");
     const wallet = this.requireWallet(authorization.wallet_id);
     const transaction = this.transaction(
       "capture",
@@ -224,6 +228,94 @@ export class MoneyService {
       authorization.currency,
     );
     return transaction;
+  }
+
+  /**
+   * Releases a hold without moving money. Idempotent: voiding an already
+   * voided authorization returns it unchanged; a captured one cannot be voided.
+   */
+  async voidAuthorization(input: {
+    authorization_id: string;
+    reason: string;
+    correlation_id: string;
+  }): Promise<PaymentAuthorization> {
+    const authorization = this.repo.getAuthorization(input.authorization_id);
+    if (!authorization) throw notFound("payment authorization not found");
+    if (authorization.status === "voided") return authorization;
+    if (authorization.status === "captured") throw conflict("a captured authorization cannot be voided");
+    if (!input.reason.trim()) throw invalid("reason is required");
+    return this.applyVoid(authorization, input.reason.trim(), input.correlation_id);
+  }
+
+  /**
+   * Sweeps holds whose expiry has passed. Expiry never moves money — the hold
+   * is released and the funds return to the available balance.
+   */
+  async expireDueAuthorizations(correlationId: string): Promise<readonly PaymentAuthorization[]> {
+    const due = this.repo
+      .allAuthorizations()
+      .filter((authorization) => authorization.status === "authorized" && this.isExpired(authorization));
+    const expired: PaymentAuthorization[] = [];
+    for (const authorization of due) {
+      expired.push(await this.applyVoid(authorization, "expired", correlationId));
+    }
+    return expired;
+  }
+
+  private async applyVoid(
+    authorization: PaymentAuthorization,
+    reason: string,
+    correlationId: string,
+  ): Promise<PaymentAuthorization> {
+    const updated: PaymentAuthorization = {
+      ...authorization,
+      status: "voided",
+      voided_at: this.clock.now().toISOString(),
+      void_reason: reason,
+    };
+    await withTransaction(this.outbox, (uow) => {
+      uow.stage(() => this.repo.updateAuthorization(updated));
+      uow.emit(
+        makeEvent({
+          event_type: "core.payment.voided",
+          version: 1,
+          producer: PRODUCER,
+          occurred_at: this.clock.now(),
+          correlation_id: correlationId,
+          entity_type: "payment_authorization",
+          entity_id: updated.authorization_id,
+          payload: {
+            authorization_id: updated.authorization_id,
+            wallet_id: updated.wallet_id,
+            amount_minor: updated.amount_minor,
+            currency: updated.currency,
+            business_reference: updated.business_reference,
+            reason,
+          },
+        }),
+      );
+    });
+    this.auditMoney(
+      "payment.authorization.voided",
+      updated.authorization_id,
+      correlationId,
+      updated.amount_minor,
+      updated.currency,
+    );
+    return updated;
+  }
+
+  private isExpired(authorization: PaymentAuthorization): boolean {
+    if (!authorization.expires_at) return false;
+    return Date.parse(authorization.expires_at) <= this.clock.now().getTime();
+  }
+
+  private expiry(value: Date | string | null): string | null {
+    if (value === null) return null;
+    const at = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(at.getTime())) throw invalid("expires_at must be a valid timestamp");
+    if (at.getTime() <= this.clock.now().getTime()) throw invalid("expires_at must be in the future");
+    return at.toISOString();
   }
 
   getAuthorization(authorizationId: string): PaymentAuthorization {

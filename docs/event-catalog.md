@@ -11,6 +11,7 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.money.credited` | 1 | implemented | wallet | authorized consumers | `contracts/events/core.money.credited.v1.schema.json` |
 | `core.payment.authorized` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.authorized.v1.schema.json` |
 | `core.payment.captured` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.captured.v1.schema.json` |
+| `core.payment.voided` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.voided.v1.schema.json` |
 | `core.fulfillment.created` | 1 | implemented | fulfillment | MOVE | `contracts/events/core.fulfillment.created.v1.schema.json` |
 | `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
 

@@ -256,6 +256,7 @@ paths:
                 wallet_id: { type: string, format: uuid }
                 amount_minor: { type: integer, minimum: 1 }
                 business_reference: { type: string, minLength: 1 }
+                expires_at: { type: string, format: date-time, nullable: true }
       responses:
         "201": { description: Payment authorized }
         "409": { $ref: "#/components/responses/Error" }
@@ -271,6 +272,88 @@ paths:
         "200": { description: Capture transaction, idempotent on authorization id }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /v1/payment-authorizations/{authorization_id}/void:
+    post:
+      summary: Release a hold without moving money
+      parameters:
+        - name: authorization_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Authorization voided, idempotent }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/geography/countries:
+    get:
+      summary: List reference countries
+      responses:
+        "200": { description: Countries }
+    post:
+      summary: Register a reference country
+      responses:
+        "201": { description: Country registered }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/geography/countries/{country_code}/regions:
+    get:
+      summary: List regions of a country
+      parameters:
+        - name: country_code
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Regions }
+  /v1/geography/regions/{region_id}/cities:
+    get:
+      summary: List cities of a region
+      parameters:
+        - name: region_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Cities }
+  /v1/geography/regions:
+    post:
+      summary: Register a reference region
+      responses:
+        "201": { description: Region registered }
+  /v1/geography/cities:
+    post:
+      summary: Register a reference city
+      responses:
+        "201": { description: City registered }
+  /v1/geography/service-areas:
+    post:
+      summary: Register a service area with a coverage radius
+      responses:
+        "201": { description: Service area registered }
+  /v1/geography/service-areas/resolve:
+    get:
+      summary: Resolve a coordinate to covering service areas
+      description: Reference resolution only. CORE never stores tracking, routes or driver positions.
+      parameters:
+        - name: latitude
+          in: query
+          required: true
+          schema: { type: number }
+        - name: longitude
+          in: query
+          required: true
+          schema: { type: number }
+      responses:
+        "200": { description: Matching service areas ordered by distance }
+        "400": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}:
     get:
       summary: Read CORE fulfillment coordination state

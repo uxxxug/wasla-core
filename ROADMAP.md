@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
-**Last updated:** 2026-09-11
-**Last milestone:** Money and Fulfillment cycle — balanced ledger, payment holds/capture, event-driven coordination.
-**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` 37/37 passing; governance, contract and migration gates passing. The roadmap diff gate skipped because this isolated working tree has no local commit history.
+**Last updated:** 2026-09-12
+**Last milestone:** Geography reference module and the payment authorization void/expiry lifecycle (ADR 0005).
+**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` 44/44 passing; governance, contract and migration gates passing. The roadmap diff gate skipped because this isolated working tree has no local commit history. Remote CI remains blocked by B-7.
 
 ## What this project is
 
@@ -57,6 +57,16 @@ orders, marketplace search, store pricing, or any product-specific UI.
 - [x] Fulfillment coordination using opaque MARKET order and MOVE job references.
 - [x] Idempotent local-bus consumers for `market.order.created` and `move.job.completed`.
 - [x] Versioned JSON Schemas and API contract additions for this cycle.
+- [x] Geography reference module: countries, regions, cities and service areas
+      with radius coverage and coordinate resolution — reference data only, no
+      tracking, routing, dispatch or driver state.
+- [x] Payment authorization lifecycle: explicit idempotent void, optional hold
+      expiry, expiry sweep that releases funds without moving money, and
+      capture refused after expiry.
+- [x] `core.payment.voided` v1 event schema, void endpoint and expiry field in
+      the published contract.
+- [x] Migration 0003 with its rollback for geography reference tables and the
+      authorization lifecycle columns.
 
 ## In progress
 
@@ -66,8 +76,8 @@ Remote publication and remote CI evidence remain pending because repository cred
 
 1. Postgres adapters for the identity and organization ports; run migration
    0001 against a provisioned database.
-2. Geography reference module.
-3. Settlement and payment authorization void/expiry lifecycle (ADR 0005).
+2. Settlement (payment authorization void/expiry now implemented, ADR 0005).
+3. Postgres adapter for the geography and money ports.
 4. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
 5. Channels and notifications; Telegram adapter.
 6. Durable external event ingress/transport for the implemented Fulfillment contracts.
@@ -99,7 +109,7 @@ Nothing.
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | GitHub Actions is blocked on the `noor-seez` account | The CI workflow in this repository cannot run: every job fails at start with "recent account payments have failed or your spending limit needs to be increased". The same block affects the MOVE repository. All gates are therefore verified locally only | Resolve GitHub billing for the account, then re-run the workflow |
-| B-8 | Repository credentials are unavailable in the current execution environment | This cycle can be verified locally but cannot be committed or pushed | Restore authorized GitHub access, then publish the verified tree without rewriting history |
+| B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `noor-seez/wasla-core` by fast-forward without rewriting history | — | — |
 
 ## Open questions
 
@@ -121,7 +131,7 @@ Nothing.
 
 ## Tests that pass at this commit
 
-37 of 37 locally.
+44 of 44 locally.
 
 - Eventing (12): envelope completeness, malformed envelope rejection,
   transaction rollback leaves no event, commit writes state and event together,
@@ -136,6 +146,12 @@ Nothing.
 - API (8): health, readiness, idempotent registration over HTTP, canonical
   error shape with correlation id, unauthenticated and forged tokens rejected,
   tenant isolation on reads, token never echoed back, unknown route shape.
+- Money (6): balanced entries and available balance, idempotent authorize and
+  capture, insufficient funds refused, idempotent void returning held funds,
+  expiry sweep releasing funds and blocking capture, past expiry rejected.
+- Geography (4): reference registration, hierarchy reads, coordinate
+  resolution ordered by distance, no coverage outside a service area.
+- Fulfillment (2): coordination on opaque references, idempotent consumption.
 - Governance (4): no MOVE/MARKET entities, no hardcoded secrets, no
   cross-module internal imports, no TODO markers.
 - Money: balanced entries, posted/held/available balances, idempotent authorization

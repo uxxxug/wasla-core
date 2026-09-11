@@ -50,6 +50,20 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
         amount_minor: requiredAmount(input),
         business_reference: requiredString(input, "business_reference"),
         correlation_id: ctx.correlation_id,
+        ...(typeof input["expires_at"] === "string" ? { expires_at: input["expires_at"] } : {}),
+      }),
+    };
+  });
+
+  router.post("/v1/payment-authorizations/:authorization_id/void", async (ctx) => {
+    requirePrincipal(ctx, identity, "money.authorize");
+    const input = objectBody(ctx);
+    return {
+      status: 200,
+      body: await money.voidAuthorization({
+        authorization_id: ctx.params["authorization_id"] ?? "",
+        reason: requiredString(input, "reason"),
+        correlation_id: ctx.correlation_id,
       }),
     };
   });

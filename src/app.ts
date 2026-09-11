@@ -21,6 +21,9 @@ import {
   InMemoryFulfillmentRepository,
 } from "./modules/fulfillment/service.js";
 import { registerFulfillmentRoutes } from "./modules/fulfillment/http.js";
+import { InMemoryGeographyRepository } from "./modules/geography/repository.js";
+import { GeographyService } from "./modules/geography/service.js";
+import { registerGeographyRoutes } from "./modules/geography/http.js";
 
 export interface CoreApp {
   router: Router;
@@ -32,6 +35,7 @@ export interface CoreApp {
   organization: OrganizationService;
   money: MoneyService;
   fulfillment: FulfillmentService;
+  geography: GeographyService;
   clock: Clock;
 }
 
@@ -54,6 +58,7 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
     clock,
   );
   const money = new MoneyService(new InMemoryMoneyRepository(), outbox, audit, clock);
+  const geography = new GeographyService(new InMemoryGeographyRepository(), audit);
   const fulfillment = new FulfillmentService(
     new InMemoryFulfillmentRepository(),
     outbox,
@@ -77,6 +82,19 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
   registerOrganizationRoutes(router, organization, identity);
   registerMoneyRoutes(router, money, identity);
   registerFulfillmentRoutes(router, fulfillment, identity);
+  registerGeographyRoutes(router, geography, identity);
 
-  return { router, bus, outbox, publisher, audit, identity, organization, money, fulfillment, clock };
+  return {
+    router,
+    bus,
+    outbox,
+    publisher,
+    audit,
+    identity,
+    organization,
+    money,
+    fulfillment,
+    geography,
+    clock,
+  };
 }

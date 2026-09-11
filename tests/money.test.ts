@@ -91,4 +91,128 @@ describe("money", () => {
       }),
     ).rejects.toThrow(/insufficient/);
   });
+  it("voids a hold idempotently and refuses to void a captured hold", async () => {
+    const core = createCoreApp({ clock: new FixedClock() });
+    const { wallet } = core.money.createWallet({
+      owner_type: "identity",
+      owner_id: "i-void",
+      currency: "SAR",
+      correlation_id: "c",
+    });
+    await core.money.credit({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 2_000,
+      business_reference: "deposit-void",
+      correlation_id: "c",
+    });
+    const hold = await core.money.authorize({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 800,
+      business_reference: "order-void",
+      correlation_id: "c",
+    });
+    expect(core.money.balance(wallet.wallet_id).available_minor).toBe(1_200);
+
+    const voided = await core.money.voidAuthorization({
+      authorization_id: hold.authorization_id,
+      reason: "customer cancelled",
+      correlation_id: "c",
+    });
+    const repeated = await core.money.voidAuthorization({
+      authorization_id: hold.authorization_id,
+      reason: "customer cancelled",
+      correlation_id: "c-2",
+    });
+    expect(voided.status).toBe("voided");
+    expect(repeated.voided_at).toBe(voided.voided_at);
+    expect(core.money.balance(wallet.wallet_id)).toEqual({
+      posted_minor: 2_000,
+      held_minor: 0,
+      available_minor: 2_000,
+    });
+
+    const captureHold = await core.money.authorize({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 500,
+      business_reference: "order-capture",
+      correlation_id: "c",
+    });
+    await core.money.capture({ authorization_id: captureHold.authorization_id, correlation_id: "c" });
+    await expect(
+      core.money.voidAuthorization({
+        authorization_id: captureHold.authorization_id,
+        reason: "late",
+        correlation_id: "c",
+      }),
+    ).rejects.toThrow(/captured authorization cannot be voided/);
+  });
+
+  it("expires due holds without moving money and blocks capture after expiry", async () => {
+    const clock = new FixedClock();
+    const core = createCoreApp({ clock });
+    const { wallet } = core.money.createWallet({
+      owner_type: "identity",
+      owner_id: "i-expiry",
+      currency: "SAR",
+      correlation_id: "c",
+    });
+    await core.money.credit({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 3_000,
+      business_reference: "deposit-expiry",
+      correlation_id: "c",
+    });
+    const hold = await core.money.authorize({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 1_000,
+      business_reference: "order-expiry",
+      correlation_id: "c",
+      expires_at: new Date(clock.now().getTime() + 60_000),
+    });
+    expect(await core.money.expireDueAuthorizations("sweep")).toHaveLength(0);
+
+    clock.advance(60_001);
+    await expect(
+      core.money.capture({ authorization_id: hold.authorization_id, correlation_id: "c" }),
+    ).rejects.toThrow(/expired/);
+
+    const expired = await core.money.expireDueAuthorizations("sweep");
+    expect(expired).toHaveLength(1);
+    expect(expired[0]?.void_reason).toBe("expired");
+    expect(core.money.balance(wallet.wallet_id)).toEqual({
+      posted_minor: 3_000,
+      held_minor: 0,
+      available_minor: 3_000,
+    });
+    expect(await core.money.expireDueAuthorizations("sweep")).toHaveLength(0);
+    expect(
+      core.outbox.byStatus("pending").filter((row) => row.event.event_type === "core.payment.voided"),
+    ).toHaveLength(1);
+  });
+
+  it("rejects an expiry in the past", async () => {
+    const clock = new FixedClock();
+    const core = createCoreApp({ clock });
+    const { wallet } = core.money.createWallet({
+      owner_type: "identity",
+      owner_id: "i-past",
+      currency: "SAR",
+      correlation_id: "c",
+    });
+    await core.money.credit({
+      wallet_id: wallet.wallet_id,
+      amount_minor: 100,
+      business_reference: "deposit-past",
+      correlation_id: "c",
+    });
+    await expect(
+      core.money.authorize({
+        wallet_id: wallet.wallet_id,
+        amount_minor: 50,
+        business_reference: "order-past",
+        correlation_id: "c",
+        expires_at: new Date(clock.now().getTime() - 1),
+      }),
+    ).rejects.toThrow(/expires_at/);
+  });
 });

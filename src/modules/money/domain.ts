@@ -22,6 +22,9 @@ export interface PaymentAuthorization {
   created_at: string;
   captured_at: string | null;
   voided_at: string | null;
+  /** Optional hold expiry (ADR 0005). Past this instant a hold may only be voided. */
+  expires_at: string | null;
+  void_reason: string | null;
 }
 
 export interface LedgerEntry {
