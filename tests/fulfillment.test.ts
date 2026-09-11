@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -14,7 +15,7 @@ describe("fulfillment coordination", () => {
       correlation_id: "corr-order-1",
       entity_type: "commercial_order",
       entity_id: "order-1",
-      payload: { order_id: "order-1", organization_id: "org-1", requested_service: "delivery" },
+      payload: { order_id: "order-1", organization_id: testId("org-1"), requested_service: "delivery" },
     });
     await core.bus.publish(event);
     await core.bus.publish(event);
@@ -35,7 +36,7 @@ describe("fulfillment coordination", () => {
       correlation_id: "corr-flow",
       entity_type: "commercial_order",
       entity_id: "order-2",
-      payload: { order_id: "order-2", organization_id: "org-1", requested_service: "delivery" },
+      payload: { order_id: "order-2", organization_id: testId("org-1"), requested_service: "delivery" },
     });
     await core.bus.publish(order);
     const created = (await core.outbox.all()).find((record) => record.event.event_type === "core.fulfillment.created");

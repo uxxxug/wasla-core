@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 /**
  * Money bound to execution: every fulfillment closure must leave the money in
  * a state that agrees with the execution outcome, and an inconsistency must be
@@ -34,7 +35,7 @@ function fundedOrder(
     entity_id: orderId,
     payload: {
       order_id: orderId,
-      organization_id: "org-1",
+      organization_id: testId("org-1"),
       requested_service: "delivery",
       payment_authorization_id: authorizationId,
     },
@@ -68,7 +69,7 @@ function completion(
 async function fundedHold(core: CoreApp, reference: string, amount = 5_000) {
   const { wallet } = await core.money.createWallet({
     owner_type: "organization",
-    owner_id: `org-${reference}`,
+    owner_id: testId(`org-${reference}`),
     currency: "SAR",
     correlation_id: CORRELATION,
   });
@@ -319,7 +320,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
       entity_id: orderId,
       payload: {
         order_id: orderId,
-        organization_id: "org-1",
+        organization_id: testId("org-1"),
         requested_service: "delivery",
         payment_authorization_id: "22222222-2222-4222-8222-222222222222",
       },
@@ -401,7 +402,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
       correlation_id: CORRELATION,
     });
 
-    expect(await service.listFinanciallyInconsistent("org-1")).toHaveLength(1);
-    expect(await service.listFinanciallyInconsistent("org-other")).toHaveLength(0);
+    expect(await service.listFinanciallyInconsistent(testId("org-1"))).toHaveLength(1);
+    expect(await service.listFinanciallyInconsistent(testId("org-other"))).toHaveLength(0);
   });
 });

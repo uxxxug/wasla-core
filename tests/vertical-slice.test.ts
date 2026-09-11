@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createCoreApp, type CoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -16,7 +17,7 @@ describe("WASLA vertical slice", () => {
   let market: MarketSimulator;
   let move: MoveSimulator;
 
-  const ORG = "org-1";
+  const ORG = testId("org-1");
 
   beforeEach(() => {
     clock = new FixedClock();

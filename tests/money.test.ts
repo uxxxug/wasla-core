@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -8,7 +9,7 @@ describe("money", () => {
     const core = createCoreApp({ clock: new FixedClock() });
     const { wallet } = await core.money.createWallet({
       owner_type: "identity",
-      owner_id: "identity-1",
+      owner_id: testId("identity-1"),
       currency: "sar",
       correlation_id: "corr-money",
     });
@@ -31,7 +32,7 @@ describe("money", () => {
     const core = createCoreApp({ clock: new FixedClock() });
     const { wallet } = await core.money.createWallet({
       owner_type: "organization",
-      owner_id: "org-1",
+      owner_id: testId("org-1"),
       currency: "SAR",
       correlation_id: "c",
     });
@@ -73,14 +74,14 @@ describe("money", () => {
     await expect(
       core.money.createWallet({
         owner_type: "identity",
-        owner_id: "i-1",
+        owner_id: testId("i-1"),
         currency: "riyals",
         correlation_id: "c",
       }),
     ).rejects.toThrow(/currency/);
     const { wallet } = await core.money.createWallet({
       owner_type: "identity",
-      owner_id: "i-1",
+      owner_id: testId("i-1"),
       currency: "SAR",
       correlation_id: "c",
     });
@@ -97,7 +98,7 @@ describe("money", () => {
     const core = createCoreApp({ clock: new FixedClock() });
     const { wallet } = await core.money.createWallet({
       owner_type: "identity",
-      owner_id: "i-void",
+      owner_id: testId("i-void"),
       currency: "SAR",
       correlation_id: "c",
     });
@@ -155,7 +156,7 @@ describe("money", () => {
     const core = createCoreApp({ clock });
     const { wallet } = await core.money.createWallet({
       owner_type: "identity",
-      owner_id: "i-expiry",
+      owner_id: testId("i-expiry"),
       currency: "SAR",
       correlation_id: "c",
     });
@@ -199,7 +200,7 @@ describe("money", () => {
     const core = createCoreApp({ clock });
     const { wallet } = await core.money.createWallet({
       owner_type: "identity",
-      owner_id: "i-past",
+      owner_id: testId("i-past"),
       currency: "SAR",
       correlation_id: "c",
     });

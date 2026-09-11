@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { InMemoryAuditLog } from "../src/platform/audit/audit.js";
 import { describe, expect, it } from "vitest";
 import { FixedClock } from "../src/platform/clock.js";
@@ -55,7 +56,7 @@ describe("transaction boundary", () => {
       uow.stage(() => {
         applied.push("mutation");
       });
-      uow.emit(event("identity-1"));
+      uow.emit(event(testId("identity-1")));
     });
 
     expect(boundary.log).toEqual(["begin", "commit"]);
@@ -92,7 +93,7 @@ describe("transaction boundary", () => {
         uow.stage(() => {
           applied.push("mutation");
         });
-        uow.emit(event("identity-2"));
+        uow.emit(event(testId("identity-2")));
         throw new Error("domain rule rejected the command");
       }),
     ).rejects.toThrow(/domain rule rejected/);
@@ -111,7 +112,7 @@ describe("transaction boundary", () => {
         uow.stage(() => {
           throw new Error("unique violation");
         });
-        uow.emit(event("identity-3"));
+        uow.emit(event(testId("identity-3")));
       }),
     ).rejects.toThrow(/unique violation/);
 
@@ -152,11 +153,11 @@ describe("transaction boundary", () => {
         actor_id: null,
         action: "identity.registered",
         entity_type: "identity",
-        entity_id: "identity-4",
+        entity_id: testId("identity-4"),
         correlation_id: "corr-1",
         metadata: {},
       });
-      uow.emit(event("identity-4"));
+      uow.emit(event(testId("identity-4")));
     });
 
     // The append stays last on purpose: a failure anywhere earlier then means
@@ -173,7 +174,7 @@ describe("transaction boundary", () => {
         uow.stage(() => {
           applied.push("mutation");
         });
-        uow.emit(event("identity-5"));
+        uow.emit(event(testId("identity-5")));
         throw new Error("nope");
       }),
     ).rejects.toThrow(/nope/);

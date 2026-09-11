@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -11,7 +12,7 @@ async function bootstrapAdmin() {
   });
   await core.identity.grantMembership({
     principal_id: registered.principal.principal_id,
-    organization_id: "org-root",
+    organization_id: testId("org-root"),
     roles: ["platform_admin"],
     correlation_id: "bootstrap",
   });
@@ -105,7 +106,7 @@ describe("HTTP surface", () => {
     });
     await core.identity.grantMembership({
       principal_id: owner.principal.principal_id,
-      organization_id: "org-a",
+      organization_id: testId("org-a"),
       roles: ["org_admin"],
       correlation_id: "c",
     });

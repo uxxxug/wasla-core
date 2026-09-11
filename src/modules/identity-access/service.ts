@@ -1,7 +1,7 @@
 import type { TransactionBoundary } from "../../platform/persistence/transaction.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, forbidden, invalid, notFound, unauthenticated } from "../../platform/errors.js";
-import { hashToken, newId, newToken } from "../../platform/ids.js";
+import { assertId, hashToken, newId, newToken } from "../../platform/ids.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
@@ -146,6 +146,7 @@ export class IdentityService {
     channel_type: ChannelType;
     correlation_id: string;
   }): Promise<{ session: Session; token: string }> {
+    assertId("principal_id", input.principal_id);
     const principal = await this.repo.getPrincipal(input.principal_id);
     if (!principal) throw notFound("principal not found");
     const identity = await this.repo.getIdentity(principal.identity_id);
@@ -182,6 +183,7 @@ export class IdentityService {
   }
 
   async revokeSession(sessionId: string, correlationId: string): Promise<void> {
+    assertId("session_id", sessionId);
     const session = await this.repo.getSession(sessionId);
     if (!session) throw notFound("session not found");
     if (session.revoked_at !== null) return;
@@ -233,6 +235,8 @@ export class IdentityService {
     roles: Role[];
     correlation_id: string;
   }): Promise<Membership> {
+    assertId("principal_id", input.principal_id);
+    assertId("organization_id", input.organization_id);
     if (!await this.repo.getPrincipal(input.principal_id)) throw notFound("principal not found");
     if (await this.repo.findMembership(input.principal_id, input.organization_id)) {
       throw conflict("membership already exists");

@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -127,7 +128,7 @@ describe("authorization and tenant isolation", () => {
     });
     await core.identity.grantMembership({
       principal_id: registered.principal.principal_id,
-      organization_id: "org-1",
+      organization_id: testId("org-1"),
       roles: ["org_member"],
       correlation_id: "c",
     });
@@ -138,8 +139,8 @@ describe("authorization and tenant isolation", () => {
     });
     const actor = await core.identity.authenticate(token);
 
-    expect(() => core.identity.authorize(actor, "organization.read", "org-1")).not.toThrow();
-    expect(() => core.identity.authorize(actor, "organization.write", "org-1")).toThrow(/missing permission/);
+    expect(() => core.identity.authorize(actor, "organization.read", testId("org-1"))).not.toThrow();
+    expect(() => core.identity.authorize(actor, "organization.write", testId("org-1"))).toThrow(/missing permission/);
   });
 
   it("blocks access to an organization the principal does not belong to", async () => {
@@ -151,7 +152,7 @@ describe("authorization and tenant isolation", () => {
     });
     await core.identity.grantMembership({
       principal_id: registered.principal.principal_id,
-      organization_id: "org-1",
+      organization_id: testId("org-1"),
       roles: ["org_admin"],
       correlation_id: "c",
     });
@@ -162,6 +163,6 @@ describe("authorization and tenant isolation", () => {
     });
     const actor = await core.identity.authenticate(token);
 
-    expect(() => core.identity.authorize(actor, "organization.read", "org-2")).toThrow(/not a member/);
+    expect(() => core.identity.authorize(actor, "organization.read", testId("org-2"))).toThrow(/not a member/);
   });
 });

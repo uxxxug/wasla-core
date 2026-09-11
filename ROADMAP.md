@@ -579,3 +579,34 @@ one pins the deliberate exception so it cannot be "tidied up" later. The
 ordering test now asserts `mutation, audit, append`.
 
 169 tests pass with `DATABASE_URL` set, 104 without.
+
+### Identity of identifiers: resolved without a migration
+
+See `docs/identifiers.md`. In short: the database, the OpenAPI contract and
+`newId()` had all already decided that every CORE-owned identifier is a UUID.
+The only layer with no opinion was the domain itself — services took `string`
+and handed it to a repository — and the test fixtures lived in that gap.
+
+That gap was a real divergence, not cosmetics: a `Map` accepts `"org-1"` and
+Postgres raises `invalid input syntax for type uuid`, so the two backends
+disagreed about which commands were even well formed. `assertId` now rejects a
+malformed identifier at intake on both backends, as `invalid` rather than
+`notFound`, because a syntactically impossible identifier does not describe an
+absent row — it describes an unsatisfiable request.
+
+**No migration was made and none was needed.** Turning `uuid` into `text`
+would have discarded the database's type check, its uniqueness guarantees and
+its index efficiency in exchange for letting stale fixtures pass.
+
+References CORE does not issue stay free-form on purpose —
+`market_order_reference`, `move_job_reference`, `identity_link.external_id`,
+`business_reference`, `correlation_id`, the polymorphic `entity_id` columns,
+`country_code` and `legacy_id`. `tests/identifiers.test.ts` asserts a non-UUID
+MARKET order id is still accepted, so a later tightening cannot break MARKET.
+
+Fixtures are unified behind `testId(label)` in `tests/support/ids.ts`. Before
+this, the in-memory suites used `"org-1"` and the Postgres suites used
+`randomUUID()`, which meant the two were not running the same scenarios — the
+reason the gap stayed hidden.
+
+174 tests pass with `DATABASE_URL`, 112 without.

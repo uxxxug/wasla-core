@@ -2,7 +2,7 @@ import type { TransactionBoundary } from "../../platform/persistence/transaction
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
-import { newId } from "../../platform/ids.js";
+import { newId, assertId } from "../../platform/ids.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
 import {
@@ -42,7 +42,9 @@ export class MoneyService {
     currency: string;
     correlation_id: string;
   }): Promise<{ wallet: Wallet; created: boolean }> {
-    if (!input.owner_id.trim()) throw invalid("owner_id is required");
+    // owner_id always names a CORE entity (an organization or an identity),
+    // so it is one of ours and must look like one.
+    assertId("owner_id", input.owner_id);
     let currency: string;
     try {
       currency = normalizeCurrency(input.currency);
@@ -208,6 +210,7 @@ export class MoneyService {
   }
 
   async capture(input: { authorization_id: string; correlation_id: string }): Promise<LedgerTransaction> {
+    assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
     const existing = await this.repo.findTransactionByReference(`capture:${authorization.authorization_id}`);
@@ -262,6 +265,7 @@ export class MoneyService {
     reason: string;
     correlation_id: string;
   }): Promise<PaymentAuthorization> {
+    assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
     if (authorization.status === "voided") return authorization;
@@ -341,6 +345,7 @@ export class MoneyService {
   }
 
   private async requireWallet(walletId: string): Promise<Wallet> {
+    assertId("wallet_id", walletId);
     const wallet = await this.repo.getWallet(walletId);
     if (!wallet) throw notFound("wallet not found");
     return wallet;

@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -14,7 +15,7 @@ function order(core: CoreApp, orderId: string): EventEnvelope {
     correlation_id: `corr-${orderId}`,
     entity_type: "commercial_order",
     entity_id: orderId,
-    payload: { order_id: orderId, organization_id: "org-1", requested_service: "delivery" },
+    payload: { order_id: orderId, organization_id: testId("org-1"), requested_service: "delivery" },
   });
 }
 

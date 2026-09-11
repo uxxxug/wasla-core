@@ -5,7 +5,7 @@ import type {
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
-import { newId } from "../../platform/ids.js";
+import { newId, assertId } from "../../platform/ids.js";
 import type { EventEnvelope } from "../../platform/eventing/envelope.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
@@ -115,6 +115,12 @@ export class FulfillmentService {
     const payload = event.payload as Partial<MarketOrderCreatedPayload>;
     if (!payload.order_id || !payload.organization_id || !payload.requested_service) {
       throw invalid("market.order.created payload is incomplete");
+    }
+    // organization_id and payment_authorization_id are CORE identifiers that
+    // MARKET is echoing back to us; order_id is MARKET's own and stays opaque.
+    assertId("organization_id", payload.organization_id);
+    if (payload.payment_authorization_id !== undefined && payload.payment_authorization_id !== null) {
+      assertId("payment_authorization_id", payload.payment_authorization_id);
     }
     const existing = await this.repo.findByOrderReference(payload.order_id);
     if (existing) return existing;

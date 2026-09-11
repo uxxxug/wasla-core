@@ -2,7 +2,7 @@ import type { AuditLog } from "../../platform/audit/audit.js";
 import type { TransactionBoundary } from "../../platform/persistence/transaction.js";
 import { withTransaction } from "../../platform/eventing/unit-of-work.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
-import { newId } from "../../platform/ids.js";
+import { newId, assertId } from "../../platform/ids.js";
 import {
   assertCountryCode,
   assertPoint,
@@ -105,6 +105,7 @@ export class GeographyService {
     longitude: number;
     correlation_id: string;
   }): Promise<City> {
+    assertId("region_id", input.region_id);
     const region = await this.repo.getRegion(input.region_id);
     if (!region) throw notFound("region not found");
     if (!input.name.trim()) throw invalid("name is required");
@@ -141,6 +142,7 @@ export class GeographyService {
     centre_longitude?: number;
     correlation_id: string;
   }): Promise<ServiceArea> {
+    assertId("city_id", input.city_id);
     const city = await this.repo.getCity(input.city_id);
     if (!city) throw notFound("city not found");
     if (!input.name.trim()) throw invalid("name is required");

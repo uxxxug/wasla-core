@@ -54,7 +54,7 @@ describe.skipIf(!DATABASE_URL)("WASLA vertical slice on Postgres", () => {
     move.attach(core.bus);
 
     // A real organization row, because the fulfillment table has a foreign
-    // key to it. The in-memory suite can use "org-1"; Postgres cannot.
+    // key to it. The in-memory suite can use testId("org-1"); Postgres cannot.
     const created = await core.organization.create({
       name: "Wasla Logistics",
       country_code: "SA",

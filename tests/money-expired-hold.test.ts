@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 /**
  * A hold past its expiry can no longer be captured, so it must not keep
  * blocking the wallet until the sweep happens to run.
@@ -11,7 +12,7 @@ async function walletWithExpiringHold(amount: number, hold: number) {
   const core = createCoreApp({ clock });
   const { wallet } = await core.money.createWallet({
     owner_type: "identity",
-    owner_id: "i-expired-hold",
+    owner_id: testId("i-expired-hold"),
     currency: "SAR",
     correlation_id: "c",
   });

@@ -1,3 +1,4 @@
+import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
@@ -82,7 +83,7 @@ describe("geography", () => {
     ).rejects.toThrow(/latitude/);
     await expect(
       core.geography.defineServiceArea({
-        city_id: "missing",
+        city_id: testId("city-missing"),
         name: "x",
         radius_metres: 100,
         correlation_id: "c",
