@@ -14,12 +14,15 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.payment.voided` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.voided.v1.schema.json` |
 | `core.fulfillment.created` | 1 | implemented | fulfillment | MOVE | `contracts/events/core.fulfillment.created.v1.schema.json` |
 | `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
+| `core.fulfillment.cancelled` | 1 | implemented | fulfillment | MARKET, MOVE | `contracts/events/core.fulfillment.cancelled.v1.schema.json` |
 
 ## Consumed by CORE
 
 | Event type | Version | Producer | Status | Handler |
 |---|---|---|---|---|
 | `market.order.created` | 1 | MARKET | implemented in local bus | `core.fulfillment.market-order` |
+| `move.job.accepted` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-acceptance` |
+| `move.job.rejected` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-rejection` |
 | `move.job.completed` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-completion` |
 
 `implemented in local bus` means the schema, idempotent consumer and tests exist;

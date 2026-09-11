@@ -367,6 +367,26 @@ paths:
         "200": { description: Fulfillment coordination record }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /v1/fulfillments/{fulfillment_id}/cancel:
+    post:
+      summary: Cancel a fulfillment before execution closes (idempotent)
+      parameters:
+        - name: fulfillment_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200": { description: Cancelled fulfillment }
+        "409": { description: Fulfillment already closed }
 components:
   securitySchemes:
     bearerAuth:

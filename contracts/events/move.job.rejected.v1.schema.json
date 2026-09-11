@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/move.job.rejected.v1.schema.json",
+  "title": "move.job.rejected v1",
+  "description": "Consumed by CORE when MOVE cannot create an operational job. CORE closes the fulfillment as failed and releases any money hold.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fulfillment_id", "reason", "rejected_at"],
+  "properties": {
+    "fulfillment_id": { "type": "string", "format": "uuid" },
+    "reason": { "type": "string", "minLength": 1 },
+    "rejected_at": { "type": "string", "format": "date-time" }
+  },
+  "examples": [
+    {
+      "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "reason": "no_capacity",
+      "rejected_at": "2026-09-11T03:41:00.000Z"
+    }
+  ]
+}

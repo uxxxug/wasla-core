@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.fulfillment.cancelled.v1.schema.json",
+  "title": "core.fulfillment.cancelled v1",
+  "description": "Published by CORE when a fulfillment is cancelled before execution closes. MARKET closes the commercial order; MOVE stops any operational job it created.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fulfillment_id", "order_reference", "reason", "cancelled_at"],
+  "properties": {
+    "fulfillment_id": { "type": "string", "format": "uuid" },
+    "order_reference": { "type": "string", "minLength": 1 },
+    "reason": { "type": "string", "minLength": 1 },
+    "cancelled_at": { "type": "string", "format": "date-time" }
+  },
+  "examples": [
+    {
+      "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "order_reference": "order-1",
+      "reason": "customer_cancelled",
+      "cancelled_at": "2026-09-11T03:42:00.000Z"
+    }
+  ]
+}

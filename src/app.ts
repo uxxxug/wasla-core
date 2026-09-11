@@ -64,9 +64,16 @@ export function createCoreApp(options: { clock?: Clock } = {}): CoreApp {
     outbox,
     audit,
     clock,
+    money,
   );
   bus.subscribe("core.fulfillment.market-order", "market.order.created", async (event) => {
     await fulfillment.consumeMarketOrder(event);
+  });
+  bus.subscribe("core.fulfillment.move-acceptance", "move.job.accepted", async (event) => {
+    await fulfillment.consumeJobAccepted(event);
+  });
+  bus.subscribe("core.fulfillment.move-rejection", "move.job.rejected", async (event) => {
+    await fulfillment.consumeJobRejected(event);
   });
   bus.subscribe("core.fulfillment.move-completion", "move.job.completed", async (event) => {
     await fulfillment.consumeMoveCompletion(event);

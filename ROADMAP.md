@@ -152,6 +152,11 @@ Nothing.
 - Geography (4): reference registration, hierarchy reads, coordinate
   resolution ordered by distance, no coverage outside a service area.
 - Fulfillment (2): coordination on opaque references, idempotent consumption.
+- Vertical slice (8): MARKET order -> CORE fulfillment + money hold -> MOVE job
+  -> execution -> CORE closure -> MARKET closure; duplicate delivery; consumer
+  retry; network failure after commit replayed from the outbox; expired money
+  hold refusing a success claim; cancellation releasing the hold and stopping
+  the job; MOVE job-creation failure; full event replay after restart.
 - Governance (4): no MOVE/MARKET entities, no hardcoded secrets, no
   cross-module internal imports, no TODO markers.
 - Money: balanced entries, posted/held/available balances, idempotent authorization
@@ -159,7 +164,27 @@ Nothing.
 - Fulfillment: idempotent MARKET order consumption, opaque coordination state,
   MOVE completion and exactly-once CORE outcome emission on the local bus.
 
+## Cycle 2026-09-11 — cross-system vertical slice (CORE side)
+
+- Fulfillment lifecycle extended: `coordinating -> dispatched -> completed |
+  failed | cancelled`, with `move.job.accepted` and `move.job.rejected`
+  consumed and `core.fulfillment.cancelled` published.
+- Money is now bound to fulfillment through a published port: success captures
+  the hold, failure/rejection/cancellation releases it, and an unsettleable
+  hold turns a reported success into a failed closure. CORE never reports
+  success for work it could not settle.
+- Contracts added: `move.job.accepted.v1`, `move.job.rejected.v1`,
+  `core.fulfillment.cancelled.v1`; `market.order.created.v1` gained an optional
+  `payment_authorization_id`; `core.fulfillment.completed.v1` gained `reason`.
+- Migration `0004_fulfillment_lifecycle` (additive) with rollback.
+- MOVE and MARKET are exercised through contract-conformant simulators in
+  `tests/support/product-simulators.ts` — the repositories stay independent and
+  no runtime code or database is shared.
+
 ## Not proven yet
+
+- The MOVE and MARKET repositories implementing their side of these contracts
+  (next cycle; CORE-side simulators prove the contract, not their code).
 
 - Behaviour against a real Postgres database (migration 0001 unexecuted).
 - Behaviour under a real message broker (the bus is in-process today).
