@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.payment.refunded.v1.schema.json",
+  "title": "core.payment.refunded v1",
+  "description": "Published when CORE returns money that had already been captured. A refund is not a void and not an un-capture: it posts a balanced reversal into the ledger, the authorization keeps its captured status, and the hold is NOT restored — the funds simply become spendable again. A subscriber that treats this as a cancellation of the original capture will double count.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "authorization_id",
+    "wallet_id",
+    "transaction_id",
+    "amount_minor",
+    "refunded_minor",
+    "captured_minor",
+    "currency",
+    "business_reference",
+    "reason"
+  ],
+  "properties": {
+    "authorization_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "wallet_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "transaction_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The reversing ledger transaction."
+    },
+    "amount_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The amount returned by THIS refund."
+    },
+    "refunded_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Total refunded against the authorization, including this refund."
+    },
+    "captured_minor": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Total captured, which is the ceiling on refunds and is never reduced by one."
+    },
+    "currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+    "business_reference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "examples": [
+    {
+      "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f",
+      "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
+      "transaction_id": "0f2b6c41-8f4a-4d3e-9c21-7ae0d5b41f30",
+      "amount_minor": 500,
+      "refunded_minor": 500,
+      "captured_minor": 1250,
+      "currency": "SAR",
+      "business_reference": "order-44",
+      "reason": "item returned"
+    }
+  ]
+}

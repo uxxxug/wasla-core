@@ -2,14 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.wasla/events/core.payment.voided.v1.schema.json",
   "title": "core.payment.voided v1",
-  "description": "Published when CORE releases a payment hold without moving money, either on explicit request or because the hold expired. No ledger transaction is created.",
+  "description": "Published when CORE releases what is still held on a payment authorization, either on explicit request or because the hold expired. No ledger transaction is created. amount_minor is the amount released, which equals the whole authorization only when nothing was captured; captured_minor says how much had already moved and is therefore NOT released by this event.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["authorization_id", "wallet_id", "amount_minor", "currency", "business_reference", "reason"],
+  "required": ["authorization_id", "wallet_id", "amount_minor", "captured_minor", "currency", "business_reference", "reason"],
   "properties": {
     "authorization_id": { "type": "string", "format": "uuid" },
     "wallet_id": { "type": "string", "format": "uuid" },
-    "amount_minor": { "type": "integer", "minimum": 1 },
+    "amount_minor": { "type": "integer", "minimum": 0, "description": "The released remainder. Zero when the whole hold had already been captured." },
+    "captured_minor": { "type": "integer", "minimum": 0 },
     "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
     "business_reference": { "type": "string", "minLength": 1 },
     "reason": { "type": "string", "minLength": 1, "description": "Free-text reason; \"expired\" is emitted by the expiry sweep." }
@@ -19,6 +20,7 @@
       "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f",
       "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15",
       "amount_minor": 1250,
+      "captured_minor": 0,
       "currency": "SAR",
       "business_reference": "order-44",
       "reason": "expired"

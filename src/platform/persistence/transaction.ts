@@ -80,6 +80,7 @@ export interface TransactionBoundary {
  */
 export class MemoryJournal {
   private readonly undo: Array<() => void> = [];
+  private readonly deferred: Array<() => void> = [];
 
   /**
    * Registers the inverse of a write. Must be called *before* the write, while
@@ -96,6 +97,31 @@ export class MemoryJournal {
       // last-first, or the first write's pre-image would win.
       this.undo.pop()?.();
     }
+  }
+
+  /**
+   * Registers a check to run just before the scope completes, the way a
+   * Postgres `DEFERRABLE INITIALLY DEFERRED` constraint trigger does.
+   *
+   * Without this an in-memory store cannot express an invariant that spans
+   * two writes, because it would have to judge the world half way through and
+   * reject a state the transaction was about to make consistent. The result
+   * would be a memory backend that either accepts what production refuses or
+   * refuses what production accepts, and both make the test suite lie.
+   *
+   * Checks are deduplicated by key so N writes to the same row verify once.
+   */
+  defer(key: string, check: () => void): void {
+    if (this.deferredKeys.has(key)) return;
+    this.deferredKeys.add(key);
+    this.deferred.push(check);
+  }
+
+  private readonly deferredKeys = new Set<string>();
+
+  /** Runs every deferred check. Throws on the first violation, as Postgres does. */
+  verify(): void {
+    for (const check of this.deferred) check();
   }
 
   get size(): number {
@@ -159,7 +185,11 @@ export class InMemoryTransactionBoundary implements TransactionBoundary {
     const journal = new MemoryJournal();
     return insideTransaction(async () => {
       try {
-        return await work({ handle: journal });
+        const result = await work({ handle: journal });
+        // Deferred constraints fire at commit, so a violation still unwinds
+        // every write in the scope rather than leaving half of it applied.
+        journal.verify();
+        return result;
       } catch (error) {
         journal.rollback();
         throw error;

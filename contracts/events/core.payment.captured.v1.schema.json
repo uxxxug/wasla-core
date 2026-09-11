@@ -2,17 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.wasla/events/core.payment.captured.v1.schema.json",
   "title": "core.payment.captured v1",
-  "description": "Published when CORE captures an existing payment authorization into the ledger.",
+  "description": "Published when CORE captures against a payment authorization. amount_minor is the amount that moved in THIS capture, which equals the whole authorization for a full capture; captured_minor and remaining_minor describe the authorization after it, so a subscriber can tell a closing capture from one of several.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["authorization_id", "wallet_id", "transaction_id", "amount_minor", "currency", "business_reference"],
+  "required": ["authorization_id", "wallet_id", "transaction_id", "amount_minor", "captured_minor", "remaining_minor", "currency", "business_reference"],
   "properties": {
     "authorization_id": { "type": "string", "format": "uuid" },
     "wallet_id": { "type": "string", "format": "uuid" },
     "transaction_id": { "type": "string", "format": "uuid" },
     "amount_minor": { "type": "integer", "minimum": 1 },
+    "captured_minor": { "type": "integer", "minimum": 1 },
+    "remaining_minor": { "type": "integer", "minimum": 0 },
     "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
     "business_reference": { "type": "string", "minLength": 1 }
   },
-  "examples": [{ "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f", "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15", "transaction_id": "1f05fd37-9944-4469-a2ea-2596fc2fd12e", "amount_minor": 1250, "currency": "SAR", "business_reference": "order-44" }]
+  "examples": [{ "authorization_id": "6cf05081-f2c6-451a-a898-16043100db4f", "wallet_id": "48fac898-50c5-4228-a932-14e9d2f7ec15", "transaction_id": "1f05fd37-9944-4469-a2ea-2596fc2fd12e", "amount_minor": 1250, "captured_minor": 1250, "remaining_minor": 0, "currency": "SAR", "business_reference": "order-44" }]
 }

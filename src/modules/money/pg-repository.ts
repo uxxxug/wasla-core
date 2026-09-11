@@ -36,6 +36,8 @@ interface AuthorizationRow {
   authorization_id: string;
   wallet_id: string;
   amount_minor: string;
+  captured_minor: string;
+  refunded_minor: string;
   currency: string;
   status: AuthorizationStatus;
   business_reference: string;
@@ -51,6 +53,7 @@ interface TransactionRow {
   kind: LedgerTransaction["kind"];
   business_reference: string;
   occurred_at: Date;
+  authorization_id: string | null;
 }
 
 interface EntryRow {
@@ -74,6 +77,9 @@ const toAuthorization = (row: AuthorizationRow): PaymentAuthorization => ({
   authorization_id: row.authorization_id,
   wallet_id: row.wallet_id,
   amount_minor: minor(row.amount_minor),
+  // bigint columns arrive as strings from the driver.
+  captured_minor: minor(row.captured_minor),
+  refunded_minor: minor(row.refunded_minor),
   currency: trim(row.currency),
   status: row.status,
   business_reference: row.business_reference,
@@ -93,8 +99,9 @@ const toEntry = (row: EntryRow): LedgerEntry => ({
 });
 
 const WALLET = `wallet_id, owner_type, owner_id, currency, status, created_at`;
-const AUTHORIZATION = `authorization_id, wallet_id, amount_minor, currency, status,
-  business_reference, created_at, captured_at, voided_at, expires_at, void_reason`;
+const AUTHORIZATION = `authorization_id, wallet_id, amount_minor, captured_minor,
+  refunded_minor, currency, status, business_reference, created_at, captured_at,
+  voided_at, expires_at, void_reason`;
 
 /** Postgres adapter for the money ports. */
 export class PgMoneyRepository implements MoneyRepository {
@@ -142,11 +149,13 @@ export class PgMoneyRepository implements MoneyRepository {
   ): Promise<void> {
     await runner(this.pool, scope).query(
       `insert into payment_authorization (${AUTHORIZATION})
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         authorization.authorization_id,
         authorization.wallet_id,
         authorization.amount_minor,
+        authorization.captured_minor,
+        authorization.refunded_minor,
         authorization.currency,
         authorization.status,
         authorization.business_reference,
@@ -201,7 +210,8 @@ export class PgMoneyRepository implements MoneyRepository {
   ): Promise<void> {
     await runner(this.pool, scope).query(
       `update payment_authorization
-       set status = $2, captured_at = $3, voided_at = $4, expires_at = $5, void_reason = $6
+       set status = $2, captured_at = $3, voided_at = $4, expires_at = $5,
+           void_reason = $6, captured_minor = $7, refunded_minor = $8
        where authorization_id = $1`,
       [
         authorization.authorization_id,
@@ -210,6 +220,8 @@ export class PgMoneyRepository implements MoneyRepository {
         authorization.voided_at,
         authorization.expires_at,
         authorization.void_reason,
+        authorization.captured_minor,
+        authorization.refunded_minor,
       ],
     );
   }
@@ -238,13 +250,15 @@ export class PgMoneyRepository implements MoneyRepository {
     }
 
     await client.query(
-      `insert into ledger_transaction (transaction_id, kind, business_reference, occurred_at)
-       values ($1,$2,$3,$4)`,
+      `insert into ledger_transaction
+         (transaction_id, kind, business_reference, occurred_at, authorization_id)
+       values ($1,$2,$3,$4,$5)`,
       [
         transaction.transaction_id,
         transaction.kind,
         transaction.business_reference,
         transaction.occurred_at,
+        transaction.authorization_id,
       ],
     );
 
@@ -265,7 +279,7 @@ export class PgMoneyRepository implements MoneyRepository {
 
   async findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined> {
     const result = await this.pool.query<TransactionRow>(
-      `select transaction_id, kind, business_reference, occurred_at
+      `select transaction_id, kind, business_reference, occurred_at, authorization_id
        from ledger_transaction where business_reference = $1`,
       [reference],
     );
@@ -276,7 +290,7 @@ export class PgMoneyRepository implements MoneyRepository {
 
   async transactions(): Promise<readonly LedgerTransaction[]> {
     const result = await this.pool.query<TransactionRow>(
-      `select transaction_id, kind, business_reference, occurred_at
+      `select transaction_id, kind, business_reference, occurred_at, authorization_id
        from ledger_transaction order by occurred_at, transaction_id`,
     );
     if (result.rows.length === 0) return [];
@@ -302,6 +316,7 @@ export class PgMoneyRepository implements MoneyRepository {
       kind: row.kind,
       business_reference: row.business_reference,
       occurred_at: isoRequired(row.occurred_at),
+      authorization_id: row.authorization_id,
     };
   }
 

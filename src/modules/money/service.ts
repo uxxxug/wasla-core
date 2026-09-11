@@ -13,6 +13,8 @@ import {
 import {
   assertBalanced,
   normalizeCurrency,
+  refundableAmount,
+  remainingHold,
   type LedgerEntry,
   type LedgerTransaction,
   type PaymentAuthorization,
@@ -22,6 +24,29 @@ import {
 import type { MoneyRepository } from "./repository.js";
 
 const PRODUCER = "wasla-core";
+
+export interface CaptureInput {
+  authorization_id: string;
+  /** Omitted captures the whole remaining hold. */
+  amount_minor?: number;
+  /**
+   * The caller's idempotency key for this capture. Required for a partial
+   * capture, because a key derived from the authorization alone cannot tell
+   * one of several captures from a retry of the previous one.
+   */
+  capture_reference?: string;
+  correlation_id: string;
+}
+
+export interface RefundInput {
+  authorization_id: string;
+  /** Omitted refunds everything still refundable. */
+  amount_minor?: number;
+  /** Always required: there is no "the" refund of an authorization. */
+  refund_reference: string;
+  reason: string;
+  correlation_id: string;
+}
 
 export class MoneyService {
   constructor(
@@ -86,6 +111,13 @@ export class MoneyService {
    * understate the truth and refuse authorizations the wallet can actually
    * afford. `expired_hold_minor` keeps that transitional amount observable
    * until `expireDueAuthorizations` releases it.
+   *
+   * What is held is the *remainder* of each hold, not its original amount.
+   * A partial capture has already left the wallet via a ledger entry, so it
+   * is in `posted_minor` — counting the whole hold as well would deduct that
+   * money twice and refuse authorizations the wallet can afford. Refunds need
+   * no special handling: they are ledger entries on the wallet, so they show
+   * up in `posted_minor` on their own.
    */
   async balance(walletId: string): Promise<{
     posted_minor: number;
@@ -102,10 +134,10 @@ export class MoneyService {
       .filter((item) => item.status === "authorized");
     const heldMinor = open
       .filter((item) => !this.isExpired(item))
-      .reduce((sum, authorization) => sum + authorization.amount_minor, 0);
+      .reduce((sum, authorization) => sum + remainingHold(authorization), 0);
     const expiredMinor = open
       .filter((item) => this.isExpired(item))
-      .reduce((sum, authorization) => sum + authorization.amount_minor, 0);
+      .reduce((sum, authorization) => sum + remainingHold(authorization), 0);
     return {
       posted_minor: posted,
       held_minor: heldMinor,
@@ -176,6 +208,8 @@ export class MoneyService {
       authorization_id: newId(),
       wallet_id: wallet.wallet_id,
       amount_minor: input.amount_minor,
+      captured_minor: 0,
+      refunded_minor: 0,
       currency: wallet.currency,
       status: "authorized",
       business_reference: input.business_reference,
@@ -218,12 +252,12 @@ export class MoneyService {
    * that then commits separately can end up with captured funds and an
    * unchanged domain row (that was B-11).
    */
-  async capture(input: { authorization_id: string; correlation_id: string }): Promise<LedgerTransaction> {
+  async capture(input: CaptureInput): Promise<LedgerTransaction> {
     return withTransaction(this.tx, (uow) => this.captureWithin(uow, input));
   }
 
   /**
-   * Captures a hold **inside the caller's unit of work**.
+   * Captures against a hold **inside the caller's unit of work**.
    *
    * Everything is validated and read first, then the mutation, the event and
    * the audit entry are staged on the caller's `uow`. So they commit with
@@ -233,60 +267,218 @@ export class MoneyService {
    * Refusals (`notFound`, `conflict`) are raised during the read phase, before
    * anything is staged, so a refusal leaves the caller's unit of work
    * untouched rather than half filled.
+   *
+   * `amount_minor` omitted captures the whole remainder, which is what every
+   * caller before migration 0009 meant. A smaller amount leaves the rest held
+   * and capturable, because the authorization records what the payer consented
+   * to and part of that consent being unused is not a reason to discard it.
+   * The hold only closes when the full amount is captured, or when someone
+   * releases the remainder explicitly.
    */
-  async captureWithin(
-    uow: UnitOfWork,
-    input: { authorization_id: string; correlation_id: string },
-  ): Promise<LedgerTransaction> {
+  async captureWithin(uow: UnitOfWork, input: CaptureInput): Promise<LedgerTransaction> {
     assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
-    const existing = await this.repo.findTransactionByReference(`capture:${authorization.authorization_id}`);
+
+    // The ledger answers a retry before anything else is considered.
+    //
+    // It has to come first: once a hold is fully captured its remainder is
+    // zero, so reasoning about the amount ahead of this would turn an
+    // idempotent retry into "capture zero" and refuse it as invalid. Full
+    // captures keep the reference they have always had, so an existing
+    // caller's retry is answered exactly as before.
+    const reference = input.capture_reference
+      ? `capture:${authorization.authorization_id}:${input.capture_reference}`
+      : `capture:${authorization.authorization_id}`;
+    const existing = await this.repo.findTransactionByReference(reference);
     if (existing) return existing;
+
     if (authorization.status !== "authorized") throw conflict("authorization cannot be captured");
-    if (this.isExpired(authorization)) throw conflict("authorization has expired and can only be voided");
+    if (this.isExpired(authorization)) {
+      throw conflict("authorization has expired and can only be voided");
+    }
+
+    const remaining = remainingHold(authorization);
+    const requested = input.amount_minor ?? remaining;
+    this.assertAmount(requested);
+    // A partial capture is by definition one of several, so a reference
+    // derived from the authorization alone cannot tell two of them apart —
+    // and a retry would be indistinguishable from a second, additional
+    // capture. Requiring an explicit key is the only way the caller can
+    // retry safely, so CORE refuses rather than guessing.
+    if (requested < remaining && !input.capture_reference) {
+      throw invalid("capture_reference is required when capturing less than the remaining hold");
+    }
+    // The ceiling the payer consented to. Exceeding it is not an overdraft,
+    // it is charging for something nobody agreed to.
+    if (requested > remaining) {
+      throw conflict(`capture of ${requested} exceeds the remaining hold of ${remaining}`);
+    }
+
     const wallet = await this.requireWallet(authorization.wallet_id);
     const transaction = this.transaction(
       "capture",
-      `capture:${authorization.authorization_id}`,
+      reference,
       authorization.currency,
       "clearing:captured",
       `wallet:${wallet.wallet_id}`,
-      authorization.amount_minor,
+      requested,
+      authorization.authorization_id,
     );
-    const updated = { ...authorization, status: "captured" as const, captured_at: this.clock.now().toISOString() };
-    {
-      uow.stage(async (scope) => {
-        await this.repo.updateAuthorization(updated, scope);
-        await this.repo.insertTransaction(transaction, scope);
-      });
-      uow.emit(
-        makeEvent({
-          event_type: "core.payment.captured",
-          version: 1,
-          producer: PRODUCER,
-          occurred_at: this.clock.now(),
-          correlation_id: input.correlation_id,
-          entity_type: "payment_authorization",
-          entity_id: authorization.authorization_id,
-          payload: {
-            authorization_id: authorization.authorization_id,
-            wallet_id: wallet.wallet_id,
-            transaction_id: transaction.transaction_id,
-            amount_minor: authorization.amount_minor,
-            currency: authorization.currency,
-            business_reference: authorization.business_reference,
-          },
-        }),
-      );
-      uow.audit(this.moneyAudit("payment.authorization.captured", authorization.authorization_id, input.correlation_id, authorization.amount_minor, authorization.currency,));
-    }
+    const capturedTotal = authorization.captured_minor + requested;
+    const settled = capturedTotal === authorization.amount_minor;
+    const updated: PaymentAuthorization = {
+      ...authorization,
+      captured_minor: capturedTotal,
+      status: settled ? "captured" : "authorized",
+      // `captured_at` is when the hold closed with money having moved, so it
+      // stays null while a remainder is still capturable.
+      captured_at: settled ? this.clock.now().toISOString() : authorization.captured_at,
+    };
+    uow.stage(async (scope) => {
+      await this.repo.updateAuthorization(updated, scope);
+      await this.repo.insertTransaction(transaction, scope);
+    });
+    uow.emit(
+      makeEvent({
+        event_type: "core.payment.captured",
+        version: 1,
+        producer: PRODUCER,
+        occurred_at: this.clock.now(),
+        correlation_id: input.correlation_id,
+        entity_type: "payment_authorization",
+        entity_id: authorization.authorization_id,
+        payload: {
+          authorization_id: authorization.authorization_id,
+          wallet_id: wallet.wallet_id,
+          transaction_id: transaction.transaction_id,
+          // The amount that moved in THIS capture. Equal to the whole
+          // authorization for a full capture, which is what it always was.
+          amount_minor: requested,
+          captured_minor: capturedTotal,
+          remaining_minor: updated.amount_minor - capturedTotal,
+          currency: authorization.currency,
+          business_reference: authorization.business_reference,
+        },
+      }),
+    );
+    uow.audit(
+      this.moneyAudit(
+        "payment.authorization.captured",
+        authorization.authorization_id,
+        input.correlation_id,
+        requested,
+        authorization.currency,
+      ),
+    );
     return transaction;
   }
 
   /**
-   * Releases a hold without moving money. Idempotent: voiding an already
-   * voided authorization returns it unchanged; a captured one cannot be voided.
+   * Returns money that has already moved.
+   *
+   * A refund is not a void, and treating them as one operation would be the
+   * worst mistake available in this module. A void releases money that never
+   * left the wallet and posts nothing to the ledger; a refund posts a balanced
+   * reversal of money that did leave. Their limits differ too — a void is
+   * bounded by what is still held, a refund by what was captured.
+   *
+   * It also does not un-capture. The authorization stays `captured`, and the
+   * history shows money going out and coming back rather than never having
+   * left. Nor does it restore the hold: the funds return to the posted balance
+   * and are simply spendable again.
+   */
+  async refund(input: RefundInput): Promise<LedgerTransaction> {
+    return withTransaction(this.tx, (uow) => this.refundWithin(uow, input));
+  }
+
+  /** Refunds inside the caller's unit of work. See `captureWithin`. */
+  async refundWithin(uow: UnitOfWork, input: RefundInput): Promise<LedgerTransaction> {
+    assertId("authorization_id", input.authorization_id);
+    if (!input.refund_reference.trim()) throw invalid("refund_reference is required");
+    if (!input.reason.trim()) throw invalid("reason is required");
+    const authorization = await this.repo.getAuthorization(input.authorization_id);
+    if (!authorization) throw notFound("payment authorization not found");
+
+    // Always keyed, unlike capture: there is no such thing as "the" refund of
+    // an authorization, so there is no reference that could be derived.
+    const reference = `refund:${authorization.authorization_id}:${input.refund_reference.trim()}`;
+    const existing = await this.repo.findTransactionByReference(reference);
+    if (existing) return existing;
+
+    const refundable = refundableAmount(authorization);
+    if (authorization.captured_minor === 0) {
+      throw conflict("nothing has been captured on this authorization");
+    }
+    // Said separately from the ceiling below, because "you may not refund
+    // 1 more" and "there is nothing left to refund" are different facts, and
+    // defaulting to the whole refundable amount would otherwise ask for zero
+    // and be refused as a malformed amount instead of an exhausted one.
+    if (refundable === 0) throw conflict("nothing refundable remains on this authorization");
+    const requested = input.amount_minor ?? refundable;
+    this.assertAmount(requested);
+    if (requested > refundable) {
+      throw conflict(`refund of ${requested} exceeds the refundable amount of ${refundable}`);
+    }
+
+    const wallet = await this.requireWallet(authorization.wallet_id);
+    // The exact reversal of a capture: the money goes back to the wallet and
+    // comes out of the account it was captured into.
+    const transaction = this.transaction(
+      "refund",
+      reference,
+      authorization.currency,
+      `wallet:${wallet.wallet_id}`,
+      "clearing:captured",
+      requested,
+      authorization.authorization_id,
+    );
+    const updated: PaymentAuthorization = {
+      ...authorization,
+      refunded_minor: authorization.refunded_minor + requested,
+    };
+    uow.stage(async (scope) => {
+      await this.repo.updateAuthorization(updated, scope);
+      await this.repo.insertTransaction(transaction, scope);
+    });
+    uow.emit(
+      makeEvent({
+        event_type: "core.payment.refunded",
+        version: 1,
+        producer: PRODUCER,
+        occurred_at: this.clock.now(),
+        correlation_id: input.correlation_id,
+        entity_type: "payment_authorization",
+        entity_id: authorization.authorization_id,
+        payload: {
+          authorization_id: authorization.authorization_id,
+          wallet_id: wallet.wallet_id,
+          transaction_id: transaction.transaction_id,
+          amount_minor: requested,
+          refunded_minor: updated.refunded_minor,
+          captured_minor: authorization.captured_minor,
+          currency: authorization.currency,
+          business_reference: authorization.business_reference,
+          reason: input.reason.trim(),
+        },
+      }),
+    );
+    uow.audit(
+      this.moneyAudit(
+        "payment.authorization.refunded",
+        authorization.authorization_id,
+        input.correlation_id,
+        requested,
+        authorization.currency,
+      ),
+    );
+    return transaction;
+  }
+
+  /**
+   * Releases whatever is still held, without moving money. Idempotent: voiding
+   * an already closed authorization returns it unchanged; a fully captured one
+   * cannot be voided because there is nothing left to release.
    */
   async voidAuthorization(input: {
     authorization_id: string;
@@ -304,8 +496,12 @@ export class MoneyService {
     assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
-    if (authorization.status === "voided") return authorization;
-    if (authorization.status === "captured") throw conflict("a captured authorization cannot be voided");
+    if (authorization.status === "voided" || authorization.status === "partially_captured") {
+      return authorization;
+    }
+    if (authorization.status === "captured") {
+      throw conflict("a captured authorization cannot be voided");
+    }
     if (!input.reason.trim()) throw invalid("reason is required");
     return this.applyVoidWithin(uow, authorization, input.reason.trim(), input.correlation_id);
   }
@@ -334,11 +530,23 @@ export class MoneyService {
     reason: string,
     correlationId: string,
   ): Promise<PaymentAuthorization> {
+    // Only the remainder comes back. The captured part already left and a
+    // void cannot undo that — returning it would need a refund, which is a
+    // different operation with a different meaning.
+    const released = remainingHold(authorization);
+    // A hold that moved money and then released the rest is neither
+    // `captured` nor `voided`. Calling it `voided` would claim nothing moved
+    // when some did, and it is the record a reconciliation would trust.
+    const closed = authorization.captured_minor > 0 ? "partially_captured" : "voided";
     const updated: PaymentAuthorization = {
       ...authorization,
-      status: "voided",
+      status: closed,
       voided_at: this.clock.now().toISOString(),
       void_reason: reason,
+      captured_at:
+        closed === "partially_captured"
+          ? this.clock.now().toISOString()
+          : authorization.captured_at,
     };
     {
       uow.stage((scope) => this.repo.updateAuthorization(updated, scope));
@@ -354,14 +562,17 @@ export class MoneyService {
           payload: {
             authorization_id: updated.authorization_id,
             wallet_id: updated.wallet_id,
-            amount_minor: updated.amount_minor,
+            // The amount actually released. Equal to the whole authorization
+            // when nothing was captured, which is what it always was.
+            amount_minor: released,
+            captured_minor: updated.captured_minor,
             currency: updated.currency,
             business_reference: updated.business_reference,
             reason,
           },
         }),
       );
-      uow.audit(this.moneyAudit("payment.authorization.voided", updated.authorization_id, correlationId, updated.amount_minor, updated.currency,));
+      uow.audit(this.moneyAudit("payment.authorization.voided", updated.authorization_id, correlationId, released, updated.currency,));
     }
     return updated;
   }
@@ -403,6 +614,7 @@ export class MoneyService {
     creditAccount: string,
     debitAccount: string,
     amount: number,
+    authorizationId: string | null = null,
   ): LedgerTransaction {
     const transactionId = newId();
     const entries: LedgerEntry[] = [
@@ -413,6 +625,7 @@ export class MoneyService {
     return {
       transaction_id: transactionId,
       kind,
+      authorization_id: authorizationId,
       business_reference: reference,
       occurred_at: this.clock.now().toISOString(),
       entries,

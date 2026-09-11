@@ -1,5 +1,6 @@
 import {
   journalMapWrite,
+  journalOf,
   type TransactionScope,
 } from "../../platform/persistence/transaction.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
@@ -87,6 +88,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     );
   }
   async insertAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
+    this.assertAuthorizationShape(authorization);
     // payment_authorization.business_reference is UNIQUE.
     let clash: PaymentAuthorization | undefined;
     for (const existing of this.authorizations.values()) {
@@ -103,6 +105,90 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
     this.authorizations.set(authorization.authorization_id, authorization);
   }
+  /**
+   * The CHECK constraints migration 0009 adds, restated.
+   *
+   * They look redundant next to the service that already upholds them, and
+   * that is the point: they are here to catch the service getting it wrong.
+   * A memory backend more permissive than Postgres is a backend that certifies
+   * bugs, which is what B-12 was.
+   */
+  private assertAuthorizationShape(a: PaymentAuthorization): void {
+    if (a.captured_minor < 0 || a.captured_minor > a.amount_minor) {
+      throw new Error(
+        'new row violates check constraint "payment_authorization_capture_ceiling"',
+      );
+    }
+    if (a.refunded_minor < 0 || a.refunded_minor > a.captured_minor) {
+      throw new Error(
+        'new row violates check constraint "payment_authorization_refund_ceiling"',
+      );
+    }
+    const consistent =
+      a.status === "authorized"
+        ? a.captured_minor < a.amount_minor
+        : a.status === "captured"
+          ? a.captured_minor === a.amount_minor
+          : a.status === "partially_captured"
+            ? a.captured_minor > 0 && a.captured_minor < a.amount_minor
+            : a.captured_minor === 0;
+    if (!consistent) {
+      throw new Error(
+        'new row violates check constraint "payment_authorization_status_amounts"',
+      );
+    }
+    if ((a.status === "voided" || a.status === "partially_captured") && !a.void_reason) {
+      throw new Error(
+        'new row violates check constraint "payment_authorization_void_reason_required"',
+      );
+    }
+  }
+
+  /**
+   * The deferred trigger from migration 0009: the aggregate columns on an
+   * authorization must equal what the ledger says moved.
+   *
+   * Deferred for the same reason Postgres defers it — the authorization row
+   * and its ledger rows are written in one transaction and either order is
+   * legitimate, so checking eagerly would reject a state the transaction was
+   * about to make consistent. Outside a transaction there is nothing to defer
+   * to, so the check runs immediately, which matches autocommit.
+   */
+  private deferLedgerAgreement(scope: TransactionScope | undefined, authorizationId: string): void {
+    const check = () => this.assertLedgerAgreement(authorizationId);
+    const journal = journalOf(scope);
+    if (journal) journal.defer(`money:${authorizationId}`, check);
+    else check();
+  }
+
+  private assertLedgerAgreement(authorizationId: string): void {
+    const authorization = this.authorizations.get(authorizationId);
+    if (!authorization) return;
+    let captured = 0;
+    let refunded = 0;
+    for (const transaction of this.ledger.values()) {
+      if (transaction.authorization_id !== authorizationId) continue;
+      for (const entry of transaction.entries) {
+        if (entry.account_reference !== "clearing:captured") continue;
+        // A capture posts +amount there, a refund posts -amount. Summed per
+        // kind rather than netted, so two errors of equal size cannot cancel
+        // out and hide each other.
+        if (transaction.kind === "capture") captured += entry.amount_minor;
+        if (transaction.kind === "refund") refunded -= entry.amount_minor;
+      }
+    }
+    if (authorization.captured_minor !== captured) {
+      throw new Error(
+        `authorization ${authorizationId} claims ${authorization.captured_minor} captured but the ledger holds ${captured}`,
+      );
+    }
+    if (authorization.refunded_minor !== refunded) {
+      throw new Error(
+        `authorization ${authorizationId} claims ${authorization.refunded_minor} refunded but the ledger holds ${refunded}`,
+      );
+    }
+  }
+
   async getAuthorization(authorizationId: string): Promise<PaymentAuthorization | undefined> {
     return this.authorizations.get(authorizationId);
   }
@@ -116,8 +202,10 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     return [...this.authorizations.values()];
   }
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
+    this.assertAuthorizationShape(authorization);
     journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
     this.authorizations.set(authorization.authorization_id, authorization);
+    this.deferLedgerAgreement(_scope, authorization.authorization_id);
   }
   async insertTransaction(transaction: LedgerTransaction, _scope?: TransactionScope): Promise<void> {
     // ledger_transaction.business_reference is UNIQUE. This is the constraint
@@ -129,8 +217,17 @@ export class InMemoryMoneyRepository implements MoneyRepository {
         "duplicate key value violates unique constraint \"ledger_transaction_business_reference_key\"",
       );
     }
+    // ledger_transaction_authorization_presence — migration 0009.
+    if ((transaction.kind === "credit") !== (transaction.authorization_id === null)) {
+      throw new Error(
+        'new row for relation "ledger_transaction" violates check constraint "ledger_transaction_authorization_presence"',
+      );
+    }
     journalMapWrite(_scope, this.ledger, transaction.transaction_id);
     this.ledger.set(transaction.transaction_id, transaction);
+    if (transaction.authorization_id) {
+      this.deferLedgerAgreement(_scope, transaction.authorization_id);
+    }
   }
   async findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined> {
     return [...this.ledger.values()].find((item) => item.business_reference === reference);

@@ -497,6 +497,8 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
         authorization_id: randomUUID(),
         wallet_id: wallet.wallet_id,
         amount_minor: 5_000,
+        captured_minor: 0,
+        refunded_minor: 0,
         currency: "SAR",
         status: "authorized" as const,
         business_reference: "order-1",
@@ -518,8 +520,49 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       expect(await backend.money.listAuthorizations(wallet.wallet_id)).toEqual([authorization]);
       expect(await backend.money.allAuthorizations()).toEqual([authorization]);
 
-      const captured = { ...authorization, status: "captured" as const, captured_at: AT };
-      await backend.money.updateAuthorization(captured, NO_SCOPE);
+      // Capturing the whole hold, which is what `captured` now means. The
+      // aggregate has to move with the ledger or 0009's drift check refuses
+      // it, so the capture transaction is written in the same unit of work —
+      // which is what the service does and the only state the database
+      // accepts.
+      const captured = {
+        ...authorization,
+        status: "captured" as const,
+        captured_minor: 5_000,
+        captured_at: AT,
+      };
+      const captureId = randomUUID();
+      await withTransaction(context(backend), (uow) => {
+        uow.stage(async (scope) => {
+          await backend.money.updateAuthorization(captured, scope);
+          await backend.money.insertTransaction(
+            {
+              transaction_id: captureId,
+              kind: "capture",
+              authorization_id: authorization.authorization_id,
+              business_reference: `capture:${authorization.authorization_id}`,
+              occurred_at: AT,
+              entries: [
+                {
+                  entry_id: randomUUID(),
+                  transaction_id: captureId,
+                  account_reference: "clearing:captured",
+                  amount_minor: 5_000,
+                  currency: "SAR",
+                },
+                {
+                  entry_id: randomUUID(),
+                  transaction_id: captureId,
+                  account_reference: `wallet:${wallet.wallet_id}`,
+                  amount_minor: -5_000,
+                  currency: "SAR",
+                },
+              ],
+            },
+            scope,
+          );
+        });
+      });
       expect(await backend.money.getAuthorization(authorization.authorization_id)).toEqual(
         captured,
       );
@@ -530,6 +573,8 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const transaction = {
         transaction_id: transactionId,
         kind: "credit" as const,
+        // A credit is not tied to an authorization; 0009 requires exactly that.
+        authorization_id: null,
         business_reference: "deposit-1",
         occurred_at: AT,
         entries: [

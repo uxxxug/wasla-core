@@ -271,19 +271,75 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /v1/payment-authorizations/{authorization_id}/capture:
     post:
-      summary: Capture an authorized payment into the balanced ledger
+      summary: Capture against an authorized payment into the balanced ledger
+      description: >
+        amount_minor is the amount to capture; omitting it captures the whole
+        remaining hold, which is what this route has always meant. A smaller
+        amount leaves the rest held and capturable, so the authorization stays
+        open until the amount the payer consented to is reached. A partial
+        capture MUST carry capture_reference: it is by definition one of
+        several, and a key derived from the authorization alone cannot tell a
+        retry from an additional capture, so CORE refuses instead of guessing.
+        Capturing more than remains is refused because the authorization is a
+        consent, not a balance.
       parameters:
         - name: authorization_id
           in: path
           required: true
           schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount_minor: { type: integer, minimum: 1 }
+                capture_reference:
+                  type: string
+                  minLength: 1
+                  description: Caller's idempotency key. Required for a partial capture.
       responses:
-        "200": { description: Capture transaction, idempotent on authorization id }
+        "200": { description: Capture transaction, idempotent on the capture reference }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/payment-authorizations/{authorization_id}/refund:
+    post:
+      summary: Return money that has already been captured
+      description: >
+        A refund is not a void and not an un-capture. A void releases money
+        that never left the wallet and posts nothing; a refund posts a balanced
+        reversal of money that did leave. The authorization keeps its captured
+        status and the hold is not restored - the funds simply become spendable
+        again. The limit is what was captured, not what was held. Omitting
+        amount_minor refunds everything still refundable. refund_reference is
+        always required, because there is no "the" refund of an authorization
+        and therefore no key CORE could derive to make a retry safe.
+      parameters:
+        - name: authorization_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refund_reference, reason]
+              properties:
+                amount_minor: { type: integer, minimum: 1 }
+                refund_reference: { type: string, minLength: 1 }
+                reason: { type: string, minLength: 1 }
+      responses:
+        "200": { description: Refund transaction, idempotent on the refund reference }
+        "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/payment-authorizations/{authorization_id}/void:
     post:
-      summary: Release a hold without moving money
+      summary: Release whatever is still held, without moving money
       parameters:
         - name: authorization_id
           in: path
@@ -299,7 +355,12 @@ paths:
               properties:
                 reason: { type: string, minLength: 1 }
       responses:
-        "200": { description: Authorization voided, idempotent }
+        "200":
+          description: >
+            Authorization closed, idempotent. Closes as voided when nothing was
+            captured, and as partially_captured when some money had already
+            moved - calling that one voided would claim nothing moved when
+            something did. Only the uncaptured remainder is released.
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/geography/countries:

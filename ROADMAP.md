@@ -87,7 +87,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | # | Milestone | Verified status | Evidence / what is missing |
 |---|---|---|---|
 | 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
-| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partially complete** | `held -> captured \| released` is driven and atomic with execution state (B-11). The schema has the states but the service has no partial-capture, refund or multi-hold path, and no event contract for them |
+| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete; multi-hold blocked — external dependency** | Migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. Multi-hold needs a MARKET contract decision — see "External dependencies" |
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Not started** | No module, no tables, no contract. No external dependency — CORE can build this alone |
 | 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
@@ -981,3 +981,118 @@ not marked published when queueing fails, and a delivery whose subscription
 vanished dying unsent rather than being sent unsigned.
 
 242 tests pass with `DATABASE_URL`, 147 without.
+
+---
+
+## Settlement beyond a single all-or-nothing hold
+
+Milestone 2. Reasoning and the full invariant list are in `docs/settlement.md`;
+this is what changed and why it was judged correct.
+
+### The defect this closes
+
+`payment_authorization.amount_minor` meant two things at once — what the payer
+consented to, and what would move. Capture was therefore all-or-nothing. A job
+quoted at 6 000 that costs 4 000 could only capture 6 000 or nothing, and a
+completed job that was later disputed had no way to give money back. The only
+workaround was to void and re-authorize, which discards the payer's consent and
+can then fail for want of funds that were held a moment earlier.
+
+Migration 0009 separates the meanings: `amount_minor` is an immutable ceiling,
+`captured_minor` and `refunded_minor` grow and never shrink, and the remaining
+hold is **derived** rather than stored so it cannot disagree with itself.
+
+### Decisions, and why the easy alternative was rejected
+
+- **A refund is not a void.** A void releases money that never moved and posts
+  nothing; a refund posts a balanced reversal of money that did move. Their
+  limits differ — a void is bounded by what is still held, a refund by what was
+  captured. Reusing the void path would have been less code and would have let
+  a caller pay out money the payer never spent.
+- **A refund does not un-capture.** `captured_minor` is never reduced and the
+  status does not change, so the history shows money going out and coming back
+  rather than never having left. It does not restore the hold either.
+- **`partially_captured` is necessary, not convenient.** When a hold moved some
+  money and released the rest, `captured` overstates what moved and `voided`
+  claims nothing moved when some did — and the status is what a reconciliation
+  trusts. While `captured_minor < amount_minor` the row stays `authorized`, so
+  split captures remain possible.
+- **A partial capture must carry its own idempotency key, and CORE refuses
+  without one.** It is by definition one of several, so a key derived from the
+  authorization cannot tell a retry from an additional capture; guessing means
+  charging twice or dropping a legitimate capture. A *full* capture keeps
+  `capture:<authorization_id>` unchanged, so an in-flight retry from before the
+  migration still resolves to the same transaction.
+- **The aggregates are enforced against the ledger by the database.**
+  `ledger_transaction.authorization_id` is now a foreign key rather than a
+  parsed reference string, and two deferred constraint triggers check agreement
+  from both sides, summing per kind so two equal errors cannot cancel out. Same
+  argument as `ledger_transaction_is_balanced`. Deferred because the
+  authorization row and its ledger rows are written in one transaction in
+  either order.
+- **The rollback refuses rather than rounding money.** There is no value of the
+  old single-meaning `amount_minor` that tells the truth about a hold where
+  2 500 of 6 000 moved, so `0009...down.sql` refuses while any authorization is
+  partially captured or refunded. Verified by reproducing that state on a real
+  database and running the down migration against it.
+
+### The in-memory store was made to enforce the same rules
+
+`InMemoryMoneyRepository` now restates 0009's CHECK constraints and runs the
+same ledger-agreement check. A memory backend more permissive than Postgres
+certifies bugs — that was B-12.
+
+Expressing a *deferred* constraint in memory needed a new facility:
+`MemoryJournal.defer(key, check)`, run by `InMemoryTransactionBoundary` just
+before the scope completes, which is the moment Postgres fires a
+`DEFERRABLE INITIALLY DEFERRED` trigger. Without it the memory store would have
+to judge the world half way through a transaction and would either accept what
+production refuses or refuse what production accepts. Outside a transaction the
+check runs immediately, matching autocommit.
+
+### A backend difference, documented rather than hidden
+
+`transactions()` orders by `(occurred_at, transaction_id)` on Postgres and by
+insertion on the memory store, so under a fixed clock two captures at the same
+instant come back in different orders. CORE promises no ordering between two
+transactions at the same instant, so there is nothing to unify; the tests key
+on the ledger reference instead of position. An ordered assertion would pass on
+one backend, fail on the other, and test nothing CORE guarantees.
+
+### Proven, not assumed
+
+The three fixes were each reverted in turn — `balance()` counting the whole
+hold, a partial closure recorded as `voided`, and the capture ceiling removed.
+Twelve of thirty settlement tests failed, six per backend, symmetrically. With
+the service's ceiling check removed **both** databases still refused the
+over-capture by constraint name, so the storage layer is a real backstop rather
+than a restatement.
+
+### Tests
+
+`tests/settlement.test.ts` — 15 tests on both backends: a partial capture not
+counted twice in `held_minor` and the freed remainder actually authorizable; a
+hold staying open and capturable across two captures with both movements
+attributed by foreign key; capture refused past the consented ceiling even when
+the wallet could fund it; a partial capture refused for want of a retry-safe
+key; a retried partial capture charging once; a whole hold still captured under
+the reference it always used; a part-captured hold closing as
+`partially_captured` and releasing only the remainder; the void event reporting
+the released remainder rather than the whole hold; a refund as a balanced
+reversal that does not un-capture and does not restore the hold; refunds
+refused past what was captured and on a hold that never moved money; a retried
+refund paying out once; a part-captured hold refundable up to what moved; the
+aggregates refused when written out of step with the ledger; and a part-captured
+hold expiring with only its remainder released.
+
+272 tests pass with `DATABASE_URL`, 162 without.
+
+### External dependency this records — not implemented
+
+- **Multiple holds against one fulfillment needs a MARKET contract decision.**
+  `fulfillment.payment_authorization_id` is a single column and MARKET only
+  ever sends one id. Whether several holds are alternatives or additive, which
+  one a partial capture draws from, and what a total means across currencies
+  are all MARKET's decisions, and a join table nobody feeds is worse than none.
+  The sketch is in `docs/settlement.md`; nothing in this milestone blocks it,
+  and the amounts split here are what make it expressible at all.
