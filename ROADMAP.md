@@ -118,6 +118,7 @@ Nothing.
 | B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
 | B-9 | **Resolved.** Audit entries that describe a change now commit inside that change's transaction via `uow.audit`; geography and organization gained a boundary. Entries that record a refusal or a detected inconsistency stay deliberately out of band, because rollback would erase the only evidence of why nothing happened | resolved |
 | B-10 | **Resolved.** `InMemoryTransactionBoundary` journals the inverse of every write it is given a scope for, so it unwinds like `ROLLBACK` does. The rollback tests that used to be Postgres-only now run against both adapters | resolved |
+| B-11 | **Resolved.** Money and execution state were settled in two separate transactions, so a failure between them left funds captured against a fulfillment still recorded as `dispatched`/`held`. `MoneyService.captureWithin` / `voidWithin` now enlist in the caller's unit of work; `capture`/`voidAuthorization` are thin wrappers that open their own | resolved |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -610,3 +611,65 @@ this, the in-memory suites used `"org-1"` and the Postgres suites used
 reason the gap stayed hidden.
 
 174 tests pass with `DATABASE_URL`, 112 without.
+
+### B-11 resolved: money and execution state commit together
+
+Found while closing B-9, and the most serious defect in the repository so far.
+
+`settle()` called `money.capture`, which opened **its own** transaction and
+committed. `release()` called `money.voidAuthorization`, likewise. The
+fulfillment row was then updated in a **separate** transaction afterwards. Every
+SQL statement was correct. The pair was not.
+
+So a failure in between — a dropped connection, a constraint violation on the
+fulfillment row, a process restart — left this:
+
+- the hold `captured` and `core.payment.captured` published,
+- the fulfillment still `dispatched` with `settlement_state = 'held'`.
+
+That is a financial inconsistency that retrying cannot repair. The retry
+re-reads a fulfillment that is still open, tries to capture again, and money
+refuses because the hold is already captured — so the fulfillment can never
+close as completed. The `fulfillment_settlement_alignment_check` constraint
+does not catch it either, because each row is individually legal; it is the
+*pair* of rows that disagrees.
+
+`listFinanciallyInconsistent` would have reported it, which is worth noting:
+the reconciliation read was doing its job, and the response to a reconciliation
+read that keeps finding real inconsistencies is to remove the cause, not to
+watch it.
+
+**The fix.** Both boundaries now refuse nested transactions (B-10), so the
+answer could not be "open a transaction around the existing calls". Instead
+money learned to participate in someone else's:
+
+- `MoneyService.captureWithin(uow, input)` and `voidWithin(uow, input)` do all
+  reads and validation first, then stage the mutation, the event and the audit
+  entry on the **caller's** unit of work.
+- `capture(input)` and `voidAuthorization(input)` remain, as thin wrappers that
+  open their own transaction, for callers with nothing else to commit.
+- Refusals (`notFound`, `conflict`, expired hold) are raised during the read
+  phase, before anything is staged, so a refusal leaves the caller's unit of
+  work clean rather than half filled. `settle()` relies on exactly this when it
+  falls back to releasing a hold it could not capture.
+- `FulfillmentPaymentPort` now declares only the `*Within` forms. A port that
+  could open its own transaction made the invariant impossible to express no
+  matter how carefully each side was written, so the type no longer offers it.
+- `closeWithin` stages the closure instead of committing it, and each of
+  `consumeMoveCompletion`, `consumeJobRejected`, `cancel` and the intake
+  refusal path now opens exactly one transaction covering settlement, state,
+  event and audit entry.
+
+**The tests.** `tests/settlement-atomicity.test.ts` injects a repository whose
+`update` fails, which places the failure precisely where it matters: after the
+money mutation has been applied, while the fulfillment update is being
+applied. It runs on both backends and asserts the hold went back to
+`authorized`, the balance is untouched, and neither `core.payment.captured` nor
+`core.fulfillment.closed` reached the outbox.
+
+These tests were verified to **fail against the previous design** — the old
+shape was temporarily restored and they reported `expected 'captured' to be
+'authorized'` and an outbox containing `core.payment.captured`. A rollback test
+that has never seen the bug it describes is not evidence.
+
+182 tests pass with `DATABASE_URL`, 116 without.

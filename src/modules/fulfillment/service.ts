@@ -12,6 +12,7 @@ import type { OutboxStore } from "../../platform/eventing/outbox.js";
 import {
   withTransaction,
   type PendingAuditEntry,
+  type UnitOfWork,
 } from "../../platform/eventing/unit-of-work.js";
 import { journalMapWrite } from "../../platform/persistence/transaction.js";
 import type {
@@ -61,13 +62,24 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
  * Published interface of the money module as consumed by fulfillment.
  * Fulfillment never imports money internals — only this port (ADR 0017).
  */
+/**
+ * What fulfillment needs from money.
+ *
+ * Both mutating operations take the caller's unit of work. That is deliberate
+ * and it is the whole point of B-11: a fulfillment closure changes the
+ * fulfillment row *and* settles the hold, and those two must commit together
+ * or not at all. A port that opened its own transaction made that impossible
+ * to express, however carefully each side was written.
+ */
 export interface FulfillmentPaymentPort {
-  capture(input: { authorization_id: string; correlation_id: string }): Promise<unknown>;
-  voidAuthorization(input: {
-    authorization_id: string;
-    reason: string;
-    correlation_id: string;
-  }): Promise<unknown>;
+  captureWithin(
+    uow: UnitOfWork,
+    input: { authorization_id: string; correlation_id: string },
+  ): Promise<unknown>;
+  voidWithin(
+    uow: UnitOfWork,
+    input: { authorization_id: string; reason: string; correlation_id: string },
+  ): Promise<unknown>;
   /**
    * Reads a hold without changing it. Used at intake to refuse work that can
    * never be settled. Throws when the authorization does not exist.
@@ -143,23 +155,23 @@ export class FulfillmentService {
       // A refused order must not leave money parked: a hold that is still
       // authorized (for example an expired one awaiting the sweep) is released
       // as part of the refusal.
-      const settlement =
-        hold.settlement === "held"
-          ? await this.release(fulfillment, `refused:${hold.reason}`, event.correlation_id)
-          : hold.settlement;
-      const refused: Fulfillment = {
-        ...fulfillment,
-        status: "failed",
-        settlement_state: settlement,
-        completed_at: this.clock.now().toISOString(),
-        closure_reason: hold.reason,
-      };
-      await withTransaction(this.tx, async (uow) => {
+      return withTransaction(this.tx, async (uow) => {
+        const settlement =
+          hold.settlement === "held"
+            ? await this.release(uow, fulfillment, `refused:${hold.reason}`, event.correlation_id)
+            : hold.settlement;
+        const refused: Fulfillment = {
+          ...fulfillment,
+          status: "failed",
+          settlement_state: settlement,
+          completed_at: this.clock.now().toISOString(),
+          closure_reason: hold.reason,
+        };
         uow.stage((scope) => this.repo.insert(refused, scope));
         uow.emit(this.closureEvent(refused, event.correlation_id, event.event_id));
         uow.audit(this.auditEntry("fulfillment.refused", refused, event.correlation_id));
+        return refused;
       });
-      return refused;
     }
 
     await withTransaction(this.tx, async (uow) => {
@@ -270,8 +282,26 @@ export class FulfillmentService {
     const current = await this.require(payload.fulfillment_id);
     if (current.status === "failed") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
-    const settlement = await this.release(current, `move_rejected:${payload.reason}`, event.correlation_id);
-    return this.close(current, "failed", payload.reason, settlement, event.correlation_id, event.event_id);
+    // One transaction: the release and the closure commit together or not at
+    // all, so MOVE's rejection can never leave a refunded hold on an open
+    // fulfillment, or an open hold on a failed one.
+    return withTransaction(this.tx, async (uow) => {
+      const settlement = await this.release(
+        uow,
+        current,
+        `move_rejected:${payload.reason}`,
+        event.correlation_id,
+      );
+      return this.closeWithin(
+        uow,
+        current,
+        "failed",
+        payload.reason!,
+        settlement,
+        event.correlation_id,
+        event.event_id,
+      );
+    });
   }
 
   /**
@@ -297,35 +327,39 @@ export class FulfillmentService {
       return current;
     }
 
-    let outcome: FulfillmentStatus = payload.outcome === "completed" ? "completed" : "failed";
-    let reason: string | null = payload.outcome === "completed" ? null : "move_execution_failed";
-    let settlement: SettlementState;
+    // One transaction for the settlement and the closure. Before B-11 the
+    // capture committed on its own and the fulfillment row was updated
+    // afterwards, so a failure in between left money captured against a
+    // fulfillment still recorded as dispatched and held.
+    return withTransaction(this.tx, async (uow) => {
+      let outcome: FulfillmentStatus = payload.outcome === "completed" ? "completed" : "failed";
+      let reason: string | null = payload.outcome === "completed" ? null : "move_execution_failed";
+      let settlement: SettlementState;
 
-    if (outcome === "completed") {
-      const result = await this.settle(current, event.correlation_id);
-      settlement = result.settlement;
-      if (!result.ok) {
-        outcome = "failed";
-        reason = result.reason;
+      if (outcome === "completed") {
+        const result = await this.settle(uow, current, event.correlation_id);
+        settlement = result.settlement;
+        if (!result.ok) {
+          outcome = "failed";
+          reason = result.reason;
+        }
+      } else {
+        settlement = await this.release(uow, current, "move_execution_failed", event.correlation_id);
       }
-    } else {
-      settlement = await this.release(current, "move_execution_failed", event.correlation_id);
-    }
 
-    const closed: Fulfillment = {
-      ...current,
-      move_job_reference: payload.job_id,
-      status: outcome,
-      settlement_state: settlement,
-      completed_at: payload.completed_at,
-      closure_reason: reason,
-    };
-    await withTransaction(this.tx, async (uow) => {
+      const closed: Fulfillment = {
+        ...current,
+        move_job_reference: payload.job_id!,
+        status: outcome,
+        settlement_state: settlement,
+        completed_at: payload.completed_at!,
+        closure_reason: reason,
+      };
       uow.stage((scope) => this.repo.update(closed, scope));
       uow.emit(this.closureEvent(closed, event.correlation_id, event.event_id));
       uow.audit(this.auditEntry("fulfillment.closed", closed, event.correlation_id));
+      return closed;
     });
-    return closed;
   }
 
   /** MARKET (or an operator) cancels before execution closes. Idempotent. */
@@ -338,19 +372,24 @@ export class FulfillmentService {
     if (!input.reason.trim()) throw invalid("reason is required");
     if (current.status === "cancelled") return current;
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
-    const settlement = await this.release(
-      current,
-      `cancelled:${input.reason.trim()}`,
-      input.correlation_id,
-    );
-    return this.close(
-      current,
-      "cancelled",
-      input.reason.trim(),
-      settlement,
-      input.correlation_id,
-      null,
-    );
+    const reason = input.reason.trim();
+    return withTransaction(this.tx, async (uow) => {
+      const settlement = await this.release(
+        uow,
+        current,
+        `cancelled:${reason}`,
+        input.correlation_id,
+      );
+      return this.closeWithin(
+        uow,
+        current,
+        "cancelled",
+        reason,
+        settlement,
+        input.correlation_id,
+        null,
+      );
+    });
   }
 
   /**
@@ -373,14 +412,22 @@ export class FulfillmentService {
     return await this.repo.findByOrderReference(orderReference);
   }
 
-  private async close(
+  /**
+   * Stages the closure on the caller's unit of work.
+   *
+   * It does not open a transaction of its own, because the settlement that
+   * decided `settlement` has already been staged on the same `uow` and the two
+   * must land together.
+   */
+  private closeWithin(
+    uow: UnitOfWork,
     current: Fulfillment,
     status: FulfillmentStatus,
     reason: string | null,
     settlement: SettlementState,
     correlationId: string,
     causationId: string | null,
-  ): Promise<Fulfillment> {
+  ): Fulfillment {
     const closed: Fulfillment = {
       ...current,
       status,
@@ -388,11 +435,9 @@ export class FulfillmentService {
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
-    await withTransaction(this.tx, async (uow) => {
-      uow.stage((scope) => this.repo.update(closed, scope));
-      uow.emit(this.closureEvent(closed, correlationId, causationId));
-      uow.audit(this.auditEntry(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId));
-    });
+    uow.stage((scope) => this.repo.update(closed, scope));
+    uow.emit(this.closureEvent(closed, correlationId, causationId));
+    uow.audit(this.auditEntry(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId));
     return closed;
   }
 
@@ -427,6 +472,7 @@ export class FulfillmentService {
   }
 
   private async settle(
+    uow: UnitOfWork,
     fulfillment: Fulfillment,
     correlationId: string,
   ): Promise<
@@ -437,14 +483,18 @@ export class FulfillmentService {
       return { ok: true, settlement: "none" };
     }
     try {
-      await this.payments.capture({
+      await this.payments.captureWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
         correlation_id: correlationId,
       });
       return { ok: true, settlement: "captured" };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // The capture was refused during its read phase, so nothing was staged
+      // on `uow` and releasing instead is safe — the unit of work is still
+      // clean at this point.
       const settlement = await this.release(
+        uow,
         fulfillment,
         `settlement_failed:${message}`,
         correlationId,
@@ -463,13 +513,14 @@ export class FulfillmentService {
    * lost.
    */
   private async release(
+    uow: UnitOfWork,
     fulfillment: Fulfillment,
     reason: string,
     correlationId: string,
   ): Promise<SettlementState> {
     if (!this.payments || !fulfillment.payment_authorization_id) return "none";
     try {
-      await this.payments.voidAuthorization({
+      await this.payments.voidWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
         reason,
         correlation_id: correlationId,

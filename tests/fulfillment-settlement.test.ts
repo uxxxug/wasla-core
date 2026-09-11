@@ -284,10 +284,10 @@ describe("an unreleasable hold is reported, never swallowed", () => {
   /** A payment port whose void always fails, as an out-of-band capture would. */
   function brokenPort(): FulfillmentPaymentPort {
     return {
-      capture: async () => {
+      captureWithin: async () => {
         throw new Error("authorization cannot be captured");
       },
-      voidAuthorization: async () => {
+      voidWithin: async () => {
         throw new Error("a captured authorization cannot be voided");
       },
       getAuthorization: async () => ({ status: "authorized", expires_at: null }),

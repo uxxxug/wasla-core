@@ -8,6 +8,7 @@ import type { OutboxStore } from "../../platform/eventing/outbox.js";
 import {
   withTransaction,
   type PendingAuditEntry,
+  type UnitOfWork,
 } from "../../platform/eventing/unit-of-work.js";
 import {
   assertBalanced,
@@ -209,7 +210,34 @@ export class MoneyService {
     return authorization;
   }
 
+  /**
+   * Captures a hold, on its own.
+   *
+   * Prefer `captureWithin` when the caller is also changing state that must
+   * agree with the money. This form opens its own transaction, so a caller
+   * that then commits separately can end up with captured funds and an
+   * unchanged domain row (that was B-11).
+   */
   async capture(input: { authorization_id: string; correlation_id: string }): Promise<LedgerTransaction> {
+    return withTransaction(this.tx, (uow) => this.captureWithin(uow, input));
+  }
+
+  /**
+   * Captures a hold **inside the caller's unit of work**.
+   *
+   * Everything is validated and read first, then the mutation, the event and
+   * the audit entry are staged on the caller's `uow`. So they commit with
+   * whatever else the caller is changing, and roll back with it — which is the
+   * only way money and execution state can be guaranteed to agree.
+   *
+   * Refusals (`notFound`, `conflict`) are raised during the read phase, before
+   * anything is staged, so a refusal leaves the caller's unit of work
+   * untouched rather than half filled.
+   */
+  async captureWithin(
+    uow: UnitOfWork,
+    input: { authorization_id: string; correlation_id: string },
+  ): Promise<LedgerTransaction> {
     assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
@@ -227,7 +255,7 @@ export class MoneyService {
       authorization.amount_minor,
     );
     const updated = { ...authorization, status: "captured" as const, captured_at: this.clock.now().toISOString() };
-    await withTransaction(this.tx, async (uow) => {
+    {
       uow.stage(async (scope) => {
         await this.repo.updateAuthorization(updated, scope);
         await this.repo.insertTransaction(transaction, scope);
@@ -252,7 +280,7 @@ export class MoneyService {
         }),
       );
       uow.audit(this.moneyAudit("payment.authorization.captured", authorization.authorization_id, input.correlation_id, authorization.amount_minor, authorization.currency,));
-    });
+    }
     return transaction;
   }
 
@@ -265,13 +293,21 @@ export class MoneyService {
     reason: string;
     correlation_id: string;
   }): Promise<PaymentAuthorization> {
+    return withTransaction(this.tx, (uow) => this.voidWithin(uow, input));
+  }
+
+  /** Releases a hold inside the caller's unit of work. See `captureWithin`. */
+  async voidWithin(
+    uow: UnitOfWork,
+    input: { authorization_id: string; reason: string; correlation_id: string },
+  ): Promise<PaymentAuthorization> {
     assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
     if (authorization.status === "voided") return authorization;
     if (authorization.status === "captured") throw conflict("a captured authorization cannot be voided");
     if (!input.reason.trim()) throw invalid("reason is required");
-    return this.applyVoid(authorization, input.reason.trim(), input.correlation_id);
+    return this.applyVoidWithin(uow, authorization, input.reason.trim(), input.correlation_id);
   }
 
   /**
@@ -283,12 +319,17 @@ export class MoneyService {
       .filter((authorization) => authorization.status === "authorized" && this.isExpired(authorization));
     const expired: PaymentAuthorization[] = [];
     for (const authorization of due) {
-      expired.push(await this.applyVoid(authorization, "expired", correlationId));
+      expired.push(
+        await withTransaction(this.tx, (uow) =>
+          this.applyVoidWithin(uow, authorization, "expired", correlationId),
+        ),
+      );
     }
     return expired;
   }
 
-  private async applyVoid(
+  private async applyVoidWithin(
+    uow: UnitOfWork,
     authorization: PaymentAuthorization,
     reason: string,
     correlationId: string,
@@ -299,7 +340,7 @@ export class MoneyService {
       voided_at: this.clock.now().toISOString(),
       void_reason: reason,
     };
-    await withTransaction(this.tx, async (uow) => {
+    {
       uow.stage((scope) => this.repo.updateAuthorization(updated, scope));
       uow.emit(
         makeEvent({
@@ -321,7 +362,7 @@ export class MoneyService {
         }),
       );
       uow.audit(this.moneyAudit("payment.authorization.voided", updated.authorization_id, correlationId, updated.amount_minor, updated.currency,));
-    });
+    }
     return updated;
   }
 
