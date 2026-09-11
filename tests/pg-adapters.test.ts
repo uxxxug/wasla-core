@@ -1,0 +1,463 @@
+/**
+ * Adapter conformance.
+ *
+ * Every assertion in this file runs twice: once against the in-memory
+ * reference adapters and once against the Postgres adapters. That is the
+ * point. A test written only against Postgres proves the SQL runs; running
+ * the identical expectations against both proves the two are substitutable,
+ * which is the only property the rest of the system depends on.
+ *
+ * The Postgres pass is skipped when DATABASE_URL is absent, so the default
+ * suite stays dependency-free. Run it with:
+ *
+ *   DATABASE_URL=postgres://... node scripts/db-migrate.mjs up
+ *   DATABASE_URL=postgres://... npx vitest run tests/pg-adapters.test.ts
+ */
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { FixedClock } from "../src/platform/clock.js";
+import { makeEvent } from "../src/platform/eventing/envelope.js";
+import { InMemoryInbox, type InboxStore } from "../src/platform/eventing/inbox.js";
+import { InMemoryOutbox, type OutboxStore } from "../src/platform/eventing/outbox.js";
+import { PgInbox } from "../src/platform/eventing/pg-inbox.js";
+import { PgOutbox } from "../src/platform/eventing/pg-outbox.js";
+import { withTransaction } from "../src/platform/eventing/unit-of-work.js";
+import { PgTransactionBoundary, type Queryable } from "../src/platform/persistence/postgres.js";
+import {
+  InMemoryTransactionBoundary,
+  NO_SCOPE,
+  type TransactionBoundary,
+} from "../src/platform/persistence/transaction.js";
+import { InMemoryIdentityRepository } from "../src/modules/identity-access/memory-repository.js";
+import { PgIdentityRepository } from "../src/modules/identity-access/pg-repository.js";
+import type { IdentityRepository } from "../src/modules/identity-access/ports.js";
+import { PgOrganizationRepository } from "../src/modules/organization/pg-repository.js";
+import {
+  InMemoryOrganizationRepository,
+  type OrganizationRepository,
+} from "../src/modules/organization/service.js";
+
+const DATABASE_URL = process.env["DATABASE_URL"];
+const AT = "2026-01-01T00:00:00.000Z";
+
+interface Backend {
+  identity: IdentityRepository;
+  organization: OrganizationRepository;
+  outbox: OutboxStore;
+  inbox: InboxStore;
+  boundary: TransactionBoundary;
+}
+
+interface Harness {
+  clock: FixedClock;
+  make(): Promise<Backend>;
+  reset(): Promise<void>;
+  close(): Promise<void>;
+}
+
+function organization(id = randomUUID()) {
+  return {
+    organization_id: id,
+    name: "Wasla Logistics",
+    status: "active" as const,
+    country_code: "SA",
+    created_at: AT,
+    updated_at: AT,
+    source_system: "core",
+    legacy_id: null,
+  };
+}
+
+function identity(id = randomUUID()) {
+  return {
+    identity_id: id,
+    status: "active" as const,
+    canonical_identity_id: null,
+    display_name: "Sara",
+    created_at: AT,
+    updated_at: AT,
+    source_system: "core",
+    legacy_id: null,
+  };
+}
+
+function event(entityId: string) {
+  return makeEvent({
+    event_type: "core.identity.registered",
+    version: 1,
+    producer: "wasla-core",
+    occurred_at: new Date(AT),
+    correlation_id: "corr-1",
+    entity_type: "identity",
+    entity_id: entityId,
+    payload: { identity_id: entityId },
+  });
+}
+
+function memoryHarness(): Harness {
+  const clock = new FixedClock();
+  return {
+    clock,
+    async make() {
+      return {
+        identity: new InMemoryIdentityRepository(),
+        organization: new InMemoryOrganizationRepository(),
+        outbox: new InMemoryOutbox(clock),
+        inbox: new InMemoryInbox(),
+        boundary: new InMemoryTransactionBoundary(),
+      };
+    },
+    async reset() {},
+    async close() {},
+  };
+}
+
+function postgresHarness(url: string): Harness {
+  const clock = new FixedClock();
+  // Imported lazily so the default suite never needs the driver installed.
+  let pool: { query: Queryable["query"]; connect: unknown; end(): Promise<void> } | undefined;
+
+  async function getPool() {
+    if (!pool) {
+      const { Pool } = await import("pg");
+      pool = new Pool({ connectionString: url, max: 4 }) as unknown as typeof pool;
+    }
+    return pool!;
+  }
+
+  return {
+    clock,
+    async make() {
+      const p = (await getPool()) as never;
+      return {
+        identity: new PgIdentityRepository(p),
+        organization: new PgOrganizationRepository(p),
+        outbox: new PgOutbox(p, clock),
+        inbox: new PgInbox(p, clock),
+        boundary: new PgTransactionBoundary(p),
+      };
+    },
+    async reset() {
+      const p = await getPool();
+      await p.query(
+        `truncate membership, session, principal, identity_link, identity,
+         organization, outbox, inbox restart identity cascade`,
+      );
+    },
+    async close() {
+      if (pool) await pool.end();
+    },
+  };
+}
+
+const harnesses: Array<[string, Harness]> = [["in-memory", memoryHarness()]];
+if (DATABASE_URL) harnesses.push(["postgres", postgresHarness(DATABASE_URL)]);
+
+describe.each(harnesses)("%s adapters", (_name, harness) => {
+  let backend: Backend;
+
+  beforeEach(async () => {
+    await harness.reset();
+    backend = await harness.make();
+  });
+
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  describe("organization", () => {
+    it("round-trips a row without mangling any field", async () => {
+      const org = organization();
+      await backend.organization.insert(org, NO_SCOPE);
+      expect(await backend.organization.get(org.organization_id)).toEqual(org);
+    });
+
+    it("reports a missing row as undefined rather than throwing", async () => {
+      expect(await backend.organization.get(randomUUID())).toBeUndefined();
+    });
+
+    it("lists what was inserted", async () => {
+      await backend.organization.insert(organization(), NO_SCOPE);
+      await backend.organization.insert(organization(), NO_SCOPE);
+      expect(await backend.organization.list()).toHaveLength(2);
+    });
+  });
+
+  describe("identity", () => {
+    it("round-trips an identity, a link, a principal and a session", async () => {
+      const person = identity();
+      await backend.identity.insertIdentity(person, NO_SCOPE);
+      expect(await backend.identity.getIdentity(person.identity_id)).toEqual(person);
+
+      const link = {
+        identity_link_id: randomUUID(),
+        identity_id: person.identity_id,
+        channel_type: "telegram" as const,
+        external_id: "tg-1",
+        verified_at: null,
+        created_at: AT,
+      };
+      await backend.identity.insertLink(link, NO_SCOPE);
+      expect(await backend.identity.findLink("telegram", "tg-1")).toEqual(link);
+      expect(await backend.identity.findLink("telegram", "absent")).toBeUndefined();
+      expect(await backend.identity.listLinksForIdentity(person.identity_id)).toEqual([link]);
+
+      const principal = {
+        principal_id: randomUUID(),
+        identity_id: person.identity_id,
+        created_at: AT,
+      };
+      await backend.identity.insertPrincipal(principal, NO_SCOPE);
+      expect(await backend.identity.getPrincipal(principal.principal_id)).toEqual(principal);
+      expect(await backend.identity.findPrincipalByIdentity(person.identity_id)).toEqual(principal);
+
+      const session = {
+        session_id: randomUUID(),
+        principal_id: principal.principal_id,
+        token_hash: "hash-1",
+        channel_type: "telegram" as const,
+        issued_at: AT,
+        expires_at: "2026-01-02T00:00:00.000Z",
+        revoked_at: null,
+      };
+      await backend.identity.insertSession(session, NO_SCOPE);
+      expect(await backend.identity.getSessionByTokenHash("hash-1")).toEqual(session);
+      expect(await backend.identity.getSession(session.session_id)).toEqual(session);
+
+      const revoked = { ...session, revoked_at: "2026-01-01T06:00:00.000Z" };
+      await backend.identity.updateSession(revoked, NO_SCOPE);
+      expect(await backend.identity.getSession(session.session_id)).toEqual(revoked);
+    });
+
+    it("persists the roles array of a membership as an array", async () => {
+      const org = organization();
+      const person = identity();
+      await backend.organization.insert(org, NO_SCOPE);
+      await backend.identity.insertIdentity(person, NO_SCOPE);
+      const principal = {
+        principal_id: randomUUID(),
+        identity_id: person.identity_id,
+        created_at: AT,
+      };
+      await backend.identity.insertPrincipal(principal, NO_SCOPE);
+
+      const membership = {
+        membership_id: randomUUID(),
+        principal_id: principal.principal_id,
+        organization_id: org.organization_id,
+        roles: ["org_admin" as const, "org_member" as const],
+        created_at: AT,
+      };
+      await backend.identity.insertMembership(membership, NO_SCOPE);
+
+      expect(await backend.identity.listMemberships(principal.principal_id)).toEqual([membership]);
+      expect(
+        await backend.identity.findMembership(principal.principal_id, org.organization_id),
+      ).toEqual(membership);
+      expect(
+        await backend.identity.findMembership(principal.principal_id, randomUUID()),
+      ).toBeUndefined();
+    });
+
+    it("applies an update in place rather than inserting a second row", async () => {
+      const person = identity();
+      await backend.identity.insertIdentity(person, NO_SCOPE);
+      const suspended = { ...person, status: "suspended" as const, updated_at: AT };
+      await backend.identity.updateIdentity(suspended, NO_SCOPE);
+
+      expect(await backend.identity.getIdentity(person.identity_id)).toEqual(suspended);
+      expect(await backend.identity.listIdentities()).toHaveLength(1);
+    });
+  });
+
+  describe("outbox", () => {
+    it("appends, then serves the record back with pending status", async () => {
+      const e = event(randomUUID());
+      await backend.outbox.append(e, NO_SCOPE);
+
+      const all = await backend.outbox.all();
+      expect(all).toHaveLength(1);
+      expect(all[0]!.event).toEqual(e);
+      expect(all[0]!.status).toBe("pending");
+      expect(all[0]!.attempts).toBe(0);
+      expect(all[0]!.last_error).toBeNull();
+    });
+
+    it("ignores a duplicate append of the same event id", async () => {
+      const e = event(randomUUID());
+      await backend.outbox.append(e, NO_SCOPE);
+      await backend.outbox.append(e, NO_SCOPE);
+      expect(await backend.outbox.all()).toHaveLength(1);
+    });
+
+    it("claims only rows that are due", async () => {
+      const e = event(randomUUID());
+      await backend.outbox.append(e, NO_SCOPE);
+      expect(await backend.outbox.claimDue(new Date(AT), 10)).toHaveLength(1);
+
+      await backend.outbox.markFailed(e.event_id, "transport down", new Date("2026-01-01T01:00:00.000Z"));
+      expect(await backend.outbox.claimDue(new Date(AT), 10)).toHaveLength(0);
+      expect(
+        await backend.outbox.claimDue(new Date("2026-01-01T02:00:00.000Z"), 10),
+      ).toHaveLength(1);
+
+      const failed = (await backend.outbox.all())[0]!;
+      expect(failed.attempts).toBe(1);
+      expect(failed.last_error).toBe("transport down");
+    });
+
+    it("moves a record out of pending on publish and on death", async () => {
+      const published = event(randomUUID());
+      const dead = event(randomUUID());
+      await backend.outbox.append(published, NO_SCOPE);
+      await backend.outbox.append(dead, NO_SCOPE);
+
+      await backend.outbox.markPublished(published.event_id);
+      await backend.outbox.markDead(dead.event_id, "gave up");
+
+      expect(await backend.outbox.byStatus("pending")).toHaveLength(0);
+      expect(await backend.outbox.byStatus("published")).toHaveLength(1);
+      const deadRecords = await backend.outbox.byStatus("dead");
+      expect(deadRecords).toHaveLength(1);
+      expect(deadRecords[0]!.last_error).toBe("gave up");
+    });
+  });
+
+  describe("inbox", () => {
+    it("claims an event once and refuses the second claim", async () => {
+      const id = randomUUID();
+      expect(await backend.inbox.claim("move", id)).toBe(true);
+      expect(await backend.inbox.claim("move", id)).toBe(false);
+      expect(await backend.inbox.seen("move", id)).toBe(true);
+      expect(await backend.inbox.size()).toBe(1);
+    });
+
+    it("keeps consumers independent", async () => {
+      const id = randomUUID();
+      expect(await backend.inbox.claim("move", id)).toBe(true);
+      expect(await backend.inbox.claim("market", id)).toBe(true);
+      expect(await backend.inbox.size()).toBe(2);
+    });
+
+    it("allows a retry after release", async () => {
+      const id = randomUUID();
+      await backend.inbox.claim("move", id);
+      await backend.inbox.release("move", id);
+      expect(await backend.inbox.seen("move", id)).toBe(false);
+      expect(await backend.inbox.claim("move", id)).toBe(true);
+    });
+  });
+
+  describe("transaction boundary", () => {
+    it("commits the row and the event together", async () => {
+      const org = organization();
+      const e = event(org.organization_id);
+
+      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        uow.stage((scope) => backend.organization.insert(org, scope));
+        uow.emit(e);
+      });
+
+      expect(await backend.organization.get(org.organization_id)).toEqual(org);
+      expect(await backend.outbox.all()).toHaveLength(1);
+    });
+
+    it("leaves neither the row nor the event behind when the work throws", async () => {
+      const org = organization();
+
+      await expect(
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) => backend.organization.insert(org, scope));
+          uow.emit(event(org.organization_id));
+          throw new Error("domain rule rejected the command");
+        }),
+      ).rejects.toThrow(/domain rule rejected/);
+
+      expect(await backend.organization.get(org.organization_id)).toBeUndefined();
+      expect(await backend.outbox.all()).toHaveLength(0);
+    });
+
+    it("appends no event when a later write in the same unit of work fails", async () => {
+      const org = organization();
+      const person = identity();
+
+      await expect(
+        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+          uow.stage((scope) => backend.organization.insert(org, scope));
+          uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+          uow.stage(async () => {
+            throw new Error("a later write failed");
+          });
+          uow.emit(event(org.organization_id));
+        }),
+      ).rejects.toThrow(/a later write failed/);
+
+      // Holds for both adapters: the append is the last thing the unit of work
+      // does, so a failure before it means no event was ever written.
+      expect(await backend.outbox.all()).toHaveLength(0);
+    });
+  });
+});
+
+/**
+ * A divergence between the two adapters, asserted rather than assumed.
+ *
+ * `InMemoryTransactionBoundary` gets its rollback from the staging in
+ * `withTransaction`: nothing is applied until the work returns. That covers a
+ * command rejected by a domain rule, which is the common case, but it does not
+ * cover a failure *between* two staged writes — the first one has already been
+ * applied to the map and there is nothing to undo it with.
+ *
+ * Postgres has no such gap: ROLLBACK discards the earlier write too.
+ *
+ * The consequence is worth stating plainly. A test that passes against the
+ * in-memory adapter has not proven the system is atomic under a mid-write
+ * failure; only the Postgres pass proves that. Recorded as B-10.
+ */
+describe.skipIf(!DATABASE_URL)("postgres rolls back writes the reference adapter cannot", () => {
+  const harness = postgresHarness(DATABASE_URL ?? "");
+  let backend: Backend;
+
+  beforeEach(async () => {
+    await harness.reset();
+    backend = await harness.make();
+  });
+
+  afterAll(async () => {
+    await harness.close();
+  });
+
+  it("discards a write already made earlier in the same transaction", async () => {
+    const org = organization();
+    const person = identity();
+
+    await expect(
+      withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        uow.stage((scope) => backend.organization.insert(org, scope));
+        uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+        // Same primary key twice: the database refuses it.
+        uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+        uow.emit(event(org.organization_id));
+      }),
+    ).rejects.toThrow();
+
+    expect(await backend.organization.get(org.organization_id)).toBeUndefined();
+    expect(await backend.identity.getIdentity(person.identity_id)).toBeUndefined();
+    expect(await backend.outbox.all()).toHaveLength(0);
+  });
+
+  it("commits a multi-table unit of work as one visible change", async () => {
+    const org = organization();
+    const person = identity();
+
+    await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+      uow.stage((scope) => backend.organization.insert(org, scope));
+      uow.stage((scope) => backend.identity.insertIdentity(person, scope));
+      uow.emit(event(person.identity_id));
+    });
+
+    expect(await backend.organization.get(org.organization_id)).toEqual(org);
+    expect(await backend.identity.getIdentity(person.identity_id)).toEqual(person);
+    expect(await backend.outbox.byStatus("pending")).toHaveLength(1);
+  });
+});

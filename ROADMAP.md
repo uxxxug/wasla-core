@@ -1,7 +1,7 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-11
-**Last milestone:** Every persistence port converted to an asynchronous contract with an explicit transaction boundary, which is what a database adapter needs in order to exist at all.
+**Last milestone:** First real persistence adapters — identity, organization, outbox and inbox on Postgres, behind a `BEGIN`/`COMMIT`/`ROLLBACK` transaction boundary, verified by running identical assertions against the in-memory and Postgres adapters.
 **Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
@@ -81,12 +81,14 @@ the in-memory adapters; nothing has changed about which implementation runs.
 
 ## Remaining, in dependency order
 
-1. Postgres adapters behind the now-asynchronous ports, starting with identity
-   and organization. The schema and the transaction boundary they need both
-   exist; what remains is the SQL and the row mapping.
+1. Postgres adapters for the geography, money and fulfillment ports. Identity,
+   organization, outbox and inbox are done; until the rest follow, the
+   composition root stays on the in-memory adapters, because a unit of work
+   split across two backends would not be atomic and pretending otherwise
+   would be worse than waiting.
 2. Settlement (payment authorization void/expiry now implemented, ADR 0005).
-3. Postgres adapters for the geography, money and fulfillment ports, plus the
-   outbox and inbox, so a unit of work never spans two backends.
+3. A composition-root switch selecting the persistence backend, once every
+   port has an adapter, so a unit of work never spans two backends.
 4. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
 5. Channels and notifications; Telegram adapter.
 6. Durable external event ingress/transport for the implemented Fulfillment contracts.
@@ -119,6 +121,7 @@ Nothing.
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
 | B-9 | Audit entries and geography writes happen outside the unit of work. With in-memory adapters this is invisible; with Postgres adapters an audit entry could survive a rolled-back command | Audit trail could record a state change that never committed | Thread the scope through `AuditLog.record` and give geography a boundary, as part of the adapter work rather than before it |
+| B-10 | `InMemoryTransactionBoundary` cannot undo a staged write that already succeeded when a later write in the same unit of work fails. Postgres can, and `tests/pg-adapters.test.ts` asserts the difference instead of hiding it | A test passing on the in-memory adapter does not prove atomicity under a mid-write failure | Either an undo journal in the reference adapter, or accepting it and running the atomicity tests only against Postgres, which is what happens today |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -408,3 +411,37 @@ The refactor touched all five modules, the eventing platform, the composition
 root and all 11 test files. The suite result is unchanged — 71 passing, same
 tests, same assertions — which is the point: this is a contract change with no
 behavioural change.
+
+### First persistence adapters on Postgres
+
+Four ports now have a real implementation: identity, organization, outbox and
+inbox, plus the transaction boundary they all depend on.
+
+| File | What it is |
+|---|---|
+| `src/platform/persistence/postgres.ts` | `PgTransactionBoundary` (`BEGIN`/`COMMIT`/`ROLLBACK` on one pooled client) and `runner(pool, scope)`, the single place that decides whether a statement joins the caller's transaction or runs autocommit |
+| `src/platform/eventing/pg-outbox.ts` | Durable outbox. `append` runs on the caller's scope so the event and the state change commit together; `claimDue` uses `for update skip locked` so two relays never publish the same event |
+| `src/platform/eventing/pg-inbox.ts` | Durable inbox. `claim` is one `insert ... on conflict do nothing ... returning`, so a race between two workers is resolved by the database rather than by a check-then-insert window |
+| `src/modules/identity-access/pg-repository.ts` | Identities, links, principals, sessions, memberships |
+| `src/modules/organization/pg-repository.ts` | Organizations |
+
+`tests/pg-adapters.test.ts` runs the **same** assertions against the in-memory
+and the Postgres adapters. That is what makes it worth writing: a test written
+only against Postgres proves the SQL parses, while running both proves the two
+are substitutable, which is the only property the services rely on. 16 shared
+cases run everywhere; with `DATABASE_URL` set they run twice and two
+Postgres-only atomicity cases are added — 34 assertions in total, executed
+against PostgreSQL 18.4.
+
+Two things this cycle deliberately did not do:
+
+- **The composition root still wires the in-memory adapters.** Money, geography
+  and fulfillment have no adapter yet, and a unit of work that wrote a
+  fulfillment to a `Map` and its event to Postgres would not be atomic. A
+  half-migrated switch would look like progress and remove a guarantee.
+- **The in-memory rollback gap was reported, not papered over.** The
+  conformance suite found that `InMemoryTransactionBoundary` cannot undo a
+  staged write that already succeeded when a later one fails, because staging
+  only defers writes, it does not journal them. Postgres has no such gap. Both
+  behaviours are now asserted explicitly and the difference is recorded as
+  B-10.
