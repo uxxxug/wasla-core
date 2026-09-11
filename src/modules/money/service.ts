@@ -1,11 +1,14 @@
-import { NO_SCOPE, type TransactionBoundary } from "../../platform/persistence/transaction.js";
+import type { TransactionBoundary } from "../../platform/persistence/transaction.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
 import { newId } from "../../platform/ids.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
-import { withTransaction } from "../../platform/eventing/unit-of-work.js";
+import {
+  withTransaction,
+  type PendingAuditEntry,
+} from "../../platform/eventing/unit-of-work.js";
 import {
   assertBalanced,
   normalizeCurrency,
@@ -27,6 +30,11 @@ export class MoneyService {
     private readonly audit: AuditLog,
     private readonly clock: Clock,
   ) {}
+
+  /** Boundary, outbox and audit log — the three things a commit needs. */
+  private get tx() {
+    return { boundary: this.boundary, outbox: this.outbox, audit: this.audit };
+  }
 
   async createWallet(input: {
     owner_type: WalletOwnerType;
@@ -51,15 +59,17 @@ export class MoneyService {
       status: "active",
       created_at: this.clock.now().toISOString(),
     };
-    await this.repo.insertWallet(wallet, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "service",
-      actor_id: null,
-      action: "wallet.created",
-      entity_type: "wallet",
-      entity_id: wallet.wallet_id,
-      correlation_id: input.correlation_id,
-      metadata: { owner_type: wallet.owner_type, owner_id: wallet.owner_id, currency },
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertWallet(wallet, scope));
+      uow.audit({
+        actor_type: "service",
+        actor_id: null,
+        action: "wallet.created",
+        entity_type: "wallet",
+        entity_id: wallet.wallet_id,
+        correlation_id: input.correlation_id,
+        metadata: { owner_type: wallet.owner_type, owner_id: wallet.owner_id, currency },
+      });
     });
     return { wallet, created: true };
   }
@@ -119,7 +129,7 @@ export class MoneyService {
       "clearing:external",
       input.amount_minor,
     );
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.insertTransaction(transaction, scope));
       uow.emit(
         makeEvent({
@@ -139,8 +149,8 @@ export class MoneyService {
           },
         }),
       );
+      uow.audit(this.moneyAudit("wallet.credited", wallet.wallet_id, input.correlation_id, input.amount_minor, wallet.currency));
     });
-    await this.auditMoney("wallet.credited", wallet.wallet_id, input.correlation_id, input.amount_minor, wallet.currency);
     return transaction;
   }
 
@@ -172,7 +182,7 @@ export class MoneyService {
       expires_at: this.expiry(input.expires_at ?? null),
       void_reason: null,
     };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.insertAuthorization(authorization, scope));
       uow.emit(
         makeEvent({
@@ -192,14 +202,8 @@ export class MoneyService {
           },
         }),
       );
+      uow.audit(this.moneyAudit("payment.authorization.created", authorization.authorization_id, input.correlation_id, input.amount_minor, wallet.currency,));
     });
-    await this.auditMoney(
-      "payment.authorization.created",
-      authorization.authorization_id,
-      input.correlation_id,
-      input.amount_minor,
-      wallet.currency,
-    );
     return authorization;
   }
 
@@ -220,7 +224,7 @@ export class MoneyService {
       authorization.amount_minor,
     );
     const updated = { ...authorization, status: "captured" as const, captured_at: this.clock.now().toISOString() };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage(async (scope) => {
         await this.repo.updateAuthorization(updated, scope);
         await this.repo.insertTransaction(transaction, scope);
@@ -244,14 +248,8 @@ export class MoneyService {
           },
         }),
       );
+      uow.audit(this.moneyAudit("payment.authorization.captured", authorization.authorization_id, input.correlation_id, authorization.amount_minor, authorization.currency,));
     });
-    await this.auditMoney(
-      "payment.authorization.captured",
-      authorization.authorization_id,
-      input.correlation_id,
-      authorization.amount_minor,
-      authorization.currency,
-    );
     return transaction;
   }
 
@@ -297,7 +295,7 @@ export class MoneyService {
       voided_at: this.clock.now().toISOString(),
       void_reason: reason,
     };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.updateAuthorization(updated, scope));
       uow.emit(
         makeEvent({
@@ -318,14 +316,8 @@ export class MoneyService {
           },
         }),
       );
+      uow.audit(this.moneyAudit("payment.authorization.voided", updated.authorization_id, correlationId, updated.amount_minor, updated.currency,));
     });
-    await this.auditMoney(
-      "payment.authorization.voided",
-      updated.authorization_id,
-      correlationId,
-      updated.amount_minor,
-      updated.currency,
-    );
     return updated;
   }
 
@@ -381,14 +373,21 @@ export class MoneyService {
     };
   }
 
-  private async auditMoney(
+  /**
+   * Builds the audit entry for a money movement. It is a value, not a write,
+   * so the caller can hand it to `uow.audit` and have it commit with the
+   * ledger rows rather than after them (B-9). An audit entry claiming money
+   * moved when the transaction rolled back is worse than no entry: it is the
+   * record a reconciliation would trust.
+   */
+  private moneyAudit(
     action: string,
     entityId: string,
     correlationId: string,
     amount: number,
     currency: string,
-  ): Promise<void> {
-    await this.audit.record({
+  ): PendingAuditEntry {
+    return {
       actor_type: "service",
       actor_id: null,
       action,
@@ -396,6 +395,6 @@ export class MoneyService {
       entity_id: entityId,
       correlation_id: correlationId,
       metadata: { amount_minor: amount, currency },
-    });
+    };
   }
 }

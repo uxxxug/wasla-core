@@ -1,5 +1,6 @@
 import type { AuditLog } from "../../platform/audit/audit.js";
-import { NO_SCOPE } from "../../platform/persistence/transaction.js";
+import type { TransactionBoundary } from "../../platform/persistence/transaction.js";
+import { withTransaction } from "../../platform/eventing/unit-of-work.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
 import { newId } from "../../platform/ids.js";
 import {
@@ -25,7 +26,17 @@ export class GeographyService {
   constructor(
     private readonly repo: GeographyRepository,
     private readonly audit: AuditLog,
+    private readonly boundary: TransactionBoundary,
   ) {}
+
+  /**
+   * Reference-data writes publish no event (ADR 0009) but are still
+   * transactional, because the row and the audit entry describing it have to
+   * land together. This was B-9.
+   */
+  private get tx() {
+    return { boundary: this.boundary, audit: this.audit };
+  }
 
   async registerCountry(input: {
     country_code: string;
@@ -43,15 +54,17 @@ export class GeographyService {
       default_currency: currency,
       status: "active",
     };
-    await this.repo.upsertCountry(country, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "service",
-      actor_id: null,
-      action: "geography.country.registered",
-      entity_type: "country",
-      entity_id: countryCode,
-      correlation_id: input.correlation_id,
-      metadata: { default_currency: currency },
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.upsertCountry(country, scope));
+      uow.audit({
+        actor_type: "service",
+        actor_id: null,
+        action: "geography.country.registered",
+        entity_type: "country",
+        entity_id: countryCode,
+        correlation_id: input.correlation_id,
+        metadata: { default_currency: currency },
+      });
     });
     return country;
   }
@@ -70,15 +83,17 @@ export class GeographyService {
       name: input.name.trim() || code,
       status: "active",
     };
-    await this.repo.insertRegion(region, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "service",
-      actor_id: null,
-      action: "geography.region.added",
-      entity_type: "region",
-      entity_id: region.region_id,
-      correlation_id: input.correlation_id,
-      metadata: { country_code: countryCode, code },
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertRegion(region, scope));
+      uow.audit({
+        actor_type: "service",
+        actor_id: null,
+        action: "geography.region.added",
+        entity_type: "region",
+        entity_id: region.region_id,
+        correlation_id: input.correlation_id,
+        metadata: { country_code: countryCode, code },
+      });
     });
     return region;
   }
@@ -103,15 +118,17 @@ export class GeographyService {
       longitude: input.longitude,
       status: "active",
     };
-    await this.repo.insertCity(city, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "service",
-      actor_id: null,
-      action: "geography.city.added",
-      entity_type: "city",
-      entity_id: city.city_id,
-      correlation_id: input.correlation_id,
-      metadata: { region_id: region.region_id },
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertCity(city, scope));
+      uow.audit({
+        actor_type: "service",
+        actor_id: null,
+        action: "geography.city.added",
+        entity_type: "city",
+        entity_id: city.city_id,
+        correlation_id: input.correlation_id,
+        metadata: { region_id: region.region_id },
+      });
     });
     return city;
   }
@@ -145,15 +162,17 @@ export class GeographyService {
       radius_metres: Math.round(input.radius_metres),
       status: "active",
     };
-    await this.repo.insertServiceArea(area, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "service",
-      actor_id: null,
-      action: "geography.service_area.defined",
-      entity_type: "service_area",
-      entity_id: area.service_area_id,
-      correlation_id: input.correlation_id,
-      metadata: { city_id: city.city_id, radius_metres: area.radius_metres },
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertServiceArea(area, scope));
+      uow.audit({
+        actor_type: "service",
+        actor_id: null,
+        action: "geography.service_area.defined",
+        entity_type: "service_area",
+        entity_id: area.service_area_id,
+        correlation_id: input.correlation_id,
+        metadata: { city_id: city.city_id, radius_metres: area.radius_metres },
+      });
     });
     return area;
   }

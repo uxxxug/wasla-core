@@ -23,6 +23,8 @@ import { PgInbox } from "../src/platform/eventing/pg-inbox.js";
 import { PgOutbox } from "../src/platform/eventing/pg-outbox.js";
 import { withTransaction } from "../src/platform/eventing/unit-of-work.js";
 import { PgTransactionBoundary, type Queryable } from "../src/platform/persistence/postgres.js";
+import { InMemoryAuditLog, type AuditLog } from "../src/platform/audit/audit.js";
+import { PgAuditLog } from "../src/platform/audit/pg-audit.js";
 import {
   InMemoryTransactionBoundary,
   NestedTransactionError,
@@ -62,6 +64,7 @@ interface Backend {
   outbox: OutboxStore;
   inbox: InboxStore;
   boundary: TransactionBoundary;
+  audit: AuditLog;
 }
 
 interface Harness {
@@ -121,6 +124,11 @@ function event(entityId: string) {
   });
 }
 
+/** Everything a commit needs, for whichever backend is under test. */
+function context(backend: Backend) {
+  return { boundary: backend.boundary, outbox: backend.outbox, audit: backend.audit };
+}
+
 function memoryHarness(): Harness {
   const clock = new FixedClock();
   return {
@@ -135,6 +143,7 @@ function memoryHarness(): Harness {
         outbox: new InMemoryOutbox(clock),
         inbox: new InMemoryInbox(),
         boundary: new InMemoryTransactionBoundary(),
+        audit: new InMemoryAuditLog(clock),
       };
     },
     async reset() {},
@@ -168,6 +177,7 @@ function postgresHarness(url: string): Harness {
         outbox: new PgOutbox(p, clock),
         inbox: new PgInbox(p, clock),
         boundary: new PgTransactionBoundary(p),
+        audit: new PgAuditLog(p, clock),
       };
     },
     async reset() {
@@ -176,7 +186,7 @@ function postgresHarness(url: string): Harness {
         `truncate membership, session, principal, identity_link, identity,
          organization, outbox, inbox, fulfillment, ledger_entry,
          ledger_transaction, payment_authorization, wallet, service_area,
-         city, region, country restart identity cascade`,
+         city, region, country, audit_entry restart identity cascade`,
       );
     },
     async close() {
@@ -541,7 +551,7 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       // The ledger balance trigger is checked at COMMIT, so the header and its
       // entries have to reach it together. Writing through a unit of work is
       // the only correct way, and the adapter refuses anything else.
-      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+      await withTransaction(context(backend), (uow) => {
         uow.stage((scope) => backend.money.insertTransaction(transaction, scope));
       });
 
@@ -611,7 +621,7 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const org = organization();
       const e = event(org.organization_id);
 
-      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+      await withTransaction(context(backend), (uow) => {
         uow.stage((scope) => backend.organization.insert(org, scope));
         uow.emit(e);
       });
@@ -624,7 +634,7 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const org = organization();
 
       await expect(
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) => backend.organization.insert(org, scope));
           uow.emit(event(org.organization_id));
           throw new Error("domain rule rejected the command");
@@ -640,7 +650,7 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const person = identity();
 
       await expect(
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) => backend.organization.insert(org, scope));
           uow.stage((scope) => backend.identity.insertIdentity(person, scope));
           uow.stage(async () => {
@@ -674,7 +684,7 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const link = identityLink(person.identity_id);
 
       await expect(
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) => backend.organization.insert(org, scope));
           uow.stage((scope) => backend.identity.insertIdentity(person, scope));
           uow.stage((scope) => backend.identity.insertLink(link, scope));
@@ -691,12 +701,12 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
 
     it("restores the previous value of a row the transaction overwrote", async () => {
       const person = identity();
-      await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+      await withTransaction(context(backend), (uow) => {
         uow.stage((scope) => backend.identity.insertIdentity(person, scope));
       });
 
       await expect(
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) =>
             backend.identity.updateIdentity({ ...person, display_name: "Renamed" }, scope),
           );
@@ -709,6 +719,88 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       // Not merely absent — back to the committed value. A journal that only
       // deleted keys would pass the previous test and fail this one.
       expect((await backend.identity.getIdentity(person.identity_id))?.display_name).toBe("Sara");
+    });
+
+    /**
+     * This was B-9. The audit entry used to be written after the transaction
+     * returned, so a rolled-back command could still leave a trail entry
+     * claiming it happened — and the trail is what an investigation treats as
+     * authoritative, which makes a false entry worse than a missing one.
+     */
+    it("commits state, audit entry and event together", async () => {
+      const org = organization();
+
+      await withTransaction(context(backend), (uow) => {
+        uow.stage((scope) => backend.organization.insert(org, scope));
+        uow.audit({
+          actor_type: "system",
+          actor_id: null,
+          action: "organization.created",
+          entity_type: "organization",
+          entity_id: org.organization_id,
+          correlation_id: "corr-1",
+          metadata: { country_code: org.country_code },
+        });
+        uow.emit(event(org.organization_id));
+      });
+
+      expect(await backend.organization.get(org.organization_id)).toEqual(org);
+      expect(await backend.audit.forEntity("organization", org.organization_id)).toHaveLength(1);
+      expect(await backend.outbox.all()).toHaveLength(1);
+    });
+
+    it("leaves no audit entry behind when the command is rolled back", async () => {
+      const org = organization();
+
+      await expect(
+        withTransaction(context(backend), (uow) => {
+          uow.stage((scope) => backend.organization.insert(org, scope));
+          uow.audit({
+            actor_type: "system",
+            actor_id: null,
+            action: "organization.created",
+            entity_type: "organization",
+            entity_id: org.organization_id,
+            correlation_id: "corr-1",
+            metadata: {},
+          });
+          uow.stage(async () => {
+            throw new Error("a later write failed");
+          });
+          uow.emit(event(org.organization_id));
+        }),
+      ).rejects.toThrow(/a later write failed/);
+
+      expect(await backend.organization.get(org.organization_id)).toBeUndefined();
+      expect(await backend.audit.forEntity("organization", org.organization_id)).toHaveLength(0);
+      expect(await backend.outbox.all()).toHaveLength(0);
+    });
+
+    it("keeps an out-of-band audit entry even when the caller rolls back", async () => {
+      const org = organization();
+
+      await expect(
+        withTransaction(context(backend), async (uow) => {
+          // Written directly on the log, not through the unit of work: this is
+          // how a refusal or a detected inconsistency is recorded, where there
+          // is no committed change to be atomic with and rollback would erase
+          // the only evidence of why nothing happened.
+          await backend.audit.record({
+            actor_type: "service",
+            actor_id: null,
+            action: "organization.refused",
+            entity_type: "organization",
+            entity_id: org.organization_id,
+            correlation_id: "corr-1",
+            metadata: { reason: "duplicate" },
+          });
+          uow.stage(async () => {
+            throw new Error("the command was rejected");
+          });
+        }),
+      ).rejects.toThrow(/the command was rejected/);
+
+      expect(await backend.audit.forEntity("organization", org.organization_id)).toHaveLength(1);
     });
 
     it("refuses a transaction opened inside another one", async () => {
@@ -724,10 +816,10 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       const discarded = organization();
 
       const [, rejected] = await Promise.allSettled([
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) => backend.organization.insert(kept, scope));
         }),
-        withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+        withTransaction(context(backend), (uow) => {
           uow.stage((scope) => backend.organization.insert(discarded, scope));
           uow.stage(async () => {
             throw new Error("second transaction fails");
@@ -766,7 +858,7 @@ describe.skipIf(!DATABASE_URL)("postgres transaction guarantees", () => {
     const person = identity();
 
     await expect(
-      withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+      withTransaction(context(backend), (uow) => {
         uow.stage((scope) => backend.organization.insert(org, scope));
         uow.stage((scope) => backend.identity.insertIdentity(person, scope));
         // Same primary key twice. The reference adapter's map would simply
@@ -785,7 +877,7 @@ describe.skipIf(!DATABASE_URL)("postgres transaction guarantees", () => {
     const org = organization();
     const person = identity();
 
-    await withTransaction({ boundary: backend.boundary, outbox: backend.outbox }, (uow) => {
+    await withTransaction(context(backend), (uow) => {
       uow.stage((scope) => backend.organization.insert(org, scope));
       uow.stage((scope) => backend.identity.insertIdentity(person, scope));
       uow.emit(event(person.identity_id));

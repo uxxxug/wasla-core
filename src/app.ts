@@ -50,9 +50,9 @@ export function createCoreApp(
   const publisher = new OutboxPublisher(outbox, bus, clock);
 
   const identity = new IdentityService(store.identity, outbox, boundary, audit, clock);
-  const organization = new OrganizationService(store.organization, audit, clock);
+  const organization = new OrganizationService(store.organization, audit, clock, boundary);
   const money = new MoneyService(store.money, outbox, boundary, audit, clock);
-  const geography = new GeographyService(store.geography, audit);
+  const geography = new GeographyService(store.geography, audit, boundary);
   const fulfillment = new FulfillmentService(
     store.fulfillment,
     outbox,

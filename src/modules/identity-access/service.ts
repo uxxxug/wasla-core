@@ -1,4 +1,4 @@
-import { NO_SCOPE, type TransactionBoundary } from "../../platform/persistence/transaction.js";
+import type { TransactionBoundary } from "../../platform/persistence/transaction.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, forbidden, invalid, notFound, unauthenticated } from "../../platform/errors.js";
 import { hashToken, newId, newToken } from "../../platform/ids.js";
@@ -98,7 +98,7 @@ export class IdentityService {
       created_at: now.toISOString(),
     };
 
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage(async (scope) => {
         await this.repo.insertIdentity(identity, scope);
         await this.repo.insertPrincipal(principal, scope);
@@ -121,19 +121,23 @@ export class IdentityService {
           },
         }),
       );
-    });
-
-    await this.audit.record({
-      actor_type: "system",
-      actor_id: null,
-      action: "identity.registered",
-      entity_type: "identity",
-      entity_id: identity.identity_id,
-      correlation_id: input.correlation_id,
-      metadata: { channel_type: input.channel_type },
+      uow.audit({
+        actor_type: "system",
+        actor_id: null,
+        action: "identity.registered",
+        entity_type: "identity",
+        entity_id: identity.identity_id,
+        correlation_id: input.correlation_id,
+        metadata: { channel_type: input.channel_type },
+      });
     });
 
     return { identity, principal, created: true };
+  }
+
+  /** Boundary, outbox and audit log — the three things a commit needs. */
+  private get tx() {
+    return { boundary: this.boundary, outbox: this.outbox, audit: this.audit };
   }
 
   /** Issues an opaque session token. Only its hash is persisted. */
@@ -159,15 +163,20 @@ export class IdentityService {
       expires_at: new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
       revoked_at: null,
     };
-    await this.repo.insertSession(session, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "principal",
-      actor_id: principal.principal_id,
-      action: "session.issued",
-      entity_type: "session",
-      entity_id: session.session_id,
-      correlation_id: input.correlation_id,
-      metadata: { channel_type: input.channel_type },
+    // No event is emitted, but the row and its audit entry still have to
+    // commit together: a session that exists with no record of being issued
+    // is exactly the gap an access review would be looking for.
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertSession(session, scope));
+      uow.audit({
+        actor_type: "principal",
+        actor_id: principal.principal_id,
+        action: "session.issued",
+        entity_type: "session",
+        entity_id: session.session_id,
+        correlation_id: input.correlation_id,
+        metadata: { channel_type: input.channel_type },
+      });
     });
     return { session, token };
   }
@@ -176,16 +185,21 @@ export class IdentityService {
     const session = await this.repo.getSession(sessionId);
     if (!session) throw notFound("session not found");
     if (session.revoked_at !== null) return;
-    session.revoked_at = this.clock.now().toISOString();
-    await this.repo.updateSession(session, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "principal",
-      actor_id: session.principal_id,
-      action: "session.revoked",
-      entity_type: "session",
-      entity_id: session.session_id,
-      correlation_id: correlationId,
-      metadata: {},
+    // A copy, not an in-place edit. Mutating the stored object would make the
+    // change visible before the commit and leave the journal nothing to
+    // restore, because the pre-image and the new value would be one object.
+    const revoked: Session = { ...session, revoked_at: this.clock.now().toISOString() };
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.updateSession(revoked, scope));
+      uow.audit({
+        actor_type: "principal",
+        actor_id: revoked.principal_id,
+        action: "session.revoked",
+        entity_type: "session",
+        entity_id: revoked.session_id,
+        correlation_id: correlationId,
+        metadata: {},
+      });
     });
   }
 
@@ -230,15 +244,19 @@ export class IdentityService {
       roles: input.roles,
       created_at: this.clock.now().toISOString(),
     };
-    await this.repo.insertMembership(membership, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "system",
-      actor_id: null,
-      action: "membership.granted",
-      entity_type: "membership",
-      entity_id: membership.membership_id,
-      correlation_id: input.correlation_id,
-      metadata: { organization_id: input.organization_id, roles: input.roles },
+    // Membership is an authorization fact. The grant and the record of who
+    // granted it commit together or not at all.
+    await withTransaction(this.tx, (uow) => {
+      uow.stage((scope) => this.repo.insertMembership(membership, scope));
+      uow.audit({
+        actor_type: "system",
+        actor_id: null,
+        action: "membership.granted",
+        entity_type: "membership",
+        entity_id: membership.membership_id,
+        correlation_id: input.correlation_id,
+        metadata: { organization_id: input.organization_id, roles: input.roles },
+      });
     });
     return membership;
   }

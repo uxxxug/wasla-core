@@ -1,8 +1,9 @@
 import {
   journalMapWrite,
-  NO_SCOPE,
+  type TransactionBoundary,
   type TransactionScope,
 } from "../../platform/persistence/transaction.js";
+import { withTransaction } from "../../platform/eventing/unit-of-work.js";
 import type { Clock } from "../../platform/clock.js";
 import type { AuditLog } from "../../platform/audit/audit.js";
 import { invalid, notFound } from "../../platform/errors.js";
@@ -34,6 +35,7 @@ export class OrganizationService {
     private readonly repo: OrganizationRepository,
     private readonly audit: AuditLog,
     private readonly clock: Clock,
+    private readonly boundary: TransactionBoundary,
   ) {}
 
   async create(input: {
@@ -56,15 +58,20 @@ export class OrganizationService {
       source_system: input.source_system ?? "wasla-core",
       legacy_id: input.legacy_id ?? null,
     };
-    await this.repo.insert(organization, NO_SCOPE);
-    await this.audit.record({
-      actor_type: "system",
-      actor_id: null,
-      action: "organization.created",
-      entity_type: "organization",
-      entity_id: organization.organization_id,
-      correlation_id: input.correlation_id,
-      metadata: { country_code: organization.country_code },
+    // No event: tenancy is read through the API, not published (ADR 0009).
+    // The transaction exists for the audit entry — a tenant that exists with
+    // no record of being created is the gap B-9 was about.
+    await withTransaction({ boundary: this.boundary, audit: this.audit }, (uow) => {
+      uow.stage((scope) => this.repo.insert(organization, scope));
+      uow.audit({
+        actor_type: "system",
+        actor_id: null,
+        action: "organization.created",
+        entity_type: "organization",
+        entity_id: organization.organization_id,
+        correlation_id: input.correlation_id,
+        metadata: { country_code: organization.country_code },
+      });
     });
     return organization;
   }

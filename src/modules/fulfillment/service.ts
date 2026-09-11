@@ -9,7 +9,10 @@ import { newId } from "../../platform/ids.js";
 import type { EventEnvelope } from "../../platform/eventing/envelope.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
-import { withTransaction } from "../../platform/eventing/unit-of-work.js";
+import {
+  withTransaction,
+  type PendingAuditEntry,
+} from "../../platform/eventing/unit-of-work.js";
 import { journalMapWrite } from "../../platform/persistence/transaction.js";
 import type {
   Fulfillment,
@@ -91,6 +94,11 @@ export class FulfillmentService {
     private readonly payments?: FulfillmentPaymentPort,
   ) {}
 
+  /** Boundary, outbox and audit log — the three things a commit needs. */
+  private get tx() {
+    return { boundary: this.boundary, outbox: this.outbox, audit: this.audit };
+  }
+
   /**
    * MARKET commercial order → CORE fulfillment request. Idempotent per order.
    *
@@ -140,15 +148,15 @@ export class FulfillmentService {
         completed_at: this.clock.now().toISOString(),
         closure_reason: hold.reason,
       };
-      await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      await withTransaction(this.tx, async (uow) => {
         uow.stage((scope) => this.repo.insert(refused, scope));
         uow.emit(this.closureEvent(refused, event.correlation_id, event.event_id));
+        uow.audit(this.auditEntry("fulfillment.refused", refused, event.correlation_id));
       });
-      await this.recordAudit("fulfillment.refused", refused, event.correlation_id);
       return refused;
     }
 
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.insert(fulfillment, scope));
       uow.emit(
         makeEvent({
@@ -168,8 +176,8 @@ export class FulfillmentService {
           },
         }),
       );
+      uow.audit(this.auditEntry("fulfillment.created", fulfillment, event.correlation_id));
     });
-    await this.recordAudit("fulfillment.created", fulfillment, event.correlation_id);
     return fulfillment;
   }
 
@@ -199,10 +207,10 @@ export class FulfillmentService {
     if (current.status === "cancelled") {
       if (current.move_job_reference === payload.job_id) return current;
       const traced: Fulfillment = { ...current, move_job_reference: payload.job_id };
-      await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+      await withTransaction(this.tx, async (uow) => {
         uow.stage((scope) => this.repo.update(traced, scope));
+        uow.audit(this.auditEntry("fulfillment.acceptance_after_cancellation", traced, event.correlation_id));
       });
-      await this.recordAudit("fulfillment.acceptance_after_cancellation", traced, event.correlation_id);
       return traced;
     }
     if (isClosed(current.status)) {
@@ -219,7 +227,7 @@ export class FulfillmentService {
       move_job_reference: payload.job_id,
       status: "dispatched",
     };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.update(updated, scope));
       uow.emit(
         makeEvent({
@@ -239,8 +247,8 @@ export class FulfillmentService {
           },
         }),
       );
+      uow.audit(this.auditEntry("fulfillment.dispatched", updated, event.correlation_id));
     });
-    await this.recordAudit("fulfillment.dispatched", updated, event.correlation_id);
     return updated;
   }
 
@@ -306,11 +314,11 @@ export class FulfillmentService {
       completed_at: payload.completed_at,
       closure_reason: reason,
     };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.update(closed, scope));
       uow.emit(this.closureEvent(closed, event.correlation_id, event.event_id));
+      uow.audit(this.auditEntry("fulfillment.closed", closed, event.correlation_id));
     });
-    await this.recordAudit("fulfillment.closed", closed, event.correlation_id);
     return closed;
   }
 
@@ -374,11 +382,11 @@ export class FulfillmentService {
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
-    await withTransaction({ boundary: this.boundary, outbox: this.outbox }, async (uow) => {
+    await withTransaction(this.tx, async (uow) => {
       uow.stage((scope) => this.repo.update(closed, scope));
       uow.emit(this.closureEvent(closed, correlationId, causationId));
+      uow.audit(this.auditEntry(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId));
     });
-    await this.recordAudit(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId);
     return closed;
   }
 
@@ -462,6 +470,11 @@ export class FulfillmentService {
       });
       return "released";
     } catch (err) {
+      // Deliberately OUT of the unit of work (B-9). Nothing was mutated here,
+      // so there is no change for this entry to be atomic with, and it is the
+      // only record of why the money and the execution disagree. Writing it
+      // inside the caller's transaction would mean a later rollback erases the
+      // evidence of the inconsistency that caused the rollback.
       await this.audit.record({
         actor_type: "service",
         actor_id: null,
@@ -516,8 +529,19 @@ export class FulfillmentService {
     return { usable: true, settlement: "held", reason: null };
   }
 
-  private async recordAudit(action: string, fulfillment: Fulfillment, correlationId: string): Promise<void> {
-    await this.audit.record({
+  /**
+   * The audit entry for a fulfillment state change, as a value.
+   *
+   * It is handed to `uow.audit` so it commits with the row and the event. A
+   * trail that says a fulfillment was dispatched when the update rolled back
+   * would send an investigation to the wrong product.
+   */
+  private auditEntry(
+    action: string,
+    fulfillment: Fulfillment,
+    correlationId: string,
+  ): PendingAuditEntry {
+    return {
       actor_type: "service",
       actor_id: null,
       action,
@@ -528,6 +552,6 @@ export class FulfillmentService {
         status: fulfillment.status,
         settlement_state: fulfillment.settlement_state,
       },
-    });
+    };
   }
 }

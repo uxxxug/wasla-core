@@ -1,3 +1,4 @@
+import { InMemoryAuditLog } from "../src/platform/audit/audit.js";
 import { describe, expect, it } from "vitest";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
@@ -50,7 +51,7 @@ describe("transaction boundary", () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     const applied: string[] = [];
 
-    await withTransaction({ boundary, outbox }, (uow) => {
+    await withTransaction({ boundary, outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
       uow.stage(() => {
         applied.push("mutation");
       });
@@ -67,7 +68,7 @@ describe("transaction boundary", () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     const seen: TransactionScope[] = [];
 
-    await withTransaction({ boundary, outbox }, (uow) => {
+    await withTransaction({ boundary, outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
       uow.stage((scope) => {
         seen.push(scope);
       });
@@ -87,7 +88,7 @@ describe("transaction boundary", () => {
     const applied: string[] = [];
 
     await expect(
-      withTransaction({ boundary, outbox }, (uow) => {
+      withTransaction({ boundary, outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
         uow.stage(() => {
           applied.push("mutation");
         });
@@ -106,7 +107,7 @@ describe("transaction boundary", () => {
     const outbox = new InMemoryOutbox(new FixedClock());
 
     await expect(
-      withTransaction({ boundary, outbox }, (uow) => {
+      withTransaction({ boundary, outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
         uow.stage(() => {
           throw new Error("unique violation");
         });
@@ -119,7 +120,7 @@ describe("transaction boundary", () => {
     expect(await outbox.all()).toHaveLength(0);
   });
 
-  it("applies staged mutations before the outbox append, never after", async () => {
+  it("orders the unit of work as mutation, audit, then outbox append", async () => {
     const boundary = new RecordingBoundary();
     const clock = new FixedClock();
     const order: string[] = [];
@@ -131,15 +132,36 @@ describe("transaction boundary", () => {
         return outbox.append(e, scope);
       },
     } as unknown as InMemoryOutbox;
+    const auditLog = new InMemoryAuditLog(clock);
+    const recordingAudit = {
+      ...auditLog,
+      record: async (entry: Parameters<InMemoryAuditLog["record"]>[0], scope?: TransactionScope) => {
+        order.push("audit");
+        return auditLog.record(entry, scope);
+      },
+      entries: () => auditLog.entries(),
+      forEntity: (t: string, i: string) => auditLog.forEntity(t, i),
+    } as unknown as InMemoryAuditLog;
 
-    await withTransaction({ boundary, outbox: recording }, (uow) => {
+    await withTransaction({ boundary, outbox: recording, audit: recordingAudit }, (uow) => {
       uow.stage(() => {
         order.push("mutation");
+      });
+      uow.audit({
+        actor_type: "system",
+        actor_id: null,
+        action: "identity.registered",
+        entity_type: "identity",
+        entity_id: "identity-4",
+        correlation_id: "corr-1",
+        metadata: {},
       });
       uow.emit(event("identity-4"));
     });
 
-    expect(order).toEqual(["mutation", "append"]);
+    // The append stays last on purpose: a failure anywhere earlier then means
+    // no event was ever written, which is what the relay relies on.
+    expect(order).toEqual(["mutation", "audit", "append"]);
   });
 
   it("the reference boundary keeps the same rollback semantics", async () => {
@@ -147,7 +169,7 @@ describe("transaction boundary", () => {
     const applied: string[] = [];
 
     await expect(
-      withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox }, (uow) => {
+      withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
         uow.stage(() => {
           applied.push("mutation");
         });

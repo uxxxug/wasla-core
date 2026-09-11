@@ -116,7 +116,7 @@ Nothing.
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
 | B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
-| B-9 | Audit entries and geography writes happen outside the unit of work. With in-memory adapters this is invisible; with Postgres adapters an audit entry could survive a rolled-back command | Audit trail could record a state change that never committed | Thread the scope through `AuditLog.record` and give geography a boundary, as part of the adapter work rather than before it |
+| B-9 | **Resolved.** Audit entries that describe a change now commit inside that change's transaction via `uow.audit`; geography and organization gained a boundary. Entries that record a refusal or a detected inconsistency stay deliberately out of band, because rollback would erase the only evidence of why nothing happened | resolved |
 | B-10 | **Resolved.** `InMemoryTransactionBoundary` journals the inverse of every write it is given a scope for, so it unwinds like `ROLLBACK` does. The rollback tests that used to be Postgres-only now run against both adapters | resolved |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
@@ -525,3 +525,57 @@ New conformance tests, running on both backends:
 | `keeps two concurrent transactions independent` | A nesting guard implemented as a flag, which would break concurrency |
 
 163 tests pass with `DATABASE_URL` set, 104 without.
+
+### B-9 resolved: the audit trail commits with the change it describes
+
+Every service write path was reviewed. The audit entry was always written
+*after* `withTransaction` returned, so with Postgres adapters a rolled-back
+command could leave a trail entry claiming it happened. That is worse than a
+missing entry: the trail is what an investigation treats as authoritative, so
+a false entry sends the investigation to the wrong place.
+
+The decision was made per record, on what the record means — not on what was
+easier to wire.
+
+| Write path | Decision | Why |
+|---|---|---|
+| Identity registration, session issue/revoke, membership grant | **Inside the transaction** | A session or a membership is an authorization fact. One that exists with no record of being granted is exactly what an access review is looking for |
+| Organization creation | **Inside the transaction** | Publishes no event (tenancy is read through the API, ADR 0009) but still needs a transaction, purely so the row and its audit entry land together |
+| Geography: country, region, city, service area | **Inside the transaction** | Same shape as tenancy — reference rows, no events, audited administrative writes |
+| Wallet creation, credit, authorize, capture, void, expiry sweep | **Inside the transaction** | An audit entry saying money moved, when the ledger transaction rolled back, is the record a reconciliation would trust |
+| Fulfillment created / refused / dispatched / closed / cancelled | **Inside the transaction** | A trail saying a fulfillment was dispatched when the update rolled back would send an operator to the wrong product |
+| `fulfillment.settlement_inconsistent` | **Deliberately out of band** | Nothing was mutated, so there is no change to be atomic with, and it is the *only* record of why money and execution disagree. Writing it inside the caller's transaction would let a rollback erase the evidence of the inconsistency that caused the rollback |
+
+So the rule is not "audit goes in the transaction". It is: **an entry that
+describes a committed change belongs in that change's transaction; an entry
+that records a refusal belongs outside one.** `UnitOfWork.audit` carries the
+first case and its doc comment refuses the second.
+
+Mechanically: `TransactionContext` now carries the audit log, `uow.audit(entry)`
+stages an entry, and the commit point applies mutations, then audit entries,
+then outbox appends. The append stays last so a failure anywhere earlier still
+means no event was ever written — the property the relay depends on.
+
+`TransactionContext.outbox` became optional. Geography and organization
+publish nothing by design, and handing them an outbox they never append to
+would advertise a capability they do not have; `emit` throws if one is used
+without an outbox.
+
+Two smaller things this review surfaced:
+
+- `revokeSession` mutated the stored session object in place. With `Map`
+  repositories that made the revocation visible before the commit, and left
+  the journal nothing to restore because the pre-image and the new value were
+  the same object. It builds a copy now.
+- `OrganizationService` and `GeographyService` take a `TransactionBoundary` as
+  a required constructor argument rather than defaulting to a private one. A
+  default would have quietly given them their own boundary, which is the kind
+  of thing this whole sequence exists to stop.
+
+New conformance tests, on both backends: `commits state, audit entry and event
+together`, `leaves no audit entry behind when the command is rolled back`, and
+`keeps an out-of-band audit entry even when the caller rolls back` — the last
+one pins the deliberate exception so it cannot be "tidied up" later. The
+ordering test now asserts `mutation, audit, append`.
+
+169 tests pass with `DATABASE_URL` set, 104 without.

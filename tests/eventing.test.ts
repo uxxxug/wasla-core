@@ -1,3 +1,4 @@
+import { InMemoryAuditLog } from "../src/platform/audit/audit.js";
 import { describe, expect, it, vi } from "vitest";
 import { FixedClock } from "../src/platform/clock.js";
 import { LocalEventBus } from "../src/platform/eventing/bus.js";
@@ -53,7 +54,7 @@ describe("unit of work", () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     let applied = false;
     await expect(
-      withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox: outbox }, (uow) => {
+      withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
         uow.stage(() => {
           applied = true;
         });
@@ -68,7 +69,7 @@ describe("unit of work", () => {
   it("commits state and event together", async () => {
     const outbox = new InMemoryOutbox(new FixedClock());
     let applied = false;
-    await withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox: outbox }, (uow) => {
+    await withTransaction({ boundary: new InMemoryTransactionBoundary(), outbox, audit: new InMemoryAuditLog(new FixedClock()) }, (uow) => {
       uow.stage(() => {
         applied = true;
       });
