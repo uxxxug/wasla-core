@@ -62,18 +62,43 @@ export class MoneyService {
     return { wallet, created: true };
   }
 
-  balance(walletId: string): { posted_minor: number; held_minor: number; available_minor: number } {
+  /**
+   * Posted, held and available balance.
+   *
+   * An expired hold is excluded from `held_minor`: capture is already refused
+   * past the expiry, so the funds are spendable again and only the sweep has
+   * not caught up yet. Counting them as held would make the available balance
+   * understate the truth and refuse authorizations the wallet can actually
+   * afford. `expired_hold_minor` keeps that transitional amount observable
+   * until `expireDueAuthorizations` releases it.
+   */
+  balance(walletId: string): {
+    posted_minor: number;
+    held_minor: number;
+    available_minor: number;
+    expired_hold_minor: number;
+  } {
     const wallet = this.requireWallet(walletId);
     const posted = this.repo
       .transactions()
       .flatMap((transaction) => transaction.entries)
       .filter((entry) => entry.account_reference === `wallet:${wallet.wallet_id}`)
       .reduce((sum, entry) => sum + entry.amount_minor, 0);
-    const heldMinor = this.repo.listAuthorizations(wallet.wallet_id).filter((item) => item.status === "authorized").reduce(
-      (sum, authorization) => sum + authorization.amount_minor,
-      0,
-    );
-    return { posted_minor: posted, held_minor: heldMinor, available_minor: posted - heldMinor };
+    const open = this.repo
+      .listAuthorizations(wallet.wallet_id)
+      .filter((item) => item.status === "authorized");
+    const heldMinor = open
+      .filter((item) => !this.isExpired(item))
+      .reduce((sum, authorization) => sum + authorization.amount_minor, 0);
+    const expiredMinor = open
+      .filter((item) => this.isExpired(item))
+      .reduce((sum, authorization) => sum + authorization.amount_minor, 0);
+    return {
+      posted_minor: posted,
+      held_minor: heldMinor,
+      available_minor: posted - heldMinor,
+      expired_hold_minor: expiredMinor,
+    };
   }
 
   async credit(input: {

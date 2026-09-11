@@ -23,6 +23,7 @@ describe("money", () => {
       posted_minor: 10_000,
       held_minor: 0,
       available_minor: 10_000,
+      expired_hold_minor: 0,
     });
   });
 
@@ -63,6 +64,7 @@ describe("money", () => {
       posted_minor: 3_750,
       held_minor: 0,
       available_minor: 3_750,
+      expired_hold_minor: 0,
     });
   });
 
@@ -129,6 +131,7 @@ describe("money", () => {
       posted_minor: 2_000,
       held_minor: 0,
       available_minor: 2_000,
+      expired_hold_minor: 0,
     });
 
     const captureHold = await core.money.authorize({
@@ -183,6 +186,7 @@ describe("money", () => {
       posted_minor: 3_000,
       held_minor: 0,
       available_minor: 3_000,
+      expired_hold_minor: 0,
     });
     expect(await core.money.expireDueAuthorizations("sweep")).toHaveLength(0);
     expect(

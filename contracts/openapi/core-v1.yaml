@@ -224,6 +224,11 @@ paths:
   /v1/wallets/{wallet_id}/balance:
     get:
       summary: Read posted, held and available wallet amounts
+      description: >-
+        held_minor counts only holds that are still capturable. A hold past its
+        expiry can no longer be captured, so its amount is reported separately
+        in expired_hold_minor and is already spendable; the expiry sweep then
+        releases it formally.
       parameters:
         - name: wallet_id
           in: path
@@ -236,11 +241,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [posted_minor, held_minor, available_minor]
+                required: [posted_minor, held_minor, available_minor, expired_hold_minor]
                 properties:
                   posted_minor: { type: integer }
                   held_minor: { type: integer, minimum: 0 }
                   available_minor: { type: integer }
+                  expired_hold_minor:
+                    type: integer
+                    minimum: 0
+                    description: Amount still recorded as authorized but past expiry, awaiting the sweep.
         "404": { $ref: "#/components/responses/Error" }
   /v1/payment-authorizations:
     post:

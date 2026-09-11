@@ -179,6 +179,7 @@ MARKET were not touched; anything they must implement is recorded under
 | G-3 | A failed hold release was swallowed by an empty `catch`. A fulfillment could close as cancelled or failed while its money was still held or already captured, with **no** record anywhere — the exact state/money inconsistency CORE is responsible for preventing. | high | fixed |
 | G-4 | Execution state and money state were only comparable through a cross-module join, so no query could answer "is CORE financially consistent?". | high | fixed |
 | G-5 | `market.order.created` could declare any `payment_authorization_id` and CORE never verified it. A hold that was missing, voided, captured or expired was only discovered at capture time — **after** MOVE had already executed the work. | high | fixed |
+| G-6 | `balance()` counted expired holds as held even though capture is already refused past the expiry. The available balance understated the truth and authorizations the wallet could afford were refused, for an unbounded window — the sweep is not guaranteed to have run. | medium | fixed |
 
 ### Changes
 
@@ -211,6 +212,11 @@ MARKET were not touched; anything they must implement is recorded under
 - Migration `0005_fulfillment_settlement_state` (additive, with backfill and
   rollback) adds the column, a value check and an alignment check that stops
   the database from storing a closed fulfillment that is still holding money.
+- `held_minor` now counts only capturable holds. An expired hold is reported in
+  the new additive `expired_hold_minor` field and its funds are immediately
+  available again; the sweep still releases it formally and the ledger is never
+  touched by expiry. No existing balance field changed meaning for a wallet
+  without expiring holds.
 
 ## Cycle 2026-09-11 — cross-system vertical slice (CORE side)
 
