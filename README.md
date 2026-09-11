@@ -33,22 +33,31 @@ package, no cross-database access.
 | HTTP surface with correlation ids, canonical errors, structured logs, health/readiness | implemented, 8 tests |
 | Append-only audit trail with metadata scrubbing | implemented |
 | Executable architecture governance | implemented, 4 tests |
-| Wallet, balanced append-only ledger, payment authorization/capture | implemented in memory; schema authored, not executed |
-| Fulfillment coordination via MARKET/MOVE events | implemented on local bus; production transport unproven |
+| Wallet, balanced append-only ledger, payment authorization/capture/expiry | implemented in memory, 9 tests; schema authored, not executed |
+| Fulfillment coordination via MARKET/MOVE events | implemented on local bus, 18 tests; production transport unproven |
+| Execution/money consistency: `settlement_state`, hold verification at intake, reconciliation read | implemented, covered by the fulfillment settlement tests |
 | Subscriptions, reputation, notifications | **not implemented** |
 
+71 tests pass locally across 11 files, and the same gates run in CI on the
+working remote.
+
 Persistence today is the in-memory reference implementation of each repository
-port. The Postgres schema is authored in `db/migrations/0001_core_foundation.sql`
-but **has not been executed against any database** — no CORE database has been
-provisioned yet. See `ROADMAP.md`.
+port. The Postgres schema is authored across
+`db/migrations/0001_core_foundation.sql` through
+`0005_fulfillment_settlement_state.sql`, each with a rollback, but **none has
+been executed against any database** — no CORE database has been provisioned
+yet, so the schema-level guarantees (including the settlement alignment check)
+are unverified. See `ROADMAP.md`, blocker B-1.
 
 ## Development
 
 ```bash
-npm install
+npm ci              # a lockfile is committed, so installs are reproducible
 npm run typecheck
 npm test
 npm run verify      # typecheck + tests + governance + contracts
+npm run check:migrations
+npm run check:roadmap
 ```
 
 ## Layout

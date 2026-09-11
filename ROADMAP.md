@@ -70,7 +70,14 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Remote publication and remote CI evidence remain pending because repository credentials are unavailable in this environment.
+Nothing is mid-change in the working tree. Remote publication and remote CI are
+**no longer pending**: `uxxxug/wasla-core` is the working remote, pushes are
+fast-forward, and the CI workflow runs and passes there — confirmed against the
+Actions API on 2026-09-11 rather than assumed from the previous text.
+
+The next substantial step is blocked, not unstarted: migrations 0001–0005 need a
+real PostgreSQL instance (B-1) before the Postgres adapters can be written
+against anything verifiable.
 
 ## Remaining, in dependency order
 
@@ -102,14 +109,14 @@ Nothing.
 
 | # | Blocker | Impact | What unblocks it |
 |---|---|---|---|
-| B-1 | No CORE database provisioned; no connection credentials | Migration 0001 is authored but unexecuted; persistence runs on in-memory reference adapters | A database instance and credentials supplied through the environment, never committed |
+| B-1 | No CORE database provisioned; no connection credentials | Migrations 0001–0005 are authored with rollbacks but **unexecuted**. Every schema guarantee they add — including the settlement alignment check — is unverified against a real engine; persistence runs on in-memory reference adapters | A PostgreSQL instance and credentials supplied through the environment, never committed. This is the single highest-value blocker to clear: the code is ready for it |
 | B-2 | Production data inventory unknown for Ceezr and Wasla | Identity, money and order migrations cannot be planned against real volumes or duplicates | Read access to production, or an exported inventory (row counts, duplicate profile) |
 | B-3 | Duplicate-identity merge policy undecided | Detection tooling can be built; no merge may execute | An owner decision on canonical selection and conflict rules |
 | B-4 | Regulatory pricing policy undecided (ADR 0012) | Pricing engine can be built rule-driven, but no rates may be fixed | A legal/regulatory decision |
 | B-5 | Deployment target and topology not chosen | Manifests stay vendor-neutral; no environment is provisioned | An infrastructure decision |
 | B-6 | No production release approval | No production deployment will be attempted | Explicit owner approval |
-| B-7 | GitHub Actions is blocked on the `noor-seez` account | The CI workflow in this repository cannot run: every job fails at start with "recent account payments have failed or your spending limit needs to be increased". The same block affects the MOVE repository. All gates are therefore verified locally only | Resolve GitHub billing for the account, then re-run the workflow |
-| B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `noor-seez/wasla-core` by fast-forward without rewriting history | — | — |
+| B-7 | *Resolved on the working remote.* GitHub Actions was billing-blocked on the `noor-seez` account. The repository CORE is actually developed and pushed to is `uxxxug/wasla-core`, where the CI workflow runs and passes — verified against the Actions API in this cycle, not assumed. If work moves back to a `noor-seez` remote the billing block returns | — | — |
+| B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
 
@@ -131,7 +138,8 @@ Nothing.
 
 ## Tests that pass at this commit
 
-44 of 44 locally.
+71 of 71 locally, across 11 files. Counted by running the suite at this commit,
+not carried over from a previous cycle.
 
 - Eventing (12): envelope completeness, malformed envelope rejection,
   transaction rollback leaves no event, commit writes state and event together,
@@ -159,10 +167,18 @@ Nothing.
   the job; MOVE job-creation failure; full event replay after restart.
 - Governance (4): no MOVE/MARKET entities, no hardcoded secrets, no
   cross-module internal imports, no TODO markers.
-- Money: balanced entries, posted/held/available balances, idempotent authorization
-  and capture, validation and insufficient-funds rejection.
-- Fulfillment: idempotent MARKET order consumption, opaque coordination state,
-  MOVE completion and exactly-once CORE outcome emission on the local bus.
+- Fulfillment dispatch (5): the `dispatched` transition publishes its contract,
+  idempotent acceptance, acceptance after cancellation stays cancelled and
+  publishes nothing, rejection closes the fulfillment, unknown job reference.
+- Fulfillment settlement (11): capture on success, release on failure, on MOVE
+  rejection and on cancellation, `settlement_state` on the published contract,
+  intake refusal for a missing, unauthorized, captured and expired hold, an
+  unfunded order still coordinating, the `unsettled` path with its audit entry,
+  a success claim that could not be captured never reported as success, and the
+  organization-scoped reconciliation read.
+- Money expired holds (3): the balance transition at expiry, authorizing
+  against funds an expired hold no longer guards, and the sweep leaving the
+  ledger and the balance unchanged.
 
 ## Cycle 2026-09-11 — CORE-only hardening (independent CORE agent)
 
@@ -217,6 +233,50 @@ MARKET were not touched; anything they must implement is recorded under
   available again; the sweep still releases it formally and the ledger is never
   touched by expiry. No existing balance field changed meaning for a wallet
   without expiring holds.
+
+### Integration reviewed from the CORE side only
+
+`MARKET -> CORE -> MOVE -> CORE -> MARKET` is exercised end to end by
+`tests/vertical-slice.test.ts` against the contract simulators in
+`tests/support/product-simulators.ts`. Those simulators are CORE-side test
+doubles: they prove the contracts are consumable, they do **not** prove the
+real MOVE or MARKET services implement them.
+
+CORE is the source of truth for coordination state and for every intermediate
+event in that round trip. It holds opaque references only — no order items,
+prices, drivers, vehicles or routes cross into CORE payloads, and the
+governance gate fails the build if they do.
+
+### External dependencies
+
+Recorded, not implemented. This cycle changed nothing outside CORE.
+
+**MOVE must:**
+
+| Direction | Contract | Note |
+|---|---|---|
+| consume | `core.fulfillment.created` v1 | the request to execute |
+| consume | `core.fulfillment.cancelled` v1 | must stop work already dispatched |
+| publish | `move.job.accepted` v1 | CORE turns this into `dispatched` |
+| publish | `move.job.rejected` v1 | CORE closes as `failed` and releases the hold |
+| publish | `move.job.completed` v1 | CORE captures the hold on success |
+
+CORE now tolerates a `move.job.accepted` that arrives after a cancellation: it
+is absorbed, not rejected, so MOVE will not see a dead-lettering `conflict` on
+that race. MOVE should still treat the cancellation as authoritative.
+
+**MARKET must:**
+
+| Change | Contract | Compatibility |
+|---|---|---|
+| consume the new event | `core.fulfillment.dispatched` v1 | new; without it MARKET cannot show that work was assigned |
+| read the new field | `settlement_state` on `core.fulfillment.completed` / `.cancelled` v1 | additive and optional — existing consumers keep working |
+| send the hold | `payment_authorization_id` on `market.order.created` | an order without it still coordinates, but CORE cannot bind money to that execution |
+
+MARKET should expect a fulfillment to be closed as `failed` at intake, before
+any MOVE dispatch, when the declared hold is missing, not authorized, already
+captured or expired. In that case `core.fulfillment.created` is never
+published at all.
 
 ## Cycle 2026-09-11 — cross-system vertical slice (CORE side)
 
