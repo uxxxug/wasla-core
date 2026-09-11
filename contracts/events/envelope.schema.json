@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/envelope.schema.json",
+  "title": "WASLA Event Envelope",
+  "description": "Every event produced by CORE, MOVE or MARKET uses this envelope. Only `payload` is event-type specific.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "version",
+    "producer",
+    "occurred_at",
+    "correlation_id",
+    "causation_id",
+    "entity_type",
+    "entity_id",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "type": "string", "pattern": "^(core|move|market)\\.[a-z_]+\\.[a-z_]+$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "producer": { "type": "string", "enum": ["wasla-core", "wasla-move", "wasla-market"] },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "correlation_id": { "type": "string", "minLength": 1 },
+    "causation_id": { "type": ["string", "null"] },
+    "entity_type": { "type": "string" },
+    "entity_id": { "type": "string" },
+    "payload": { "type": "object" }
+  }
+}

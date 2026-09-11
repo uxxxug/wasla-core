@@ -1,0 +1,264 @@
+import type { Clock } from "../../platform/clock.js";
+import { conflict, forbidden, invalid, notFound, unauthenticated } from "../../platform/errors.js";
+import { hashToken, newId, newToken } from "../../platform/ids.js";
+import type { AuditLog } from "../../platform/audit/audit.js";
+import { makeEvent } from "../../platform/eventing/envelope.js";
+import type { OutboxStore } from "../../platform/eventing/outbox.js";
+import { withTransaction } from "../../platform/eventing/unit-of-work.js";
+import {
+  type ChannelType,
+  type Identity,
+  type Membership,
+  type Permission,
+  type Principal,
+  type Role,
+  type Session,
+  isSessionActive,
+  permissionsForRoles,
+} from "./domain.js";
+import type { IdentityRepository } from "./ports.js";
+
+const PRODUCER = "wasla-core";
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+export interface AuthenticatedPrincipal {
+  principal_id: string;
+  identity_id: string;
+  session_id: string;
+  organization_ids: string[];
+  roles: Role[];
+  permissions: Permission[];
+}
+
+export interface RegisterIdentityInput {
+  channel_type: ChannelType;
+  external_id: string;
+  display_name?: string | null;
+  correlation_id: string;
+  source_system?: string;
+  legacy_id?: string | null;
+}
+
+export interface RegisterIdentityResult {
+  identity: Identity;
+  principal: Principal;
+  created: boolean;
+}
+
+export class IdentityService {
+  constructor(
+    private readonly repo: IdentityRepository,
+    private readonly outbox: OutboxStore,
+    private readonly audit: AuditLog,
+    private readonly clock: Clock,
+  ) {}
+
+  /**
+   * Resolve-or-create by channel link. Idempotent: calling twice with the same
+   * (channel_type, external_id) returns the same identity and emits no second event.
+   * It never merges two existing identities — that is an explicit, gated operation.
+   */
+  async registerIdentity(input: RegisterIdentityInput): Promise<RegisterIdentityResult> {
+    if (!input.external_id.trim()) throw invalid("external_id is required");
+    if (!input.correlation_id.trim()) throw invalid("correlation_id is required");
+
+    const existingLink = this.repo.findLink(input.channel_type, input.external_id);
+    if (existingLink) {
+      const identity = this.repo.getIdentity(existingLink.identity_id);
+      if (!identity) throw notFound("identity referenced by link does not exist");
+      const principal = this.repo.findPrincipalByIdentity(identity.identity_id);
+      if (!principal) throw notFound("principal for identity does not exist");
+      return { identity, principal, created: false };
+    }
+
+    const now = this.clock.now();
+    const identity: Identity = {
+      identity_id: newId(),
+      status: "active",
+      canonical_identity_id: null,
+      display_name: input.display_name ?? null,
+      created_at: now.toISOString(),
+      updated_at: now.toISOString(),
+      source_system: input.source_system ?? PRODUCER,
+      legacy_id: input.legacy_id ?? null,
+    };
+    const principal: Principal = {
+      principal_id: newId(),
+      identity_id: identity.identity_id,
+      created_at: now.toISOString(),
+    };
+    const link = {
+      identity_link_id: newId(),
+      identity_id: identity.identity_id,
+      channel_type: input.channel_type,
+      external_id: input.external_id,
+      verified_at: now.toISOString(),
+      created_at: now.toISOString(),
+    };
+
+    await withTransaction(this.outbox, (uow) => {
+      uow.stage(() => {
+        this.repo.insertIdentity(identity);
+        this.repo.insertPrincipal(principal);
+        this.repo.insertLink(link);
+      });
+      uow.emit(
+        makeEvent({
+          event_type: "core.identity.verified",
+          version: 1,
+          producer: PRODUCER,
+          occurred_at: now,
+          correlation_id: input.correlation_id,
+          entity_type: "identity",
+          entity_id: identity.identity_id,
+          payload: {
+            identity_id: identity.identity_id,
+            principal_id: principal.principal_id,
+            channel_type: input.channel_type,
+            verified_at: now.toISOString(),
+          },
+        }),
+      );
+    });
+
+    this.audit.record({
+      actor_type: "system",
+      actor_id: null,
+      action: "identity.registered",
+      entity_type: "identity",
+      entity_id: identity.identity_id,
+      correlation_id: input.correlation_id,
+      metadata: { channel_type: input.channel_type },
+    });
+
+    return { identity, principal, created: true };
+  }
+
+  /** Issues an opaque session token. Only its hash is persisted. */
+  async issueSession(input: {
+    principal_id: string;
+    channel_type: ChannelType;
+    correlation_id: string;
+  }): Promise<{ session: Session; token: string }> {
+    const principal = this.repo.getPrincipal(input.principal_id);
+    if (!principal) throw notFound("principal not found");
+    const identity = this.repo.getIdentity(principal.identity_id);
+    if (!identity) throw notFound("identity not found");
+    if (identity.status !== "active") throw forbidden("identity is not active");
+
+    const now = this.clock.now();
+    const token = newToken();
+    const session: Session = {
+      session_id: newId(),
+      principal_id: principal.principal_id,
+      token_hash: hashToken(token),
+      channel_type: input.channel_type,
+      issued_at: now.toISOString(),
+      expires_at: new Date(now.getTime() + SESSION_TTL_MS).toISOString(),
+      revoked_at: null,
+    };
+    this.repo.insertSession(session);
+    this.audit.record({
+      actor_type: "principal",
+      actor_id: principal.principal_id,
+      action: "session.issued",
+      entity_type: "session",
+      entity_id: session.session_id,
+      correlation_id: input.correlation_id,
+      metadata: { channel_type: input.channel_type },
+    });
+    return { session, token };
+  }
+
+  revokeSession(sessionId: string, correlationId: string): void {
+    const session = this.repo.getSession(sessionId);
+    if (!session) throw notFound("session not found");
+    if (session.revoked_at !== null) return;
+    session.revoked_at = this.clock.now().toISOString();
+    this.repo.updateSession(session);
+    this.audit.record({
+      actor_type: "principal",
+      actor_id: session.principal_id,
+      action: "session.revoked",
+      entity_type: "session",
+      entity_id: session.session_id,
+      correlation_id: correlationId,
+      metadata: {},
+    });
+  }
+
+  /** Authenticates a bearer token and resolves the acting principal. */
+  authenticate(token: string): AuthenticatedPrincipal {
+    if (!token) throw unauthenticated();
+    const session = this.repo.getSessionByTokenHash(hashToken(token));
+    if (!session) throw unauthenticated("unknown session token");
+    if (!isSessionActive(session, this.clock.now())) throw unauthenticated("session expired or revoked");
+
+    const principal = this.repo.getPrincipal(session.principal_id);
+    if (!principal) throw unauthenticated("principal no longer exists");
+    const identity = this.repo.getIdentity(principal.identity_id);
+    if (!identity || identity.status !== "active") throw forbidden("identity is not active");
+
+    const memberships = this.repo.listMemberships(principal.principal_id);
+    const roles = [...new Set(memberships.flatMap((m) => m.roles))];
+    return {
+      principal_id: principal.principal_id,
+      identity_id: identity.identity_id,
+      session_id: session.session_id,
+      organization_ids: memberships.map((m) => m.organization_id),
+      roles,
+      permissions: [...permissionsForRoles(roles)],
+    };
+  }
+
+  grantMembership(input: {
+    principal_id: string;
+    organization_id: string;
+    roles: Role[];
+    correlation_id: string;
+  }): Membership {
+    if (!this.repo.getPrincipal(input.principal_id)) throw notFound("principal not found");
+    if (this.repo.findMembership(input.principal_id, input.organization_id)) {
+      throw conflict("membership already exists");
+    }
+    const membership: Membership = {
+      membership_id: newId(),
+      principal_id: input.principal_id,
+      organization_id: input.organization_id,
+      roles: input.roles,
+      created_at: this.clock.now().toISOString(),
+    };
+    this.repo.insertMembership(membership);
+    this.audit.record({
+      actor_type: "system",
+      actor_id: null,
+      action: "membership.granted",
+      entity_type: "membership",
+      entity_id: membership.membership_id,
+      correlation_id: input.correlation_id,
+      metadata: { organization_id: input.organization_id, roles: input.roles },
+    });
+    return membership;
+  }
+
+  /**
+   * Authorization check. Tenant isolation is enforced here: a permission is only
+   * granted inside an organization the principal belongs to.
+   */
+  authorize(
+    actor: AuthenticatedPrincipal,
+    permission: Permission,
+    organizationId?: string,
+  ): void {
+    if (!actor.permissions.includes(permission)) {
+      throw forbidden("missing permission", { permission });
+    }
+    if (organizationId !== undefined && !actor.organization_ids.includes(organizationId)) {
+      if (!actor.roles.includes("platform_admin")) {
+        throw forbidden("principal is not a member of this organization", {
+          organization_id: organizationId,
+        });
+      }
+    }
+  }
+}

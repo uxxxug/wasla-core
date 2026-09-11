@@ -1,0 +1,24 @@
+{
+  "name": "wasla-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WASLA CORE — shared operating layer, shared engines, event backbone, fulfillment coordination.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check:governance": "node scripts/check-governance.mjs",
+    "check:roadmap": "node scripts/check-roadmap.mjs",
+    "check:contracts": "node scripts/check-contracts.mjs",
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "verify": "npm run typecheck && npm run test && npm run check:governance && npm run check:contracts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

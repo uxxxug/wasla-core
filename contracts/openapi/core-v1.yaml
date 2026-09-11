@@ -1,0 +1,289 @@
+openapi: 3.1.0
+info:
+  title: WASLA CORE API
+  version: 1.0.0
+  description: >
+    Shared operating layer for WASLA. CORE owns identity, access, organizations,
+    money, subscriptions, reputation, channels, notifications and fulfillment
+    coordination.
+
+    CORE never returns MOVE- or MARKET-owned data. An endpoint here that
+    proxies a driver, a job's operational detail, a product or a store is an
+    architecture violation (ADR 0007 / ADR 0018).
+
+    Compatibility: additive changes only within v1. A breaking change ships as
+    /v2 and v1 stays served for the documented overlap window.
+servers:
+  - url: https://core.wasla.internal
+    description: Service-to-service base URL (environment supplied)
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+  /ready:
+    get:
+      summary: Readiness probe
+      security: []
+      responses:
+        "200":
+          description: Ready to serve, with pending outbox depth
+  /v1/identities:
+    post:
+      summary: Resolve or create an identity from a channel account
+      description: >
+        Idempotent by (channel_type, external_id). A repeated call returns the
+        same identity with 200 and emits no further event. This endpoint NEVER
+        merges two existing identities; merging is an explicit gated operation.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel_type, external_id]
+              properties:
+                channel_type:
+                  $ref: "#/components/schemas/ChannelType"
+                external_id: { type: string, minLength: 1 }
+                display_name: { type: string, nullable: true }
+                source_system: { type: string }
+                legacy_id: { type: string, nullable: true }
+      responses:
+        "200":
+          description: Existing identity resolved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IdentityResolved" }
+        "201":
+          description: Identity created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IdentityResolved" }
+        "400": { $ref: "#/components/responses/Error" }
+  /v1/sessions:
+    post:
+      summary: Issue a session for a principal
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principal_id, channel_type]
+              properties:
+                principal_id: { type: string, format: uuid }
+                channel_type: { $ref: "#/components/schemas/ChannelType" }
+      responses:
+        "201":
+          description: Session issued. The token is returned once and stored only as a hash.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: { type: string, format: uuid }
+                  access_token: { type: string }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_at: { type: string, format: date-time }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/sessions/current:
+    get:
+      summary: Verify the caller's session and resolve the acting principal
+      responses:
+        "200":
+          description: Authenticated principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthenticatedPrincipal" }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/sessions/revoke:
+    post:
+      summary: Revoke a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id: { type: string, format: uuid }
+      responses:
+        "204": { description: Revoked (idempotent) }
+  /v1/access/check:
+    post:
+      summary: Authorization probe for MOVE and MARKET
+      description: >
+        Returns an allow/deny decision only. It never returns the data the
+        permission would guard.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permission]
+              properties:
+                permission: { $ref: "#/components/schemas/Permission" }
+                organization_id: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Decision
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowed: { type: boolean }
+                  principal_id: { type: string, format: uuid }
+        "401": { $ref: "#/components/responses/Error" }
+  /v1/memberships:
+    post:
+      summary: Grant a principal membership of an organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [principal_id, organization_id, roles]
+              properties:
+                principal_id: { type: string, format: uuid }
+                organization_id: { type: string, format: uuid }
+                roles:
+                  type: array
+                  minItems: 1
+                  items: { $ref: "#/components/schemas/Role" }
+      responses:
+        "201": { description: Membership granted }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/organizations:
+    post:
+      summary: Create an organization (tenant)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, country_code]
+              properties:
+                name: { type: string, minLength: 1 }
+                country_code: { type: string, pattern: "^[A-Z]{2}$" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/organizations/{organization_id}:
+    get:
+      summary: Read an organization the caller belongs to
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  responses:
+    Error:
+      description: Canonical error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    ChannelType:
+      type: string
+      enum: [telegram, phone, email, web, partner_api]
+    Role:
+      type: string
+      enum: [platform_admin, org_admin, org_member, support_agent, service]
+    Permission:
+      type: string
+      enum:
+        - identity.read
+        - identity.write
+        - organization.read
+        - organization.write
+        - fulfillment.request
+        - fulfillment.read
+        - money.authorize
+        - support.act
+    IdentityResolved:
+      type: object
+      required: [identity_id, principal_id, status, created]
+      properties:
+        identity_id: { type: string, format: uuid }
+        principal_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, suspended, merged] }
+        created: { type: boolean }
+    AuthenticatedPrincipal:
+      type: object
+      required: [principal_id, identity_id, session_id, organization_ids, roles, permissions]
+      properties:
+        principal_id: { type: string, format: uuid }
+        identity_id: { type: string, format: uuid }
+        session_id: { type: string, format: uuid }
+        organization_ids:
+          type: array
+          items: { type: string, format: uuid }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        permissions:
+          type: array
+          items: { $ref: "#/components/schemas/Permission" }
+    Organization:
+      type: object
+      required: [organization_id, name, status, country_code]
+      properties:
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [active, suspended] }
+        country_code: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        source_system: { type: string }
+        legacy_id: { type: string, nullable: true }
+    Error:
+      type: object
+      required: [code, message, retryable, correlation_id]
+      properties:
+        code:
+          type: string
+          enum:
+            [
+              invalid_request,
+              unauthenticated,
+              forbidden,
+              not_found,
+              conflict,
+              precondition_failed,
+              unavailable,
+              internal,
+            ]
+        message: { type: string }
+        details: { type: object }
+        retryable: { type: boolean }
+        correlation_id: { type: string }
