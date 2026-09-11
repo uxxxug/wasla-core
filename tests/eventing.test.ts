@@ -170,14 +170,34 @@ describe("consumer inbox / idempotency", () => {
     expect(order).toEqual(["e-2", "e-1"]);
   });
 
-  it("retries a failing handler and dead-letters it after max attempts", async () => {
+  it("retries a failing handler, dead-letters it, and reports the failure", async () => {
     const bus = new LocalEventBus(new InMemoryInbox(), 3);
     const handler = vi.fn().mockRejectedValue(new Error("handler exploded"));
     bus.subscribe("flaky", "core.test.happened", handler);
-    await bus.publish(event());
+
+    // `publish` used to resolve here, recording the failure only in the
+    // in-process deadLetters array. The durable relays above decide whether to
+    // retry from this answer, so resolving meant an event could be marked
+    // published or processed in the database while nothing had consumed it
+    // (B-13).
+    await expect(bus.publish(event())).rejects.toThrow(/handler exploded/);
     expect(handler).toHaveBeenCalledTimes(3);
     expect(bus.deadLetters).toHaveLength(1);
     expect(bus.deadLetters[0]!.consumer).toBe("flaky");
+  });
+
+  it("offers the event to every subscriber even when one of them fails", async () => {
+    const bus = new LocalEventBus(new InMemoryInbox(), 1);
+    const seen: string[] = [];
+    bus.subscribe("broken", "core.test.happened", () => {
+      throw new Error("down");
+    });
+    bus.subscribe("healthy", "core.test.happened", () => {
+      seen.push("healthy");
+    });
+    await expect(bus.publish(event())).rejects.toThrow(/down/);
+    // One broken consumer must not decide what the others get to see.
+    expect(seen).toEqual(["healthy"]);
   });
 
   it("succeeds on a retry after a transient failure", async () => {

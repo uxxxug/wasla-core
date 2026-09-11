@@ -2,6 +2,8 @@ import { InMemoryAuditLog, type AuditLog } from "../audit/audit.js";
 import { PgAuditLog } from "../audit/pg-audit.js";
 import type { Clock } from "../clock.js";
 import { InMemoryInbox, type InboxStore } from "../eventing/inbox.js";
+import { InMemoryInboundEventStore, type InboundEventStore } from "../eventing/ingress.js";
+import { PgInboundEventStore } from "../eventing/pg-ingress.js";
 import { InMemoryOutbox, type OutboxStore } from "../eventing/outbox.js";
 import { PgInbox } from "../eventing/pg-inbox.js";
 import { PgOutbox } from "../eventing/pg-outbox.js";
@@ -38,6 +40,7 @@ export interface Persistence {
   audit: AuditLog;
   outbox: OutboxStore;
   inbox: InboxStore;
+  inbound: InboundEventStore;
   boundary: TransactionBoundary;
   identity: IdentityRepository;
   organization: OrganizationRepository;
@@ -53,6 +56,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     audit: new InMemoryAuditLog(clock),
     outbox: new InMemoryOutbox(clock),
     inbox: new InMemoryInbox(),
+    inbound: new InMemoryInboundEventStore(clock),
     boundary: new InMemoryTransactionBoundary(),
     identity: new InMemoryIdentityRepository(),
     organization: new InMemoryOrganizationRepository(),
@@ -76,6 +80,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     audit: new PgAuditLog(pool, clock),
     outbox: new PgOutbox(pool, clock),
     inbox: new PgInbox(pool, clock),
+    inbound: new PgInboundEventStore(pool, clock),
     boundary: new PgTransactionBoundary(pool as never),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),

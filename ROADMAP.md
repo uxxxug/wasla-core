@@ -70,31 +70,50 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is mid-change in the working tree. Remote publication and remote CI are
-**no longer pending**: `uxxxug/wasla-core` is the working remote, pushes are
-fast-forward, and the CI workflow runs and passes there — confirmed against the
-Actions API on 2026-09-11 rather than assumed from the previous text.
+Nothing is mid-change in the working tree. `uxxxug/wasla-core` is the working
+remote, pushes are fast-forward, and CI runs and passes there.
 
-The Postgres adapters themselves are the next step, and the port refactor
-described below is what makes them possible. The composition root still wires
-the in-memory adapters; nothing has changed about which implementation runs.
+Persistence is no longer the open question: every port has a Postgres adapter,
+the composition root can be wired to either backend, and the whole suite runs
+against both. Migrations 0001–0007 are applied and verified on two real engines
+(PostgreSQL 18.4 locally, 17.6 managed), rollbacks included.
 
 ## Remaining, in dependency order
 
-1. Settlement beyond the single hold-per-fulfillment case: partial capture,
-   refunds and multi-hold orders. The states exist in the schema; the service
-   only drives `held -> captured | released` today.
-2. Subscriptions, plans, periods, entitlements, usage (ADR 0013).
-3. Channels and notifications; Telegram adapter.
-4. Durable external event ingress/transport for the implemented Fulfillment contracts.
-5. Publish and adopt the versioned contracts in MOVE and MARKET.
-6. Event normalisation and historical replay tooling.
-7. Migration and reconciliation tooling; dry runs.
-8. Security hardening pass and observability export.
-9. Staging readiness, cutover and rollback rehearsal.
+Every line below was checked against the code, the tests and the commits in
+this cycle rather than carried over from the previous text. Postgres adapters
+and B-1 were never the goal; they are the floor CORE's actual work stands on.
 
-The end-to-end vertical slice that used to sit in this list is done, on both
-backends: `tests/vertical-slice.test.ts` and `tests/vertical-slice-postgres.test.ts`.
+| # | Milestone | Verified status | Evidence / what is missing |
+|---|---|---|---|
+| 1 | External event ingress: MARKET and MOVE can actually reach CORE | **Started this cycle, CORE side substantially complete** | `POST /v1/events`, `inbound_event` (migration 0007) on both backends, `InboundDispatcher`, trust boundary tied to the credential, 11 tests × 2 backends. Outbound delivery to MOVE/MARKET endpoints is still local-bus only — see external dependencies |
+| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partially complete** | `held -> captured \| released` is driven and atomic with execution state (B-11). The schema has the states but the service has no partial-capture, refund or multi-hold path, and no event contract for them |
+| 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Not started** | No module, no tables, no contract. No external dependency — CORE can build this alone |
+| 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
+| 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
+| 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
+| 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists (`listFinanciallyInconsistent`, `/v1/fulfillments/reconciliation/inconsistent`). Data migration cannot be planned without a production inventory or a merge policy |
+| 8 | Security hardening pass and observability export | **Partially complete** | Deny-by-default RLS on every table, hardened `search_path`, token hashing, audit scrubbing, correlation ids. No metrics/trace export, no rate limiting on the new ingress edge |
+| 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
+
+### What was claimed complete and actually is
+
+Spot-checked against code rather than accepted from the list: the transactional
+outbox (`uow.emit` + `PendingAuditEntry` ordering), the consumer inbox, role →
+permission mapping as data (`ROLE_PERMISSIONS`), append-only audit enforced by
+trigger, opaque session tokens stored as hashes only, geography as reference
+data with no tracking or routing, and the authorization lifecycle including the
+expiry sweep. All present, all covered by tests on both backends.
+
+### What the list said was done and was overstated
+
+- "Behaviour under a real message broker (the bus is in-process today)" was
+  filed under *Not proven yet*, which undersold it. It was not a proving gap,
+  it was a **functional gap**: with only an in-process bus, no external system
+  could start any of the coordination CORE exists to do. Milestone 1 above is
+  that gap, and it was invisible in the old wording.
+- The *Done* list credits "migration 0003 with its rollback" and stops there,
+  though 0004–0007 exist. Corrected by the table above.
 
 ## Migrated
 
@@ -120,6 +139,7 @@ Nothing.
 | B-10 | **Resolved.** `InMemoryTransactionBoundary` journals the inverse of every write it is given a scope for, so it unwinds like `ROLLBACK` does. The rollback tests that used to be Postgres-only now run against both adapters | resolved |
 | B-11 | **Resolved.** Money and execution state were settled in two separate transactions, so a failure between them left funds captured against a fulfillment still recorded as `dispatched`/`held`. `MoneyService.captureWithin` / `voidWithin` now enlist in the caller's unit of work; `capture`/`voidAuthorization` are thin wrappers that open their own | resolved |
 | B-12 | **Resolved.** The in-memory money store enforced only primary keys, so two concurrent captures both inserted a `capture:<authorization_id>` ledger transaction and the money moved twice, while Postgres refused the second. The reference store now enforces the schema's UNIQUE constraints, synchronously | resolved |
+| B-13 | **Resolved.** `LocalEventBus.publish` resolved successfully even when every subscriber had exhausted its attempts, recording the failure only in an in-process array. Both durable relays decide whether to retry from that answer, so an event could be marked `published`/`processed` in the database while nothing had consumed it. `publish` now throws once any subscriber dead-letters | resolved |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -130,6 +150,10 @@ Nothing.
 - Session lifetime and refresh policy per channel (currently a fixed 12 hours).
 
 ## Risks
+
+- Migration 0006 enables row-level security from a hardcoded list, so every
+  future table must remember to opt in. `tests/db-schema.test.ts` catches an
+  omission against a live database, but nothing catches it at authoring time.
 
 | Risk | Severity | Mitigation in place |
 |---|---|---|
@@ -739,3 +763,129 @@ balance is the invariant and the return value is not.
 | money and state atomic together | `tests/settlement-atomicity.test.ts` (4 tests, both backends) | in-memory + Postgres |
 
 189 tests pass with `DATABASE_URL`, 119 without.
+
+## Milestone: MARKET and MOVE can actually reach CORE
+
+### Why this was next, and not settlement refinement
+
+The roadmap listed partial capture and refunds first. Reading the code instead
+of the list changed the order.
+
+CORE's whole purpose is to coordinate MARKET → CORE → MOVE → CORE → settlement
+→ MARKET. That loop is implemented and proven, on both backends, end to end.
+But every one of those tests reaches it the same way: by calling a consumer
+directly, or by publishing onto an in-process `LocalEventBus`. There were 24
+HTTP routes and **not one of them could be told that an order exists**.
+`consumeMarketOrder`, `consumeJobAccepted`, `consumeJobRejected` and
+`consumeMoveCompletion` were unreachable from outside the process.
+
+MARKET and MOVE are separate services in separate repositories. So the
+coordination was real and entirely unreachable — correct logic behind no door.
+Refining settlement would have made a richer version of something nothing could
+start. `Not proven yet` described the in-process bus as a proving gap; it was a
+functional one, which is the sort of thing a roadmap only reveals when it is
+read against the code.
+
+### What was built, CORE side only
+
+**`POST /v1/events`, answering 202.** Not 200. CORE has taken durable
+responsibility for the envelope and has done nothing else with it, and 200
+would describe work that has not happened.
+
+**`inbound_event` (migration 0007), the mirror of `outbox`.** The outbox exists
+so a state change and its event cannot become two writes that disagree. This
+exists so an accepted event and its processing cannot become one request that
+disappears. Processing in-request would mean a crash just after the 2xx loses
+the event while the producer has been told it arrived — and at-least-once
+delivery only helps a producer that has been told to retry. So ingress records
+and commits, and `InboundDispatcher` hands the event to the bus afterwards.
+
+**The trust boundary is the interesting part.** Which events a caller may
+assert is derived from the credential, never from the request:
+
+- `principal.service_name` (migration 0007, UNIQUE, NULL for every person) says
+  which external system a credential *is*. A header naming the producer would
+  have let MOVE's credential assert MARKET's facts.
+- A caller may only submit its own prefix, so **no external caller can submit
+  `core.*` at all**. That is the case that matters: every consumer downstream
+  treats `core.*` as authoritative, and an outsider able to announce
+  `core.payment.captured` could move the system's belief about money without
+  any money moving.
+- An envelope whose `producer` contradicts the credential is refused as
+  spoofing, not corrected.
+- A human principal is refused even holding `events.submit` and
+  `platform_admin`. Authorisation answers "may you submit"; this edge also has
+  to answer "whose events are you", and a person has no answer.
+- An event type CORE has no consumer for is refused, not parked. Accepting it
+  would leave a row pending forever while the producer believed something would
+  eventually happen.
+
+**Exactly-once effects are not claimed by the dispatcher.** It is
+at-least-once by construction: a crash after a handler succeeds but before
+`markProcessed` dispatches again. What makes that safe is the consumer inbox,
+which claims `(consumer, event_id)` before the handler runs. Retrying is cheap
+precisely because the layer below refuses to do the work twice.
+
+`accept` returns whether this was the first delivery, and that answer is
+atomic: `on conflict do nothing` plus `rowCount` on Postgres, a synchronous
+check-then-set in memory. Deliberately not a read followed by a write — that is
+the exact shape of the bug B-12 was.
+
+### B-13, found while testing the above
+
+The first ingress test asserted that a dispatched order produced a fulfillment.
+It failed, and the reason was not in the new code.
+
+`LocalEventBus.publish` resolved **successfully** when a subscriber had
+exhausted its attempts, recording the failure only in an in-process
+`deadLetters` array. `OutboxPublisher` and `InboundDispatcher` both decide
+whether to retry from exactly that answer. So an event could be marked
+`published` or `processed` in the database while no consumer had done anything,
+and the only trace of it died with the process. A relay that cannot be told
+about failure cannot recover from it — the durable ingress built above would
+have been decorative.
+
+`publish` now attempts every subscriber, then throws if any of them
+dead-lettered; one broken consumer still must not decide what the others see.
+The unawaited `inbox.claim` in the retry path was awaited at the same time — an
+unawaited claim can land after the next attempt has already read the inbox.
+
+Worth noting how this was caught: the test was written to assert an *effect*
+(a fulfillment row exists), not that the call returned. An assertion on the
+return value would have passed while nothing happened at all.
+
+### Also fixed: a new table escaped deny-by-default
+
+Migration 0006 enables row-level security from a hardcoded list of table names,
+so `inbound_event` was not covered by it. `tests/db-schema.test.ts` compares the
+live catalogue instead of a count, which is the only reason this surfaced. RLS
+is enabled in 0007; the structural weakness (a list that every future migration
+must remember) is recorded under risks.
+
+### External dependencies this creates — recorded, not implemented
+
+- **MARKET and MOVE must submit events to `POST /v1/events`** with a service
+  credential provisioned by CORE, and must set `producer` to their own service
+  name. Their envelopes are otherwise unchanged.
+- **Both must treat 202 as success and retry on anything else.** Redelivering
+  the same `event_id` is free and answers `first_delivery: false`.
+- **Outbound delivery is still local.** CORE's own events reach only in-process
+  subscribers; MOVE and MARKET cannot yet receive `core.fulfillment.created`,
+  `core.fulfillment.dispatched` or `core.fulfillment.cancelled` over the wire.
+  The symmetric outbound edge needs their endpoints, which CORE does not own —
+  this is the next piece of milestone 1 and the reason it is "substantially",
+  not fully, complete.
+- **An operator must provision the two service credentials.** Nothing creates
+  them automatically, on purpose: a self-registering service credential would
+  be a hole in the boundary described above.
+
+### Tests
+
+`tests/event-ingress.test.ts` — 11 tests on both backends: accepted before
+processed, each of the five refusals, redelivery after a timeout, two
+simultaneous redeliveries where exactly one is told it was first, consumer
+failure retried under backoff and then succeeding, and a replayed dispatch
+doing the work only once. Plus a new bus test that a failing consumer does not
+stop the healthy ones.
+
+212 tests pass with `DATABASE_URL`, 131 without.

@@ -416,6 +416,40 @@ paths:
       responses:
         "200": { description: Cancelled fulfillment }
         "409": { description: Fulfillment already closed }
+  /v1/events:
+    post:
+      summary: Submit an event from MARKET or MOVE for durable ingestion
+      description: >-
+        The edge external systems push into. CORE records the envelope durably
+        and returns 202 without processing it; an inbound dispatcher hands it to
+        the consumers afterwards, so a crash after the response loses nothing.
+        Redelivering the same event_id is safe and returns first_delivery=false.
+
+        Which event types a caller may submit is derived from the authenticated
+        credential, not from the request. A caller may only submit events whose
+        type carries its own prefix, and no external caller may submit core.*
+        events at all.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventEnvelope" }
+      responses:
+        "202":
+          description: Event accepted and recorded durably
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [event_id, accepted, first_delivery]
+                properties:
+                  event_id: { type: string, format: uuid }
+                  accepted: { type: boolean }
+                  first_delivery:
+                    type: boolean
+                    description: False when CORE already held this event; no retry needed.
+        "400": { description: Invalid envelope, or no consumer for this event type }
+        "403": { description: This caller may not submit this event type }
 components:
   securitySchemes:
     bearerAuth:
@@ -428,6 +462,31 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    EventEnvelope:
+      type: object
+      description: >-
+        The canonical envelope every event carries, inbound and outbound. The
+        payload shape per event_type is published under contracts/events.
+      required:
+        [event_id, event_type, version, producer, occurred_at, correlation_id,
+         entity_type, entity_id, payload]
+      properties:
+        event_id: { type: string, format: uuid }
+        event_type:
+          type: string
+          description: >-
+            Accepted from external callers: market.order.created,
+            move.job.accepted, move.job.rejected, move.job.completed.
+        version: { type: integer, minimum: 1 }
+        producer:
+          type: string
+          description: Must equal the authenticated caller's service name.
+        occurred_at: { type: string, format: date-time }
+        correlation_id: { type: string }
+        causation_id: { type: [string, "null"] }
+        entity_type: { type: string }
+        entity_id: { type: string }
+        payload: { type: object }
     ChannelType:
       type: string
       enum: [telegram, phone, email, web, partner_api]

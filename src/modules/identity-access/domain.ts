@@ -40,6 +40,12 @@ export interface Principal {
   principal_id: string;
   identity_id: string;
   created_at: string;
+  /**
+   * Set only when this principal *is* an external system rather than a person.
+   * It is the answer to "who is calling", and it comes from the credential, so
+   * no request may claim it. `null` for every human principal.
+   */
+  service_name: string | null;
 }
 
 export interface Session {
@@ -71,7 +77,8 @@ export type Permission =
   | "fulfillment.request"
   | "fulfillment.read"
   | "money.authorize"
-  | "support.act";
+  | "support.act"
+  | "events.submit";
 
 /**
  * Role → permission mapping is data, not branching logic scattered in handlers
@@ -87,6 +94,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "fulfillment.read",
     "money.authorize",
     "support.act",
+    "events.submit",
   ],
   org_admin: [
     "identity.read",
@@ -97,7 +105,8 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   ],
   org_member: ["organization.read", "fulfillment.read"],
   support_agent: ["identity.read", "organization.read", "fulfillment.read", "support.act"],
-  service: ["fulfillment.request", "fulfillment.read", "identity.read"],
+  // A service caller exists to feed CORE events; submitting them is the point.
+  service: ["fulfillment.request", "fulfillment.read", "identity.read", "events.submit"],
 };
 
 export function permissionsForRoles(roles: readonly Role[]): Set<Permission> {

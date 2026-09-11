@@ -29,10 +29,17 @@ export interface AuthenticatedPrincipal {
   organization_ids: string[];
   roles: Role[];
   permissions: Permission[];
+  /** The external system this credential belongs to, or `null` for a person. */
+  service_name: string | null;
 }
 
 export interface RegisterIdentityInput {
   channel_type: ChannelType;
+  /**
+   * Registers this identity as an external system rather than a person. Only
+   * set by an operator provisioning MARKET's or MOVE's credential.
+   */
+  service_name?: string | null;
   external_id: string;
   display_name?: string | null;
   correlation_id: string;
@@ -88,6 +95,7 @@ export class IdentityService {
       principal_id: newId(),
       identity_id: identity.identity_id,
       created_at: now.toISOString(),
+      service_name: input.service_name ?? null,
     };
     const link = {
       identity_link_id: newId(),
@@ -226,6 +234,7 @@ export class IdentityService {
       organization_ids: memberships.map((m) => m.organization_id),
       roles,
       permissions: [...permissionsForRoles(roles)],
+      service_name: principal.service_name,
     };
   }
 

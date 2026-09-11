@@ -5,6 +5,9 @@ import { type OutboxStore } from "./platform/eventing/outbox.js";
 import { memoryPersistence, type Persistence } from "./platform/persistence/backends.js";
 import { type TransactionBoundary } from "./platform/persistence/transaction.js";
 import { OutboxPublisher } from "./platform/eventing/publisher.js";
+import { EventIngress } from "./platform/eventing/ingress.js";
+import { registerIngressRoutes } from "./platform/eventing/ingress-http.js";
+import { InboundDispatcher } from "./platform/eventing/dispatcher.js";
 import { Router } from "./platform/http/router.js";
 import { IdentityService } from "./modules/identity-access/service.js";
 import { OrganizationService } from "./modules/organization/service.js";
@@ -23,6 +26,8 @@ export interface CoreApp {
   outbox: OutboxStore;
   boundary: TransactionBoundary;
   publisher: OutboxPublisher;
+  ingress: EventIngress;
+  dispatcher: InboundDispatcher;
   audit: AuditLog;
   identity: IdentityService;
   organization: OrganizationService;
@@ -48,6 +53,12 @@ export function createCoreApp(
   const { audit, outbox, inbox, boundary } = store;
   const bus = new LocalEventBus(inbox);
   const publisher = new OutboxPublisher(outbox, bus, clock);
+  // Ingress records; the dispatcher is what actually hands the event over.
+  // Splitting them is the point: see `EventIngress` and `InboundDispatcher`.
+  const ingress = new EventIngress(store.inbound, (work) =>
+    boundary.run((scope) => work(scope)),
+  );
+  const dispatcher = new InboundDispatcher(store.inbound, bus, clock);
 
   const identity = new IdentityService(store.identity, outbox, boundary, audit, clock);
   const organization = new OrganizationService(store.organization, audit, clock, boundary);
@@ -88,6 +99,7 @@ export function createCoreApp(
   registerOrganizationRoutes(router, organization, identity);
   registerMoneyRoutes(router, money, identity);
   registerFulfillmentRoutes(router, fulfillment, identity);
+  registerIngressRoutes(router, ingress, identity);
   registerGeographyRoutes(router, geography, identity);
 
   return {
@@ -96,6 +108,8 @@ export function createCoreApp(
     outbox,
     boundary,
     publisher,
+    ingress,
+    dispatcher,
     audit,
     identity,
     organization,
