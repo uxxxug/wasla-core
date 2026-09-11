@@ -110,7 +110,20 @@ export class FulfillmentService {
     return fulfillment;
   }
 
-  /** MOVE accepted the request and created an operational job. Idempotent. */
+  /**
+   * MOVE accepted the request and created an operational job. Idempotent.
+   *
+   * The transition `coordinating -> dispatched` is published as
+   * `core.fulfillment.dispatched` so MARKET can observe the assignment: CORE is
+   * the only source of intermediate lifecycle state, and an unpublished
+   * transition would leave MARKET unable to distinguish coordinating from
+   * assigned work.
+   *
+   * An acceptance that arrives after a cancellation is not an error: the
+   * cancellation was already published to MOVE, so CORE records the job
+   * reference for traceability and keeps the cancelled state instead of
+   * poisoning the consumer with a permanent conflict.
+   */
   async consumeJobAccepted(event: EventEnvelope): Promise<Fulfillment> {
     if (event.event_type !== "move.job.accepted" || event.version !== 1) {
       throw invalid("unsupported move event");
@@ -120,6 +133,15 @@ export class FulfillmentService {
       throw invalid("move.job.accepted payload is incomplete");
     }
     const current = this.require(payload.fulfillment_id);
+    if (current.status === "cancelled") {
+      if (current.move_job_reference === payload.job_id) return current;
+      const traced: Fulfillment = { ...current, move_job_reference: payload.job_id };
+      await withTransaction(this.outbox, (uow) => {
+        uow.stage(() => this.repo.update(traced));
+      });
+      this.recordAudit("fulfillment.acceptance_after_cancellation", traced, event.correlation_id);
+      return traced;
+    }
     if (isClosed(current.status)) {
       throw conflict("fulfillment is already closed");
     }
@@ -136,6 +158,24 @@ export class FulfillmentService {
     };
     await withTransaction(this.outbox, (uow) => {
       uow.stage(() => this.repo.update(updated));
+      uow.emit(
+        makeEvent({
+          event_type: "core.fulfillment.dispatched",
+          version: 1,
+          producer: PRODUCER,
+          occurred_at: this.clock.now(),
+          correlation_id: event.correlation_id,
+          causation_id: event.event_id,
+          entity_type: "fulfillment",
+          entity_id: updated.fulfillment_id,
+          payload: {
+            fulfillment_id: updated.fulfillment_id,
+            order_reference: updated.market_order_reference,
+            job_reference: payload.job_id,
+            dispatched_at: payload.accepted_at,
+          },
+        }),
+      );
     });
     this.recordAudit("fulfillment.dispatched", updated, event.correlation_id);
     return updated;

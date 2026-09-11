@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.fulfillment.dispatched.v1.schema.json",
+  "title": "core.fulfillment.dispatched v1",
+  "description": "Published by CORE when MOVE accepts a fulfillment request and binds it to an operational job. Marks the transition coordinating -> dispatched. MARKET consumes it to show the commercial order as assigned; the job reference stays opaque to MARKET.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fulfillment_id",
+    "order_reference",
+    "job_reference",
+    "dispatched_at"
+  ],
+  "properties": {
+    "fulfillment_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "order_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque MARKET commercial order reference."
+    },
+    "job_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque MOVE operational job reference. CORE never interprets it."
+    },
+    "dispatched_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "examples": [
+    {
+      "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "order_reference": "order-2",
+      "job_reference": "job-9",
+      "dispatched_at": "2026-09-11T03:40:00.000Z"
+    }
+  ]
+}

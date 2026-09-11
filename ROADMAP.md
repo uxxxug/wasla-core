@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
-**Last updated:** 2026-09-12
-**Last milestone:** Geography reference module and the payment authorization void/expiry lifecycle (ADR 0005).
-**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` 44/44 passing; governance, contract and migration gates passing. The roadmap diff gate skipped because this isolated working tree has no local commit history. Remote CI remains blocked by B-7.
+**Last updated:** 2026-09-11
+**Last milestone:** Fulfillment lifecycle observability — the `dispatched` transition is now a published contract.
+**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 
 ## What this project is
 
@@ -163,6 +163,29 @@ Nothing.
   and capture, validation and insufficient-funds rejection.
 - Fulfillment: idempotent MARKET order consumption, opaque coordination state,
   MOVE completion and exactly-once CORE outcome emission on the local bus.
+
+## Cycle 2026-09-11 — CORE-only hardening (independent CORE agent)
+
+This cycle was performed by an agent responsible for CORE alone. MOVE and
+MARKET were not touched; anything they must implement is recorded under
+"External dependencies" below.
+
+### Audit findings against the actual code (not the previous roadmap text)
+
+| # | Finding | Severity | Status |
+|---|---|---|---|
+| G-1 | The `coordinating -> dispatched` transition mutated state but published **no** event. MARKET could not observe that work had been assigned, and a stream replay could not reconstruct the intermediate state. | high | fixed |
+| G-2 | A `move.job.accepted` arriving after a cancellation raised a permanent `conflict`, which would dead-letter the MOVE consumer on a legitimate race. | medium | fixed |
+
+### Changes
+
+- New published contract `core.fulfillment.dispatched` v1, emitted inside the
+  same transaction as the state change (transactional outbox), carrying only
+  opaque references — the MOVE job id is passed through and never interpreted.
+- A late acceptance after cancellation now records the job reference for
+  traceability, stays `cancelled`, publishes nothing and does not fail the
+  consumer.
+- `docs/event-catalog.md` documents the full published lifecycle tree.
 
 ## Cycle 2026-09-11 — cross-system vertical slice (CORE side)
 

@@ -13,6 +13,7 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.payment.captured` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.captured.v1.schema.json` |
 | `core.payment.voided` | 1 | implemented | payment authorization | MARKET | `contracts/events/core.payment.voided.v1.schema.json` |
 | `core.fulfillment.created` | 1 | implemented | fulfillment | MOVE | `contracts/events/core.fulfillment.created.v1.schema.json` |
+| `core.fulfillment.dispatched` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.dispatched.v1.schema.json` |
 | `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
 | `core.fulfillment.cancelled` | 1 | implemented | fulfillment | MARKET, MOVE | `contracts/events/core.fulfillment.cancelled.v1.schema.json` |
 
@@ -27,6 +28,24 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 
 `implemented in local bus` means the schema, idempotent consumer and tests exist;
 production transport remains unproven until a broker or durable queue is selected.
+
+## Lifecycle of a fulfillment as seen on the bus
+
+```
+market.order.created            (MARKET -> CORE)
+  └─ core.fulfillment.created   (CORE -> MOVE)     status: coordinating
+       ├─ move.job.accepted     (MOVE -> CORE)
+       │    └─ core.fulfillment.dispatched (CORE -> MARKET)  status: dispatched
+       │         └─ move.job.completed (MOVE -> CORE)
+       │              └─ core.fulfillment.completed (CORE -> MARKET) status: completed | failed
+       ├─ move.job.rejected     (MOVE -> CORE)
+       │    └─ core.fulfillment.completed (outcome failed)   status: failed
+       └─ cancellation (MARKET or operator, via CORE API)
+            └─ core.fulfillment.cancelled (CORE -> MARKET, MOVE)     status: cancelled
+```
+
+Every transition of the fulfillment lifecycle is published. A consumer that
+replays the CORE stream can reconstruct the exact state without querying CORE.
 
 ## Compatibility rules
 
