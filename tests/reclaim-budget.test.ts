@@ -177,8 +177,13 @@ describe.each(backends)("reclaim budget on $name", (backend) => {
       await store.outbox.append(envelope, NO_SCOPE);
 
       // A genuine, observed failure: the bus rejected it. `attempts` moves.
-      await store.outbox.claimDue(clock.now(), 10, LEASE_MS);
-      await store.outbox.markFailed(envelope.event_id, "bus down", clock.now());
+      const held = await store.outbox.claimDue(clock.now(), 10, LEASE_MS);
+      await store.outbox.markFailed(
+        envelope.event_id,
+        held[0]!.claim_token,
+        "bus down",
+        clock.now(),
+      );
       let record = await store.outbox.get(envelope.event_id);
       expect(record?.attempts).toBe(1);
       expect(record?.reclaims).toBe(0);
@@ -273,6 +278,7 @@ describe.each(backends)("reclaim budget on $name", (backend) => {
         created_at: clock.now().toISOString(),
         delivered_at: null,
         claimed_at: null,
+        claim_token: null,
       });
 
       for (let round = 1; round <= MAX_RECLAIMS; round++) {

@@ -26,6 +26,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createCoreApp, type CoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
+import { UNFENCED } from "../src/platform/eventing/fencing.js";
 import {
   memoryPersistence,
   postgresPersistence,
@@ -655,8 +656,10 @@ describe.each(backends)("operational metrics on $name", (backend) => {
     await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
     const pending = await store.outbox.byStatus("pending");
     expect(pending.length).toBeGreaterThan(0);
+    // UNFENCED: nothing claimed this row, so there is no token to present (B-26).
     await store.outbox.markFailed(
       pending[0]!.event.event_id,
+      UNFENCED,
       "transient",
       new Date(clock.now().getTime() + 60_000),
     );
@@ -685,6 +688,7 @@ describe.each(backends)("operational metrics on $name", (backend) => {
     const retriedId = claimed[0]!.event.event_id;
     await store.outbox.markFailed(
       retriedId,
+      claimed[0]!.claim_token,
       "transient",
       new Date(clock.now().getTime() + 60_000),
     );

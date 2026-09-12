@@ -189,13 +189,14 @@ describe.each(backends)("worker claims on $name", (backend) => {
       const claimed = await store.outbox.claimDue(clock.now(), ROWS, 30_000);
       expect(claimed).toHaveLength(3);
 
-      await store.outbox.markPublished(claimed[0]!.event.event_id);
+      await store.outbox.markPublished(claimed[0]!.event.event_id, claimed[0]!.claim_token);
       await store.outbox.markFailed(
         claimed[1]!.event.event_id,
+        claimed[1]!.claim_token,
         "transient",
         new Date(clock.now().getTime() + 60_000),
       );
-      await store.outbox.markDead(claimed[2]!.event.event_id, "gave up");
+      await store.outbox.markDead(claimed[2]!.event.event_id, claimed[2]!.claim_token, "gave up");
 
       for (const row of claimed) {
         const after = await store.outbox.get(row.event.event_id);
@@ -282,6 +283,7 @@ describe.each(backends)("worker claims on $name", (backend) => {
           created_at: clock.now().toISOString(),
           delivered_at: null,
           claimed_at: null,
+          claim_token: null,
         });
       }
 

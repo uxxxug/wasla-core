@@ -21,6 +21,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { UNFENCED } from "../src/platform/eventing/fencing.js";
 import { createCoreApp, type CoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
@@ -292,7 +293,8 @@ describe.each(backends)("event replay on '$name'", (backend) => {
     const { core, clock, store, close, organizationId } = await harness(backend);
     try {
       const event = await record(store, marketOrder(clock, organizationId, `ORD-${randomUUID()}`));
-      await store.inbound.markDead(event.event_id, "consumer defect, since fixed");
+      // UNFENCED: no worker claimed this row; the test is staging a dead-letter (B-26).
+      await store.inbound.markDead(event.event_id, UNFENCED, "consumer defect, since fixed");
 
       // The reason `dead` rows are in scope by default: they are the events a
       // replay exists to rescue.

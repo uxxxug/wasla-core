@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
+import { UNFENCED } from "../src/platform/eventing/fencing.js";
 import { InMemoryInbox, type InboxStore } from "../src/platform/eventing/inbox.js";
 import { InMemoryOutbox, type OutboxStore } from "../src/platform/eventing/outbox.js";
 import { PgInbox } from "../src/platform/eventing/pg-inbox.js";
@@ -342,7 +343,13 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       await backend.outbox.append(e, NO_SCOPE);
       expect(await backend.outbox.claimDue(new Date(AT), 10)).toHaveLength(1);
 
-      await backend.outbox.markFailed(e.event_id, "transport down", new Date("2026-01-01T01:00:00.000Z"));
+      // UNFENCED: this test acknowledges rows it never claimed (B-26).
+      await backend.outbox.markFailed(
+        e.event_id,
+        UNFENCED,
+        "transport down",
+        new Date("2026-01-01T01:00:00.000Z"),
+      );
       expect(await backend.outbox.claimDue(new Date(AT), 10)).toHaveLength(0);
       expect(
         await backend.outbox.claimDue(new Date("2026-01-01T02:00:00.000Z"), 10),
@@ -359,8 +366,8 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
       await backend.outbox.append(published, NO_SCOPE);
       await backend.outbox.append(dead, NO_SCOPE);
 
-      await backend.outbox.markPublished(published.event_id);
-      await backend.outbox.markDead(dead.event_id, "gave up");
+      await backend.outbox.markPublished(published.event_id, UNFENCED);
+      await backend.outbox.markDead(dead.event_id, UNFENCED, "gave up");
 
       expect(await backend.outbox.byStatus("pending")).toHaveLength(0);
       expect(await backend.outbox.byStatus("published")).toHaveLength(1);

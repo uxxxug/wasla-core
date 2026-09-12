@@ -307,4 +307,69 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
       expect(constraints.rowCount, `${table} has no reclaims check`).toBe(1);
     }
   });
+
+  it("gives every queue a nullable claim token tied to the claim itself (B-26)", async () => {
+    // The token that makes a claim exclusive over time rather than only at the
+    // instant it is taken. Nullable on purpose, and with no default: a row at rest
+    // is held by nobody, and a token on an unclaimed row would be matched by a
+    // worker that has no claim.
+    //
+    // The constraint is the weak direction — a token implies a claim, not the
+    // reverse — because rows that were already claimed when 0016 ran have a
+    // `claimed_at` and no token, and backfilling one would have fenced out a worker
+    // still doing real work.
+    for (const table of ["outbox", "inbound_event", "event_delivery"]) {
+      const column = await client.query(
+        `select column_default, is_nullable, data_type from information_schema.columns
+         where table_name = $1 and column_name = 'claim_token'`,
+        [table],
+      );
+      expect(column.rowCount, `${table} has no claim_token column`).toBe(1);
+      expect(column.rows[0]?.["is_nullable"], `${table}.claim_token is not nullable`).toBe("YES");
+      expect(column.rows[0]?.["column_default"], `${table}.claim_token has a default`).toBeNull();
+
+      const constraints = await client.query(
+        `select pg_get_constraintdef(oid) as def from pg_constraint
+         where conrelid = $1::regclass and conname = $2`,
+        [table, `${table}_claim_token_check`],
+      );
+      expect(constraints.rowCount, `${table} has no claim_token check`).toBe(1);
+      expect(String(constraints.rows[0]?.["def"])).toContain("claimed_at IS NOT NULL");
+    }
+
+    // And the constraint is enforced, not merely declared. Shown on `outbox`,
+    // because the three declarations are identical and inserting a valid row into
+    // each queue would prove the same fact three times.
+    const eventId = randomUUID();
+    await client.query(
+      `insert into outbox (event_id, event_type, version, producer, occurred_at,
+                           correlation_id, entity_type, entity_id, payload, status,
+                           attempts, next_attempt_at, created_at)
+       values ($1, 'core.fulfillment.dispatched', 1, 'wasla-core', now(), $2,
+               'fulfillment', $3, '{}'::jsonb, 'pending', 0, now(), now())`,
+      [eventId, `corr-${eventId}`, randomUUID()],
+    );
+
+    // A token on a row nobody holds is the one state a fence cannot reason about:
+    // a worker presenting that token would be treated as the current holder.
+    let constraint: string | undefined;
+    try {
+      await client.query("update outbox set claim_token = $2 where event_id = $1", [
+        eventId,
+        randomUUID(),
+      ]);
+    } catch (error) {
+      constraint = (error as { constraint?: string }).constraint;
+    }
+    expect(constraint).toBe("outbox_claim_token_check");
+
+    // Stamped together with the claim: accepted, and that is exactly what
+    // `claimDue` does in one statement.
+    await client.query(
+      "update outbox set claimed_at = now(), claim_token = $2 where event_id = $1",
+      [eventId, randomUUID()],
+    );
+    const row = await client.query("select claim_token from outbox where event_id = $1", [eventId]);
+    expect(row.rows[0]?.["claim_token"]).not.toBeNull();
+  });
 });

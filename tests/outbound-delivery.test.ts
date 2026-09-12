@@ -234,7 +234,14 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     expect(queued.every((d) => d.status === "pending")).toBe(true);
 
     const result = await core.deliveries.drainOnce();
-    expect(result).toEqual({ delivered: 2, failed: 0, dead: 0, reclaimed: 0, reclaim_exhausted: 0 });
+    expect(result).toEqual({
+      delivered: 2,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+      fenced: 0,
+    });
 
     const after = await store.delivery.forEvent(event.event_id);
     expect(after.every((d) => d.status === "delivered")).toBe(true);
@@ -284,6 +291,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
         created_at: clock.now().toISOString(),
         delivered_at: null,
         claimed_at: null,
+        claim_token: null,
       },
       undefined,
     );
@@ -304,6 +312,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     const failed = (await store.delivery.forEvent(event.event_id))[0];
     expect(failed?.status).toBe("pending");
@@ -320,6 +329,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     expect(transport.sent).toHaveLength(1);
 
@@ -330,6 +340,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     expect((await store.delivery.forEvent(event.event_id))[0]?.status).toBe("delivered");
   });
@@ -360,6 +371,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     expect(await store.delivery.counts()).toMatchObject({ in_flight: 1, abandoned: 0 });
 
@@ -373,6 +385,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 1,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     expect(transport.sent).toHaveLength(1);
 
@@ -401,6 +414,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 1,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     const dead = (await store.delivery.forEvent(event.event_id))[0];
     expect(dead?.status).toBe("dead");
@@ -426,6 +440,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     const pending = (await store.delivery.forEvent(event.event_id))[0];
     expect(pending?.status).toBe("pending");
@@ -467,6 +482,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
     expect(transport.sent).toHaveLength(0);
   });
@@ -489,6 +505,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     });
 
     const rows = await store.delivery.forEvent(event.event_id);
@@ -545,6 +562,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
         dead: 1,
         reclaimed: 0,
         reclaim_exhausted: 0,
+        fenced: 0,
       });
     } finally {
       store.delivery.getSubscription = originalGet;
