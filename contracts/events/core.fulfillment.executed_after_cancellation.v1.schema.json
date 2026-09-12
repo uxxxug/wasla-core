@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.fulfillment.executed_after_cancellation.v1.schema.json",
+  "title": "core.fulfillment.executed_after_cancellation v1",
+  "description": "Published by CORE when MOVE reports a job as completed for a fulfillment CORE had already cancelled. The work was performed after the order was cancelled and after the money hold was released, so the payer has been given their money back for an order that was in fact delivered. Added in the 2026-09-12 cycle that resolved blocker B-29, where such a report was refused with a 409, retried until the inbound event was dead-lettered, and recorded nowhere — leaving the fulfillment readable as a settled cancellation with nothing pending on anyone. This event does not change the cancellation, which remains true and is not re-published: `core.fulfillment.cancelled` was already sent and consumers must not re-handle it. CORE moves no money here. It cannot: the hold was voided by the cancellation, a voided hold cannot be captured, and charging a payer who has been told their order was cancelled is not a decision CORE has been given. Whether MOVE is paid out of band, whether the payer is re-charged, and who absorbs the loss are open policy questions of the same kind as blocker B-20.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fulfillment_id",
+    "organization_id",
+    "order_reference",
+    "job_id",
+    "executed_at",
+    "financial_decision_required"
+  ],
+  "properties": {
+    "fulfillment_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The CORE organization (tenant) this fulfillment belongs to. Present on every event CORE publishes since blocker B-23, so a consumer can route by tenant without asking back."
+    },
+    "order_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The MARKET order this fulfillment coordinates. The identifier MARKET already told its customer was cancelled."
+    },
+    "job_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The MOVE job that reported the work as done. Carried here rather than left to be looked up, because CORE's own `move_job_reference` is null whenever the cancellation arrived before MOVE's acceptance — which is the ordering that produces this case most often."
+    },
+    "executed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "MOVE's `completed_at` for the work, not the moment CORE learned of it. The distance between this and `cancelled_at` is the first question anyone asks about one of these, and neither side can compute it alone."
+    },
+    "cancelled_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When CORE closed the fulfillment as cancelled. Absent only if CORE never recorded a closure instant, which no current path produces."
+    },
+    "cancellation_reason": {
+      "type": ["string", "null"],
+      "description": "The reason recorded on the cancellation, verbatim. Null when the closure carried none."
+    },
+    "settlement_state": {
+      "type": "string",
+      "enum": [
+        "none",
+        "held",
+        "captured",
+        "partially_captured",
+        "released",
+        "unsettled"
+      ],
+      "description": "Where the CORE money hold stands, unchanged by this event. Typically `released` — the cancellation handed the money back — or `none` for an unfunded coordination. `partially_captured` means part of the amount had already moved before the cancellation, so two separate money questions are open on the same fulfillment. This event never moves money, so this value is the same one the cancellation reported."
+    },
+    "financial_decision_required": {
+      "type": "boolean",
+      "description": "Always true on this event, and stated explicitly so a consumer need not infer it from the event type. Work was delivered and the payer's money was returned, and CORE has not been told what should happen about it. While it is true a consumer MUST NOT treat the order as financially settled and MUST NOT treat the delivered work as unpaid-and-forgotten; and note that CORE has already told this consumer the order was cancelled, so any customer-facing correction is the consumer's to make, not CORE's."
+    }
+  },
+  "examples": [
+    {
+      "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
+      "order_reference": "order-1",
+      "job_id": "job-1",
+      "executed_at": "2026-09-11T03:44:10.000Z",
+      "cancelled_at": "2026-09-11T03:42:00.000Z",
+      "cancellation_reason": "customer_cancelled",
+      "settlement_state": "released",
+      "financial_decision_required": true
+    },
+    {
+      "fulfillment_id": "b1f0c7d2-4a55-4e18-9c33-2d7e5a9b0c41",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
+      "order_reference": "order-2",
+      "job_id": "job-2",
+      "executed_at": "2026-09-11T09:15:00.000Z",
+      "cancelled_at": "2026-09-11T09:14:20.000Z",
+      "cancellation_reason": "operator_cancelled",
+      "settlement_state": "partially_captured",
+      "financial_decision_required": true
+    }
+  ]
+}

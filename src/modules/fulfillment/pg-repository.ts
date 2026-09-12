@@ -14,6 +14,8 @@ interface FulfillmentRow {
   created_at: Date;
   completed_at: Date | null;
   closure_reason: string | null;
+  executed_after_cancellation_at: Date | null;
+  executed_after_cancellation_job_reference: string | null;
 }
 
 const toFulfillment = (row: FulfillmentRow): Fulfillment => ({
@@ -27,9 +29,23 @@ const toFulfillment = (row: FulfillmentRow): Fulfillment => ({
   created_at: isoRequired(row.created_at),
   completed_at: iso(row.completed_at),
   closure_reason: row.closure_reason,
+  executed_after_cancellation_at: iso(row.executed_after_cancellation_at),
+  executed_after_cancellation_job_reference: row.executed_after_cancellation_job_reference,
 });
 
 const COLUMNS = `fulfillment_id, organization_id, market_order_reference, move_job_reference,
+  payment_authorization_id, status, settlement_state, created_at, completed_at, closure_reason,
+  executed_after_cancellation_at, executed_after_cancellation_job_reference`;
+
+/**
+ * The insert list, which is `COLUMNS` minus the two B-29 markers.
+ *
+ * A fulfillment is never born marked: the marker records a report that arrived
+ * after the row was cancelled, so on any path that inserts, it is null by
+ * definition. Listing it in the insert would mean binding two literal nulls on
+ * every intake and inviting a future caller to pass something else.
+ */
+const INSERT_COLUMNS = `fulfillment_id, organization_id, market_order_reference, move_job_reference,
   payment_authorization_id, status, settlement_state, created_at, completed_at, closure_reason`;
 
 /**
@@ -50,7 +66,7 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
 
   async insert(fulfillment: Fulfillment, scope: TransactionScope = NO_SCOPE): Promise<void> {
     await runner(this.pool, scope).query(
-      `insert into fulfillment (${COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         fulfillment.fulfillment_id,
         fulfillment.organization_id,
@@ -80,7 +96,7 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     scope: TransactionScope = NO_SCOPE,
   ): Promise<InsertOutcome> {
     const result = await runner(this.pool, scope).query(
-      `insert into fulfillment (${COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        on conflict do nothing`,
       [
         fulfillment.fulfillment_id,
@@ -151,6 +167,26 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.closure_reason,
         [...expected],
       ],
+    );
+    return result.rowCount === 1 ? "applied" : "stale";
+  }
+
+  /** See `FulfillmentRepository.markExecutedAfterCancellation`. */
+  async markExecutedAfterCancellation(
+    input: { fulfillment_id: string; executed_at: string; job_reference: string },
+    scope: TransactionScope = NO_SCOPE,
+  ): Promise<ConditionalWrite> {
+    const result = await runner(this.pool, scope).query(
+      // Both predicates matter and neither is redundant with the check
+      // constraints: `status = 'cancelled'` is what the constraint asserts, and
+      // repeating it here turns a violation into a `stale` answer the caller can
+      // act on instead of a raised error; `is null` is what makes the marker
+      // single-valued, so two deliveries of the same report cannot both publish.
+      `update fulfillment
+       set executed_after_cancellation_at = $2, executed_after_cancellation_job_reference = $3
+       where fulfillment_id = $1 and status = 'cancelled'
+         and executed_after_cancellation_at is null`,
+      [input.fulfillment_id, input.executed_at, input.job_reference],
     );
     return result.rowCount === 1 ? "applied" : "stale";
   }

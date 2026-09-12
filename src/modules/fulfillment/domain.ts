@@ -54,6 +54,18 @@ export interface Fulfillment {
   created_at: string;
   completed_at: string | null;
   closure_reason: string | null;
+  /**
+   * When MOVE reported this cancelled fulfillment's work as completed anyway
+   * (B-29), and the job that reported it. Both null on every other row.
+   *
+   * This is MOVE's own `completed_at`, not the moment CORE received the report:
+   * what an operator needs is when the work happened relative to the
+   * cancellation. The job reference is kept here rather than read from
+   * `move_job_reference`, which is null whenever the cancellation beat MOVE's
+   * acceptance — the ordering that produces this case most often.
+   */
+  executed_after_cancellation_at: string | null;
+  executed_after_cancellation_job_reference: string | null;
 }
 
 export function isClosed(status: FulfillmentStatus): boolean {
@@ -100,7 +112,8 @@ export const OPEN_STATUSES: readonly FulfillmentStatus[] = ALL_STATUSES.filter(
  * - `settled`           the money reached a terminal state that agrees with the
  *                       execution outcome. Nothing further is owed or pending.
  * - `decision_required` execution closed as failed or cancelled while part of
- *                       the payer's money had already moved. The record is
+ *                       the payer's money had already moved, **or** the work of a
+ *                       cancelled fulfillment was executed anyway (B-29). The record is
  *                       true and complete; what happens to that amount is a
  *                       policy question CORE has not been given an answer to
  *                       (blocker B-20). CORE does not refund, retain or split
@@ -132,6 +145,17 @@ export function financialDisposition(fulfillment: Fulfillment): FinancialDisposi
     return settlement === "held" ? "awaiting_execution" : "inconsistent";
   }
   if (settlement === "held") return "inconsistent";
+  // Work that was executed after CORE cancelled it, whatever the money did
+  // (B-29). Read before `none` and before the `released` case below, both of
+  // which would otherwise answer that this fulfillment is finished with money:
+  // `released` says the payer got everything back and `no_money` says there was
+  // nothing to get back, and neither is a complete answer once a driver has
+  // delivered the order. It is `decision_required` and not `inconsistent`
+  // because CORE's bookkeeping is intact — it released a hold on a cancelled
+  // order, which is exactly right — and what is missing is a policy answer
+  // nobody has given it: pay MOVE out of band, re-charge the payer, or absorb
+  // the loss. Same class of open question as B-20, same queue.
+  if (fulfillment.executed_after_cancellation_at !== null) return "decision_required";
   if (settlement === "none") return "no_money";
   if (status === "completed") {
     // A job that cost less than the consented ceiling is a legitimate outcome
@@ -146,9 +170,11 @@ export function financialDisposition(fulfillment: Fulfillment): FinancialDisposi
 }
 
 /**
- * True when money moved for work that did not complete and CORE has not been
- * told what to do with it. The queue this feeds is B-20's, and it is separate
- * from the defect queue on purpose.
+ * True when the money and the work do not add up and CORE has not been told what
+ * to do about it: money moved for work that did not complete, or work was
+ * completed for an order whose money was handed back because it was cancelled
+ * (B-29). The queue this feeds is B-20's, and it is separate from the defect
+ * queue on purpose.
  */
 export function requiresFinancialDecision(fulfillment: Fulfillment): boolean {
   return financialDisposition(fulfillment) === "decision_required";
@@ -162,7 +188,9 @@ export function requiresFinancialDecision(fulfillment: Fulfillment): boolean {
  *    in part — a job that cost less than the consented ceiling is a legitimate
  *    outcome of migration 0009's split captures;
  *  - a failed or cancelled execution must have released it and moved nothing;
- *  - `unsettled` is never consistent.
+ *  - `unsettled` is never consistent;
+ *  - a cancelled fulfillment whose work was executed anyway is never finished
+ *    with money, whatever its settlement state says (B-29).
  *
  * `partially_captured` on a **failed or cancelled** fulfillment is deliberately
  * reported as inconsistent. Nothing is broken in CORE's bookkeeping — the money

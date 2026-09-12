@@ -102,6 +102,26 @@ export interface FulfillmentRepository {
     expected: readonly FulfillmentStatus[],
     scope: TransactionScope,
   ): Promise<ConditionalWrite>;
+  /**
+   * Records that a cancelled fulfillment's work was executed anyway (B-29), and
+   * reports whether this call is the one that recorded it.
+   *
+   * A separate method rather than a flag on `updateIfStatusIn`, because it is the
+   * opposite kind of write: that one moves an open row to a terminal status and
+   * must refuse a closed row, this one writes a fact onto a row that is already
+   * terminal and must refuse an open one. Sharing a method would mean widening
+   * the status guard that makes a closure single-valued (B-21), which is the last
+   * guard in this module worth loosening.
+   *
+   * Conditional on the marker still being absent, so it is the write itself that
+   * decides whether this is the first report. Two copies of the same completion
+   * event delivered together therefore produce one marker, one event and one
+   * audit entry — the same rule the closure paths use, for the same reason.
+   */
+  markExecutedAfterCancellation(
+    input: { fulfillment_id: string; executed_at: string; job_reference: string },
+    scope?: TransactionScope,
+  ): Promise<ConditionalWrite>;
   get(fulfillmentId: string): Promise<Fulfillment | undefined>;
   findByOrderReference(orderReference: string): Promise<Fulfillment | undefined>;
   /** Used by reconciliation reads only; a Postgres adapter must filter in SQL. */
@@ -154,6 +174,25 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     if (!stored || !expected.includes(stored.status)) return "stale";
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    return "applied";
+  }
+  /** See `FulfillmentRepository.markExecutedAfterCancellation`. */
+  async markExecutedAfterCancellation(
+    input: { fulfillment_id: string; executed_at: string; job_reference: string },
+    scope?: TransactionScope,
+  ): Promise<ConditionalWrite> {
+    const stored = this.rows.get(input.fulfillment_id);
+    // The same two predicates the Postgres statement carries in its `where`, and
+    // the same two the schema asserts as check constraints: only a cancelled row
+    // can hold this marker, and only the first report writes it.
+    if (!stored || stored.status !== "cancelled") return "stale";
+    if (stored.executed_after_cancellation_at !== null) return "stale";
+    journalMapWrite(scope, this.rows, input.fulfillment_id);
+    this.rows.set(input.fulfillment_id, {
+      ...stored,
+      executed_after_cancellation_at: input.executed_at,
+      executed_after_cancellation_job_reference: input.job_reference,
+    });
     return "applied";
   }
   private byOrderReference(orderReference: string): Fulfillment | undefined {
@@ -415,13 +454,98 @@ export class FulfillmentService {
     throw conflict("fulfillment is already closed");
   }
 
-  /** What a completion sees when the fulfillment is already closed. */
-  private completionOn(closed: Fulfillment, jobId: string): Fulfillment {
-    if (closed.status === "cancelled") throw conflict("fulfillment was cancelled");
-    if (closed.move_job_reference !== jobId) {
+  /**
+   * What a completion sees when the fulfillment is already closed — whether it
+   * was closed before the report arrived or a moment after this command started.
+   *
+   * The cancelled branch used to throw `conflict("fulfillment was cancelled")`,
+   * and that refusal was wrong twice over (B-29). It was retried, because the
+   * dispatcher retries a thrown error and this one can never succeed — a cancelled
+   * fulfillment never reopens — so the single most consequential message MOVE can
+   * send was re-attempted five times over hours and then dead-lettered as an error
+   * string. And it stored nothing, so the fulfillment read `cancelled` +
+   * `released`, a pair CORE's own reconciliation calls consistent and settled,
+   * while a driver had delivered the order for free.
+   */
+  private async completionOn(
+    closed: Fulfillment,
+    payload: MoveJobCompletedPayload,
+    event: EventEnvelope,
+  ): Promise<Fulfillment> {
+    if (closed.status === "cancelled") {
+      return await this.recordExecutionAfterCancellation(closed, payload, event);
+    }
+    if (closed.move_job_reference !== payload.job_id) {
       throw conflict("fulfillment already closed by another job");
     }
     return closed;
+  }
+
+  /**
+   * MOVE reported work for a fulfillment CORE had already cancelled.
+   *
+   * CORE records the fact and answers the report. It does not move money: the hold
+   * was voided by the cancellation, a voided hold cannot be captured, and doing it
+   * would charge a payer who had already been told their order was cancelled.
+   * Whether MOVE is paid out of band, whether the payer is re-charged and who
+   * absorbs the loss are policy questions of exactly B-20's kind, and CORE has not
+   * been given an answer to any of them. What it must not do is lose the question,
+   * which is what the old 409 did.
+   *
+   * A report of `failed` needs nothing recorded: MOVE saying the work was not
+   * delivered and CORE saying the order was cancelled agree, so there is no
+   * contradiction to surface and no decision for anyone to take. It is answered
+   * rather than refused for the same reason as the rest of this path — a 409 here
+   * would be retried until the row was dead-lettered, over a report that contradicts
+   * nothing.
+   */
+  private async recordExecutionAfterCancellation(
+    cancelled: Fulfillment,
+    payload: MoveJobCompletedPayload,
+    event: EventEnvelope,
+  ): Promise<Fulfillment> {
+    if (payload.outcome !== "completed") return cancelled;
+    // Fast path only. The conditional write below is the guard, exactly as
+    // `findByOrderReference` is a fast path in front of the unique index.
+    if (cancelled.executed_after_cancellation_at !== null) return cancelled;
+    const marked: Fulfillment = {
+      ...cancelled,
+      executed_after_cancellation_at: payload.completed_at,
+      executed_after_cancellation_job_reference: payload.job_id,
+    };
+    try {
+      return await withTransaction(this.tx, async (uow) => {
+        uow.stage(async (scope) => {
+          const write = await this.repo.markExecutedAfterCancellation(
+            {
+              fulfillment_id: cancelled.fulfillment_id,
+              executed_at: payload.completed_at,
+              job_reference: payload.job_id,
+            },
+            scope,
+          );
+          // Someone else recorded it first, or the row is no longer cancelled.
+          // Either way this transaction publishes nothing: the event and the audit
+          // entry staged after this go with it.
+          if (write === "stale") throw new TransitionLost(cancelled.fulfillment_id);
+        });
+        uow.emit(this.executedAfterCancellationEvent(marked, payload, event));
+        uow.audit(
+          this.auditEntry("fulfillment.executed_after_cancellation", marked, event.correlation_id, {
+            job_id: payload.job_id,
+            executed_at: payload.completed_at,
+            cancelled_at: cancelled.completed_at,
+            cancellation_reason: cancelled.closure_reason,
+            financial_decision_required: true,
+          }),
+        );
+        return marked;
+      });
+    } catch (err) {
+      if (!(err instanceof TransitionLost)) throw err;
+      // The row that actually committed, which already carries the marker.
+      return await this.require(cancelled.fulfillment_id);
+    }
   }
 
   /**
@@ -459,6 +583,8 @@ export class FulfillmentService {
       created_at: this.clock.now().toISOString(),
       completed_at: null,
       closure_reason: null,
+      executed_after_cancellation_at: null,
+      executed_after_cancellation_job_reference: null,
     };
 
     if (!hold.usable) {
@@ -655,7 +781,7 @@ export class FulfillmentService {
   async consumeMoveCompletion(event: EventEnvelope): Promise<Fulfillment> {
     const payload = canonicalPayload<MoveJobCompletedPayload>(event, "move.job.completed");
     const current = await this.require(payload.fulfillment_id);
-    if (isClosed(current.status)) return this.completionOn(current, payload.job_id);
+    if (isClosed(current.status)) return await this.completionOn(current, payload, event);
 
     // One transaction for the settlement and the closure. Before B-11 the
     // capture committed on its own and the fulfillment row was updated
@@ -691,7 +817,7 @@ export class FulfillmentService {
       );
       uow.audit(this.auditEntry("fulfillment.closed", closed, event.correlation_id));
       return closed;
-    }, (winner) => this.completionOn(winner, payload.job_id!));
+    }, (winner) => this.completionOn(winner, payload, event));
   }
 
   /** MARKET (or an operator) cancels before execution closes. Idempotent. */
@@ -865,6 +991,55 @@ export class FulfillmentService {
    *    A consumer must not settle, refund or invoice on its own while it is
    *    true (blocker B-20).
    */
+  /**
+   * `core.fulfillment.executed_after_cancellation` — CORE cancelled the work and
+   * MOVE reported it done anyway (B-29).
+   *
+   * Published rather than only stored, because the parties that have to act on it
+   * are not the ones reading CORE's reconciliation tables. MARKET has already told
+   * a customer their order was cancelled and already handed the money back, and it
+   * is the only side that can talk to that customer about an order that arrived
+   * anyway. A fact kept in a column an operator has to think to query is a fact
+   * that will be found weeks later.
+   *
+   * A new event type, not a second `core.fulfillment.cancelled`: the cancellation
+   * is unchanged and remains true, and re-publishing it with extra fields would
+   * make every existing consumer re-handle a closure it has already handled. No
+   * existing contract changes.
+   */
+  private executedAfterCancellationEvent(
+    fulfillment: Fulfillment,
+    payload: MoveJobCompletedPayload,
+    event: EventEnvelope,
+  ) {
+    return makeEvent({
+      event_type: "core.fulfillment.executed_after_cancellation",
+      version: 1,
+      producer: PRODUCER,
+      occurred_at: this.clock.now(),
+      correlation_id: event.correlation_id,
+      causation_id: event.event_id,
+      entity_type: "fulfillment",
+      entity_id: fulfillment.fulfillment_id,
+      payload: {
+        fulfillment_id: fulfillment.fulfillment_id,
+        organization_id: fulfillment.organization_id,
+        order_reference: fulfillment.market_order_reference,
+        job_id: payload.job_id,
+        // MOVE's own timestamp for the work and CORE's for the cancellation. Both,
+        // because the interval between them is the first thing anyone asks about
+        // and neither side can compute it alone.
+        executed_at: payload.completed_at,
+        cancelled_at: fulfillment.completed_at,
+        cancellation_reason: fulfillment.closure_reason,
+        // Where the money stands after the cancellation, unchanged by this event:
+        // CORE moved none of it here and says so plainly.
+        settlement_state: fulfillment.settlement_state,
+        financial_decision_required: true,
+      },
+    });
+  }
+
   private closureEvent(
     fulfillment: Fulfillment,
     correlationId: string,
