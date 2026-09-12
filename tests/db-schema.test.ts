@@ -282,4 +282,29 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
       ).toBe(true);
     }
   });
+
+  it("gives every queue a reclaim counter that starts at zero and cannot go negative (B-25)", async () => {
+    // The budget that bounds recovery. A row that arrives with a NULL or a
+    // negative count could not be compared against a limit, so the payload that
+    // kills every worker touching it would be recovered for ever again — which is
+    // the defect this column exists to remove. The default matters as much as the
+    // constraint: existing rows and rows written by the positional insert lists in
+    // the store adapters never mention the column at all.
+    for (const table of ["outbox", "inbound_event", "event_delivery"]) {
+      const column = await client.query(
+        `select column_default, is_nullable, data_type from information_schema.columns
+         where table_name = $1 and column_name = 'reclaims'`,
+        [table],
+      );
+      expect(column.rows[0]?.["is_nullable"], `${table}.reclaims is nullable`).toBe("NO");
+      expect(String(column.rows[0]?.["column_default"])).toContain("0");
+
+      const constraints = await client.query(
+        `select conname from pg_constraint
+         where conrelid = $1::regclass and conname = $2`,
+        [table, `${table}_reclaims_check`],
+      );
+      expect(constraints.rowCount, `${table} has no reclaims check`).toBe(1);
+    }
+  });
 });

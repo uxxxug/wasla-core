@@ -234,7 +234,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     expect(queued.every((d) => d.status === "pending")).toBe(true);
 
     const result = await core.deliveries.drainOnce();
-    expect(result).toEqual({ delivered: 2, failed: 0, dead: 0, reclaimed: 0 });
+    expect(result).toEqual({ delivered: 2, failed: 0, dead: 0, reclaimed: 0, reclaim_exhausted: 0 });
 
     const after = await store.delivery.forEvent(event.event_id);
     expect(after.every((d) => d.status === "delivered")).toBe(true);
@@ -277,6 +277,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
         subscription_id: (await core.subscriptions.list())[0]?.subscription_id ?? "",
         status: "pending",
         attempts: 0,
+        reclaims: 0,
         last_error: null,
         last_status: null,
         next_attempt_at: clock.now().toISOString(),
@@ -297,7 +298,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 1,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     const failed = (await store.delivery.forEvent(event.event_id))[0];
     expect(failed?.status).toBe("pending");
     expect(failed?.attempts).toBe(1);
@@ -307,11 +314,23 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     );
 
     // Still backing off: draining now must not attempt it again.
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     expect(transport.sent).toHaveLength(1);
 
     clock.advance(2000);
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 0, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 1,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     expect((await store.delivery.forEvent(event.event_id))[0]?.status).toBe("delivered");
   });
 
@@ -340,6 +359,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       failed: 0,
       dead: 0,
       reclaimed: 0,
+      reclaim_exhausted: 0,
     });
     expect(await store.delivery.counts()).toMatchObject({ in_flight: 1, abandoned: 0 });
 
@@ -352,6 +372,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       failed: 0,
       dead: 0,
       reclaimed: 1,
+      reclaim_exhausted: 0,
     });
     expect(transport.sent).toHaveLength(1);
 
@@ -374,7 +395,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 0,
+      dead: 1,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     const dead = (await store.delivery.forEvent(event.event_id))[0];
     expect(dead?.status).toBe("dead");
     expect(dead?.attempts).toBe(1);
@@ -393,7 +420,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 1,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     const pending = (await store.delivery.forEvent(event.event_id))[0];
     expect(pending?.status).toBe("pending");
     expect(pending?.last_status).toBeNull();
@@ -428,7 +461,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
     expect(await store.delivery.forEvent(event.event_id)).toHaveLength(0);
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
     expect(transport.sent).toHaveLength(0);
   });
 
@@ -444,7 +483,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
 
     await core.publisher.drainOnce();
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 1, dead: 0, reclaimed: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 1,
+      failed: 1,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    });
 
     const rows = await store.delivery.forEvent(event.event_id);
     const moveRow = rows.find((d) => d.subscription_id === move.subscription_id);
@@ -494,7 +539,13 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     try {
       // No secret means no signature; sending unsigned would be worse than
       // not sending at all, and waiting cannot bring the subscription back.
-      expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1, reclaimed: 0 });
+      expect(await core.deliveries.drainOnce()).toEqual({
+        delivered: 0,
+        failed: 0,
+        dead: 1,
+        reclaimed: 0,
+        reclaim_exhausted: 0,
+      });
     } finally {
       store.delivery.getSubscription = originalGet;
     }

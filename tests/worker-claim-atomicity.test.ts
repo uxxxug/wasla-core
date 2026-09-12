@@ -42,6 +42,13 @@ import {
 
 const url = process.env.DATABASE_URL;
 
+/**
+ * The reclaim budget these B-24 cases pass in. High enough that none of them
+ * reaches it: they are about recovering an abandoned claim, and the limit itself
+ * is exercised in `tests/reclaim-budget.test.ts` (B-25).
+ */
+const MAX_RECLAIMS = 3;
+
 interface Backend {
   name: string;
   open(clock: FixedClock): Promise<{ store: Persistence; close(): Promise<void> }>;
@@ -143,14 +150,20 @@ describe.each(backends)("worker claims on $name", (backend) => {
       // The worker died. Nothing marked it published or failed.
       clock.advance(29_000);
       expect(await store.outbox.claimDue(clock.now(), ROWS, 30_000)).toEqual([]);
-      expect(await store.outbox.reclaimExpired(clock.now())).toBe(0);
+      expect(await store.outbox.reclaimExpired(clock.now(), MAX_RECLAIMS)).toEqual({
+        reclaimed: 0,
+        dead: 0,
+      });
 
       clock.advance(2_000);
       // The lease has run out. `claimDue` still refuses it — a claimed row is
       // not up for grabs, it is *owed a recovery* — and the recovery is the
       // countable event.
       expect(await store.outbox.claimDue(clock.now(), ROWS, 30_000)).toEqual([]);
-      expect(await store.outbox.reclaimExpired(clock.now())).toBe(1);
+      expect(await store.outbox.reclaimExpired(clock.now(), MAX_RECLAIMS)).toEqual({
+        reclaimed: 1,
+        dead: 0,
+      });
 
       // No message is lost: the row is pending, unclaimed and due again.
       const reclaimed = await store.outbox.claimDue(clock.now(), ROWS, 30_000);
@@ -262,6 +275,7 @@ describe.each(backends)("worker claims on $name", (backend) => {
           subscription_id: subscriptionId,
           status: "pending",
           attempts: 0,
+          reclaims: 0,
           last_error: null,
           last_status: null,
           next_attempt_at: clock.now().toISOString(),
