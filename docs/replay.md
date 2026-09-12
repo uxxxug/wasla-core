@@ -129,6 +129,20 @@ Available filters: `event_ids`, `event_types`, `producer`, `statuses`,
 rescue. Asking for `processed` rows is allowed but must be explicit, because
 that is the only way to offer an already-handled event to consumers again.
 
+Since B-25 there are two ways an `inbound_event` row reaches `dead`, and replay
+rescues both identically: it exhausted its `attempts` (consumers kept failing on
+it) or it exhausted its `reclaims` (whichever worker claimed it kept dying before
+reporting anything). The second case is the one worth knowing about when reading a
+replay scope, because such a row has `attempts` well below the limit and a
+`last_error` starting `reclaim limit exceeded` — the payload was never processed at
+all, so replaying it is a first attempt, not a retry.
+
+**Only `inbound_event` is replayable.** A dead `outbox` row — an event MOVE and
+MARKET will now never receive — and a dead `event_delivery` row have no revival
+path in CORE at all: no requeue, no revive, and replay does not read those tables.
+That gap is recorded as a blocker in `ROADMAP.md` rather than papered over here.
+Recovering such a row today means a manual `update` against the database.
+
 The reason for compulsory narrowing is reviewability: an operator, and later an
 auditor, must be able to read the command and know what it will touch before it
 runs. A scope of "everything" cannot be reviewed, so it is not offered.

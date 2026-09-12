@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Worker lease cycle — an abandoned claim is now a fact on the row, not an inference from a timestamp. For the outbox relay, the inbound dispatcher and the delivery worker the B-22 lease rode on `next_attempt_at`, which is also the retry-schedule field: one column with two meanings and nothing saying which, so a crash-looping worker and a bad payload produced identical metrics and "what is in flight" and "what is stuck" had no answer. Migration 0014 adds a nullable `claimed_at` to the three queue tables; `claimDue` claims only unclaimed rows, a new `reclaimExpired` frees and **counts** abandoned ones, every acknowledgement releases the claim, and `counts()` reports `in_flight` and `abandoned`. **B-24 resolved** — `core_worker_outcomes_total{outcome="reclaimed"}` is now reportable by all four workers. A real backend divergence was found and fixed on the way: the in-memory store stamped `delivered_at` from `next_attempt_at`, i.e. one whole lease into the future, while Postgres used the clock (B-12 again). 582 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **582 passed / 34 files**; `npm test` without a database 330 passed / 45 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **14** migrations applied, including 0014 executed against that database rather than merely written. Falsifiable and checked by mutation: making `reclaimExpired` a no-op fails 4 tests across both backends, and restoring the in-memory `delivered_at` bug fails 1. The check constraint and the lease indexes are asserted against the live schema in `tests/db-schema.test.ts`, not just against the migration file. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
+**Last milestone:** Bounded recovery — an abandoned claim can no longer be recovered for ever. B-24 made lease expiry countable and deliberately did not charge the recovered row an attempt, which left one unbounded loop: a payload that kills whichever worker touches it was claimed, abandoned, reclaimed and claimed again indefinitely, never once counted as having failed. Migration 0015 adds a second budget, `reclaims`, to `outbox`, `inbound_event` and `event_delivery`; `reclaimExpired` now takes a limit and dead-letters the row on the increment that passes it, and the three workers report that as `failed_permanent` with a `reclaim_exhausted` field on the result. The two budgets stay independent, so the backoff curve and the derived `retrying` state keep their meaning. **B-25 resolved.** The cycle also recorded **B-27**: replay covers `inbound_event` only, so a dead `outbox` or `event_delivery` row still has no revival path — durable and unreachable at the same time. 592 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **592 passed / 35 files**; `npm test` without a database 335 passed / 46 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **15** migrations applied, including 0015 executed against that database rather than merely written. Falsifiable and checked by mutation: making the budget unbounded in memory fails 4 tests, raising the Postgres threshold so it never trips fails 3, and charging `attempts` on reclaim fails 4 including one B-24 test — each mutation restored and `tsc` re-run clean afterwards. The `reclaims` column, its default and its check constraint are asserted against the live schema in `tests/db-schema.test.ts`, not just against the migration file. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -164,8 +164,9 @@ Nothing.
 | B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
 | B-23 | **Resolved.** The three closure/dispatch payloads carried no `organization_id`, so a tenant-scoped notification recipient for them could never match and had to be refused outright (HTTP 400), and MARKET/MOVE could not route a closure without calling CORE back. CORE owns tenancy and is the only system that can state it, so the omission was CORE's to fix. `core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry a **required** `organization_id`, read from the fulfillment row rather than from any prior event — which is what makes it correct on the intake-refusal path, where the row is created and closed in one transaction and no `created` event is ever published. `TENANT_SCOPED_EVENT_TYPES` widened accordingly; the registry's refusal is unchanged and still guards `core.*` events that genuinely name no organization (`core.payment.captured`). Proven by `tests/fulfillment-lifecycle-contract.test.ts`, which also validates emitted payloads against the published schemas, and by an end-to-end fan-out test in `tests/notifications.test.ts` showing two tenants watching one event type and only the right one being messaged | resolved | — |
 | B-24 | **Resolved.** Lease expiry was indistinguishable from a scheduled retry for three of the four workers, so `core_worker_outcomes_total{outcome="reclaimed"}` could only be reported for notifications. The B-22 fix made every claim write a lease, but for the outbox relay, the inbound dispatcher and the delivery worker that lease rode on `next_attempt_at`, which is also the retry-schedule field — one column, two meanings, nothing on the row saying which. Migration 0014 adds a nullable `claimed_at timestamptz` to `outbox`, `inbound_event` and `event_delivery`, which makes the overloaded column readable: `claimed_at is null` means `next_attempt_at` is a retry schedule, `claimed_at is not null` means it is a lease expiry. `claimDue` sets it and takes only rows where it is null, so an expired lease is no longer silently re-served; `reclaimExpired(now, limit)` on all three ports (mirroring the one `PgNotificationStore` already had) clears it, makes the row due immediately and records `last_error = 'abandoned claim reclaimed after attempt N'`; every worker recovers **before** claiming, so a recovered row is worked in the same tick; every acknowledgement clears it, enforced by a per-table check constraint (`claimed_at IS NULL OR status = 'pending'`) so a finished row cannot be counted in flight for ever. `counts()` gains `in_flight` and `abandoned`, both subsets of `pending` and both cut at the injected clock so the two backends agree. Rejected: a `processing` status, which would change what every existing reader means by `pending` — a contract change to fix a metric; and a `claim_token`, which is real fencing and is recorded separately as B-26. **Decision about existing rows** (the roadmap required this be stated): they get `NULL` = "not held", which is safe for rows genuinely in flight during the migration — they keep their future `next_attempt_at`, stay invisible until the lease would have expired anyway, then are claimed as today. No downtime and no worker stop; the one cost is that claims held across the migration are not counted when taken over. Rollback is the reverse order — code first, then `0014_worker_claim_visibility.down.sql` — because code that writes `claimed_at` against a schema without it fails every claim and stops all three queues | resolved | — |
-| B-25 | An abandoned claim does not spend an attempt, so a row whose worker dies on it every time is retried for ever and never dead-lettered | `reclaimExpired` deliberately leaves `attempts` alone: nobody observed the work fail, and charging an attempt for an unobserved outcome would let five deploys dead-letter five healthy events at `maxAttempts = 5`. The cost is the mirror image: a payload that reliably kills the worker — an OOM on one large event, an infinite loop on one malformed field — is recovered, re-claimed, killed again, for ever, with no attempt limit and no dead-letter row. `last_error` records `abandoned claim reclaimed after attempt N` each time, and `core_worker_outcomes_total{outcome="reclaimed"}` climbs, so it is **visible**; it is simply not bounded. Introduced by this cycle's design, stated rather than hidden | Either increment `attempts` on reclaim and accept that a rolling restart consumes retry budget, or add a separate `reclaims` counter column with its own limit so the two failure modes have two budgets. The second is more honest and is a schema change; both need a decision about what a reasonable reclaim limit is, which is an operations question rather than a CORE one |
+| B-25 | **Resolved.** An abandoned claim did not spend an attempt, so a row whose worker died on it every time was recovered for ever and never dead-lettered: the one queue state that requires a human was the one state it could not reach. Fixed with a **second budget** rather than by reusing the first — `reclaims integer not null default 0` on `outbox`, `inbound_event` and `event_delivery` (migration 0015), incremented by `reclaimExpired(now, maxReclaims, limit)`, which dead-letters the row on the increment that passes the limit (default 3, `DEFAULT_MAX_RECLAIMS`) instead of freeing it. The three workers report the two counts as `reclaimed` and `failed_permanent`, plus a `reclaim_exhausted` field on their result. Charging `attempts` was rejected on evidence, not taste: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop would impose exponential delays a healthy row never earned, and `retrying` is derived as `pending and attempts > 0`, so a row nobody had tried would report as retrying. Charging the attempt at claim time — the notification store's single-counter approach — was rejected because B-22 declined to change `attempts` semantics for these three workers and it would silently halve every retry limit. `tests/reclaim-budget.test.ts` covers all three queues plus the worker-level result and metrics on both backends; the column, its default and its check constraint are asserted against the live schema | — |
 | B-26 | No fencing token on the three eventing queues, so `core_worker_outcomes_total{outcome="fenced"}` remains unreportable for them and a stalled worker's late acknowledgement can still land | `claimed_at` makes a claim **visible**; it does not make it **exclusive over time**. A worker that stalls past its lease, is reclaimed, and then wakes up and calls `markPublished`/`markProcessed`/`markDelivered` will succeed, because the acknowledgement names the row and not the claim. `PgNotificationStore` has a `claim_token` and can refuse exactly this, which is why `fenced` is reportable for notifications alone. Pre-existing — B-24 neither introduced nor worsened it — and the window is small (it needs a stall longer than a whole lease followed by a successful write) but it is a genuine at-most-once gap on a queue whose deliveries are signed POSTs to partners | A `claim_token uuid` per queue table, returned by `claimDue` and required by every acknowledgement, which means threading the token through `OutboxPublisher`, `InboundDispatcher` and `DeliveryWorker` and through six store implementations, plus a decision about what a refused acknowledgement should do with the work already performed (the POST was sent; the row now belongs to somebody else). Its own cycle, and a real contract change to the store ports |
+| B-27 | A dead `outbox` or `event_delivery` row has no revival path in CORE at all | Replay (`src/platform/replay/service.ts`) reads `inbound_event` only; its `DEFAULT_STATUSES = ["pending", "dead"]` is what makes a dead inbound event operator-recoverable. There is no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead `outbox` row — an event MOVE and MARKET will now **never** receive — and a dead `event_delivery` row are durable and unreachable at the same time, which is precisely the defect Milestone 6 was created to remove for inbound events. B-25 makes this matter more, not less: it adds a second, entirely new way for rows in exactly those two tables to reach `dead`. Recovering one today means a manual `update` against the database, unreviewed and unaudited | A revival command per queue that resets `status` to `pending`, clears `claimed_at`, zeroes `reclaims` and leaves `attempts` alone, under the same compulsory-narrowing and audit rules replay already enforces; or extend the replay service to cover all three queues rather than adding a third mechanism. Needs an owner decision on whether reviving a dead outbox row should re-publish the original envelope unchanged or emit a fresh one with a new `event_id` |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -3016,3 +3017,175 @@ a refused acknowledgement a bounded problem too. **B-14…B-19** and **B-20** ne
 owner decisions. **Milestone 9** is still blocked on B-5/B-6. Contract expansion is
 again deliberately not chosen: the existing surface should be operationally
 trustworthy before it grows, and this cycle is what that means in practice.
+
+## Cycle 2026-09-12 (ninth) — B-25, recovery is bounded (CORE-only agent)
+
+Scope: `src/platform/eventing/`, `db/migrations/0015_*`, `docs/`, tests. No MOVE,
+no MARKET, no new module, no contract change to any published event.
+
+### The defect, precisely
+
+The previous cycle resolved B-24 and, in the same breath, recorded the cost of how
+it did so. `reclaimExpired` frees an abandoned claim without touching `attempts`,
+because nobody observed the work fail and charging an attempt for an unobserved
+outcome would let five rolling restarts dead-letter five perfectly healthy events
+at `maxAttempts = 5`. That reasoning still holds. What it left behind does not:
+
+1. Recovery had **no limit at all**. A payload that kills whichever worker touches
+   it — an OOM on one oversized event, a hang on one malformed field — was claimed,
+   killed, reclaimed on the next tick, claimed again, indefinitely.
+2. The row never reached `dead`, so it never appeared in a dead-letter query and
+   never triggered the one queue state that is defined as "a person must look".
+3. `core_worker_outcomes_total{outcome="reclaimed"}` climbed steadily, which is
+   *visible* but not *actionable*: the same signal is produced by a healthy queue
+   during a deploy. Nothing separated "recovering" from "will never recover".
+
+So the queue held work it would never finish, and said so in a counter that also
+says everything is fine.
+
+### The fix, and the two designs that were rejected
+
+**Chosen: a second budget, with its own column.** Migration 0015 adds `reclaims
+integer not null default 0` and a `*_reclaims_check (reclaims >= 0)` to `outbox`,
+`inbound_event` and `event_delivery`. The port becomes `reclaimExpired(now,
+maxReclaims, limit?)` and returns `{ reclaimed, dead }`. On Postgres it stays a
+single statement per queue — `set reclaims = reclaims + 1`, `status = case when
+reclaims + 1 > $3 then 'dead' else status end`, `next_attempt_at` left where it is
+on the dead branch (matching `markDead`) and moved to now on the recovered branch,
+two different `last_error` strings, `returning status` — so recovery cannot
+interleave with itself and produce a row that was both freed and killed. The limit
+is `DEFAULT_MAX_RECLAIMS = 3` in `src/platform/eventing/reclaim.ts`, passed as the
+**last** constructor argument of each worker so no existing positional caller
+moved.
+
+The two counters are deliberately not the same counter:
+
+| Counter | Incremented when | Bounds | Also drives |
+| --- | --- | --- | --- |
+| `attempts` | the work was tried and observed to fail | `maxAttempts` (5 / 5 / 8) | backoff, and the derived `retrying` state |
+| `reclaims` | a claim was abandoned with nothing reported | `maxReclaims` (3) | nothing else |
+
+**Rejected: increment `attempts` in `reclaimExpired`.** A two-word change, and the
+first thing tried on paper. It is wrong twice over, and both are checkable rather
+than aesthetic: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop
+would push a healthy row into exponentially long delays it never earned; and
+`retrying` is derived as `pending and attempts > 0`, so a row nobody had ever tried
+would be reported as retrying. Mutation-testing this design confirms it — charging
+the attempt fails 4 tests, one of them a B-24 test that has nothing to do with this
+cycle.
+
+**Rejected: charge the attempt at claim time.** This is how the notification store
+solves the identical problem with one counter: its `claimDue` does `attempts =
+attempts + 1`, so its own `reclaimExpired(now, maxAttempts, limit)` is bounded for
+free. It was left exactly as it is. Adopting it for the other three would change
+what `attempts` means for them — which B-22 explicitly declined to do — and would
+silently halve every effective retry limit in the system, since an attempt would be
+spent on claiming rather than on failing.
+
+### The exhausted row, and what it is called
+
+A row that runs out of reclaims is dead-lettered, and the workers report it as
+`failed_permanent` — not as a new outcome label, because the metric vocabulary
+already has a word for "terminal, no worker will pick this up again", and adding a
+label to `core_worker_outcomes_total` would break every existing dashboard query
+that sums over outcomes. The distinction that *is* worth keeping is exposed on the
+result object instead: `PublisherResult`, `DispatcherResult` and
+`DeliveryWorkerResult` gained a `reclaim_exhausted` field, so a caller can tell an
+exhausted recovery from an ordinary permanent failure without parsing
+`last_error`. `last_error` records it too, in prose an operator can grep:
+`reclaim limit exceeded: abandoned N times after attempt M`.
+
+A dead `event_delivery` row keeps `last_status` and `delivered_at` null. Nothing was
+ever sent to the subscriber, and the record must not imply one answered.
+
+### Existing rows, and how to deploy and roll this back
+
+Existing rows get `0`, so everything in flight when the migration runs starts with
+a full budget; the deploy itself dead-letters nothing. The limit lives in the
+workers, not in the schema, so it can be tuned without a migration. Rolling
+**back** is code first, then `0015_worker_reclaim_budget.down.sql`, for the same
+reason as 0014: code that writes `reclaims` against a schema without the column
+fails every recovery, which stops all three queues. Rows already dead-lettered by
+an exhausted budget stay dead — which is what B-27 below is about.
+
+### Tests — 10 new, and what each one would catch
+
+`tests/reclaim-budget.test.ts`, `describe.each(backends)` so all five cases run on
+in-memory and on real Postgres:
+
+1. **Outbox exhaustion.** Three abandonments recovered, the fourth dead-letters,
+   `last_error` reads `reclaim limit exceeded`. Catches an off-by-one on the limit
+   and an unbounded budget.
+2. **The two budgets spend separately.** A real `markFailed` moves `attempts` and
+   leaves `reclaims` alone; an abandonment does the reverse. This is the test that
+   fails if anyone ever "simplifies" the design back to one counter.
+3. **Inbound exhaustion is replayable.** The dead row appears in `byStatus("dead")`,
+   which is what `docs/replay.md` promises an operator can act on.
+4. **Delivery exhaustion invents nothing.** `last_status` and `delivered_at` stay
+   null on the dead row.
+5. **The worker reports it.** A real `OutboxPublisher` against a rejecting bus and a
+   deliberately huge `maxAttempts`, abandoned once per round: `reclaimed` 1 per
+   round then `reclaim_exhausted` 1, `dead` 0 throughout, and the exposition shows
+   `reclaimed` 3 and `failed_permanent` 1. The final row is at `reclaims = 4`,
+   `attempts = 3` — the two budgets advancing independently inside a live worker.
+
+`tests/db-schema.test.ts` gained one case asserting the column is `not null`,
+defaults to `0` and carries its check constraint **on the live database**, so a
+migration that was written but never applied cannot pass. `MAX_RECLAIMS = 3` is
+re-declared as a literal in the test files rather than imported, so changing the
+default in `src/` fails the tests instead of moving them silently.
+
+### Verification
+
+`tsc --noEmit` clean. `DATABASE_URL=… npx vitest run`: **592 passed / 35 files**
+(582 → 592). Without a database: 335 passed / 46 skipped. Governance, contract and
+migration gates pass; 15 forward migrations, all with rollbacks. Falsifiable and
+checked by mutation, each mutation restored and `tsc` re-run clean afterwards:
+making the in-memory budget never exhaust fails 4 tests, raising the Postgres
+threshold to 999 fails 3, and charging `attempts` on reclaim fails 4.
+
+Sixteen existing `toEqual` assertions in `tests/outbound-delivery.test.ts` had to
+gain `reclaim_exhausted: 0`. They are exact-shape assertions on the worker result,
+which is why adding a field broke them — and why they are worth keeping exactly as
+they are.
+
+### Documentation
+
+`docs/observability.md` — the paragraph stating that a reclaimed item is not
+charged an attempt now explains the second budget, the exhaustion outcome and the
+table separating the two counters; a new "B-25, resolved" section records the
+defect, the fix, both rejected designs and the rollback order.
+`docs/outbound-delivery.md` — the lease paragraph now ends at the dead letter
+rather than at "the next drain sends it". `docs/replay.md` — records that a dead
+inbound row now has two possible causes, that a reclaim-exhausted row has never
+been processed at all so replaying it is a first attempt, and that `outbox` and
+`event_delivery` have no revival path.
+
+### External dependencies — none new
+
+No published contract, no event payload and no HTTP response shape changed.
+`reclaims` is internal to CORE's queue tables and is exposed by no endpoint.
+**MOVE and MARKET need do nothing.** The store ports changed (`reclaimExpired` now
+takes a limit and returns a shape), which matters only inside this repository.
+
+**B-27** is new and recorded above. **B-26** unchanged and now next. **B-20**
+untouched. **D-6**, **D-7**, **D-8** unchanged. **B-2…B-6** and **B-14…B-19** still
+need answers CORE does not own.
+
+### Next task
+
+**B-26 — fencing tokens on the three eventing queues.** With recovery now bounded,
+the remaining hole in the lease design is the one `claimed_at` cannot close: a
+worker that stalls past its lease, is reclaimed, then wakes up and acknowledges
+work that has since been re-served. The acknowledgement lands, and
+`core_worker_outcomes_total{outcome="fenced"}` stays unreportable for three of the
+four workers. The notification store already has the shape to copy. It is
+CORE-only, and it is deliberately sequenced after B-25 because a refused
+acknowledgement on a bounded queue is a bounded problem.
+
+Not chosen next: **B-27** (reviving a dead `outbox` or `event_delivery` row) is the
+honest follow-on to this cycle, but it needs an owner answer first — whether
+reviving a dead outbox row re-publishes the original envelope or emits a fresh one
+with a new `event_id` — and that answer changes the shape of the code, so it should
+not be guessed. **B-14…B-19** and **B-20** need owner decisions. **Milestone 9** is
+still blocked on B-5/B-6.

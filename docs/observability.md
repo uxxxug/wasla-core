@@ -104,8 +104,12 @@ bad payload: both leave work undone, but only one of them is your fault.
 
 A `reclaimed` item is **not** charged an attempt. Nobody observed it fail, so
 `attempts` is left alone and the row does not move towards its dead-letter limit.
-The cost of that choice is recorded as a blocker: a row whose worker dies on it
-every single time is retried for ever and never dead-lettered.
+Recovery is bounded by a **second, separate counter** instead: `reclaims`, with
+its own limit of three (B-25, resolved below). The two budgets never touch each
+other, so `retried` and `reclaimed` stay readable — but a row that is abandoned a
+fourth time is dead-lettered and counted as `failed_permanent`, not as another
+`reclaimed`. A queue that keeps reporting `reclaimed` is still recovering; once it
+reports `failed_permanent` it has stopped trying, and a person has to look.
 
 Item duration is measured with `process.hrtime.bigint()`, not with the injectable
 domain clock: a test that freezes time must still be able to advance leases
@@ -425,3 +429,52 @@ The one cost is that claims held across the migration are not counted when they
 are taken over. Rolling **back** is the opposite order: roll the code back first,
 then the migration, because code that sets `claimed_at` against a schema without
 the column fails every claim and stops all three queues.
+
+## B-25, resolved: recovery is bounded, so a poison payload cannot loop for ever
+
+**The defect.** B-24 made an expired lease countable, and deliberately did not
+charge the recovered row an attempt: nobody watched it fail, so `attempts` — the
+counter that drives both the backoff curve and the dead-letter limit — was left
+alone. That left recovery unbounded. A payload that kills whichever worker
+touches it produced exactly the loop the dead-letter limit exists to stop: claim,
+crash, lease expires, reclaim, claim again, for ever, on a row that was never once
+counted as having failed. The queue never drains and the metric that says so —
+`core_worker_outcomes_total{outcome="reclaimed"}` — just keeps climbing.
+
+**The fix.** A second budget with its own column: `reclaims integer not null
+default 0` on `outbox`, `inbound_event` and `event_delivery` (migration 0015).
+`reclaimExpired(now, maxReclaims, limit)` increments it, and on the increment that
+passes `maxReclaims` (default 3, `DEFAULT_MAX_RECLAIMS` in
+`src/platform/eventing/reclaim.ts`) it dead-letters the row in the same statement
+instead of freeing it. It returns `{ reclaimed, dead }`, and the three workers
+report those as `reclaimed` and `failed_permanent` respectively, plus a
+`reclaim_exhausted` field on their result so a caller can tell an exhausted
+recovery from an ordinary permanent failure without reading `last_error`.
+
+The two budgets stay independent, which is the whole point:
+
+| Counter | Incremented when | Bounds | Also used for |
+| --- | --- | --- | --- |
+| `attempts` | the work was tried and observed to fail | `maxAttempts` (5/5/8) | the backoff curve, and `retrying` |
+| `reclaims` | a claim was abandoned and nobody reported anything | `maxReclaims` (3) | nothing else |
+
+A row that fails four times and is abandoned twice is at `attempts = 4`,
+`reclaims = 2`, and neither number has been distorted by the other.
+
+**What was rejected, and why.** Incrementing `attempts` in `reclaimExpired` would
+have been a two-word change and was the first thing tried on paper. It is wrong
+twice: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop would push
+a healthy row into exponentially long delays it never earned, and `retrying` is
+derived as `pending and attempts > 0`, so a row nobody had ever tried would be
+reported as retrying. Charging the attempt at claim time — which is how the
+notification store bounds the same loop with a single counter — was also rejected:
+B-22 declined to change what `attempts` means for these three workers, and doing
+it here would silently halve every effective retry limit in the system.
+
+**Deploying it.** Existing rows get `0`, so every row in flight when the migration
+runs gets a full budget; nothing is dead-lettered by the deploy itself. The limit
+lives in the workers, not in the schema, so it can be tuned without a migration.
+Rolling **back** is again code first, then the migration: code that writes
+`reclaims` against a schema without the column fails every recovery. Rows already
+dead-lettered by an exhausted budget stay dead — see `docs/replay.md` for what can
+be brought back and what currently cannot.
