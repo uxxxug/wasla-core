@@ -342,15 +342,20 @@ describe.each(backends)("financial decision boundary on $name", (backend) => {
       reason: "customer_cancelled_again",
       correlation_id: CORRELATION,
     });
-    // A late completion for an already cancelled fulfillment is refused rather
-    // than allowed to overwrite the outcome. The refusal is what keeps the
-    // money truth single-valued: a second settlement attempt here would try to
-    // capture a hold that is already closed.
-    await expect(
-      core.fulfillment.consumeMoveCompletion(
-        completion(created.fulfillment_id, "job-fd-d", "completed"),
-      ),
-    ).rejects.toThrow(/cancelled/);
+    // A late completion for an already cancelled fulfillment never overwrites the
+    // outcome and never settles money a second time — the hold is already closed.
+    // What it does do since B-29 is get recorded: it is answered, not refused, and
+    // the row keeps the fact that the work was performed anyway. The refusal it
+    // used to get was retried by the dispatcher until the report was dead-lettered,
+    // and left this fulfillment reading as a finished cancellation.
+    const late = await core.fulfillment.consumeMoveCompletion(
+      completion(created.fulfillment_id, "job-fd-d", "completed"),
+    );
+    expect(late).toMatchObject({
+      status: "cancelled",
+      settlement_state: "partially_captured",
+      executed_after_cancellation_job_reference: "job-fd-d",
+    });
 
     // One outcome, one reason, one closure event, one capture.
     expect(second).toMatchObject({

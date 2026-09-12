@@ -479,15 +479,32 @@ describe.each(backends)("single closure on $name", (backend) => {
       .consumeJobRejected(rejection(fulfillment.fulfillment_id, "vehicle_unavailable"))
       .then(() => null)
       .catch((err: Error) => err);
-    const completedLate = await core.fulfillment
-      .consumeMoveCompletion(completion(fulfillment.fulfillment_id, "job-retry", "completed"))
-      .then(() => null)
-      .catch((err: Error) => err);
+    const completionEvent = completion(fulfillment.fulfillment_id, "job-retry", "completed");
+    const completedLate = await core.fulfillment.consumeMoveCompletion(completionEvent);
+    // Redelivered, to prove the marker is single-valued the same way the closure is.
+    const completedTwice = await core.fulfillment.consumeMoveCompletion(completionEvent);
 
     expect(retried).toEqual(first);
     expect(rejectedLate?.message).toMatch(/already closed/);
-    expect(completedLate?.message).toMatch(/cancelled/);
+    // A late completion is not a closure and does not become one: the row stays
+    // cancelled with its original reason and instant, and no second closure event
+    // is published. It is answered rather than refused (B-29), and what it changes
+    // is only the marker recording that MOVE did the work anyway.
+    expect(completedLate).toMatchObject({
+      status: "cancelled",
+      closure_reason: first.closure_reason,
+      completed_at: first.completed_at,
+      executed_after_cancellation_job_reference: "job-retry",
+    });
+    expect(completedTwice).toEqual(completedLate);
     expect(await closures(fulfillment.fulfillment_id)).toHaveLength(1);
+    // Exactly one of the new events for two deliveries of the same report.
+    expect(
+      await eventsOfType(
+        fulfillment.fulfillment_id,
+        "core.fulfillment.executed_after_cancellation",
+      ),
+    ).toHaveLength(1);
   });
 
   // 8. The intake side of the same invariant. A refused order is born closed and

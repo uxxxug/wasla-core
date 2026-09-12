@@ -43,6 +43,10 @@ function failingUpdate(inner: FulfillmentRepository): FulfillmentRepository {
     updateIfStatusIn: async () => {
       throw new Error("the fulfillment row could not be written");
     },
+    // Not part of the failure being injected: this write only ever touches a row
+    // that is already cancelled and closed, so it cannot be in flight while a
+    // settlement is being applied (B-29).
+    markExecutedAfterCancellation: (i, s) => inner.markExecutedAfterCancellation(i, s),
   };
 }
 

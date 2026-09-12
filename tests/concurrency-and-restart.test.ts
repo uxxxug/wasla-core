@@ -188,7 +188,20 @@ describe.each(backends)("concurrency on $name", (backend) => {
       const final = await core.fulfillment.require(created.fulfillment_id);
       expect(["completed", "cancelled"]).toContain(final.status);
       expect(final.completed_at).not.toBeNull();
-      expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+      if (final.status === "completed") {
+        // The completion won: money captured against delivered work, nothing open.
+        expect(await core.fulfillment.listFinanciallyInconsistent()).toHaveLength(0);
+      } else {
+        // The cancellation won, and the completion it beat is not discarded: MOVE
+        // reported the work as done, so the row carries that report and the case is
+        // routed to the decision queue (B-29). Reporting this fulfillment as
+        // financially finished would be the defect, not the reading below.
+        expect(final).toMatchObject({
+          status: "cancelled",
+          executed_after_cancellation_job_reference: "JOB-1",
+        });
+        expect(await core.fulfillment.listPendingFinancialDecision()).toHaveLength(1);
+      }
     } finally {
       await close();
     }

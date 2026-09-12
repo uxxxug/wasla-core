@@ -633,6 +633,8 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
         created_at: AT,
         completed_at: null,
         closure_reason: null,
+        executed_after_cancellation_at: null,
+        executed_after_cancellation_job_reference: null,
       };
       await backend.fulfillment.insert(created, NO_SCOPE);
       expect(await backend.fulfillment.get(created.fulfillment_id)).toEqual(created);
@@ -664,6 +666,8 @@ describe.each(harnesses)("%s adapters", (_name, harness) => {
         created_at: AT,
         completed_at: "2026-01-01T03:00:00.000Z",
         closure_reason: "delivered",
+        executed_after_cancellation_at: null,
+        executed_after_cancellation_job_reference: null,
       };
       await backend.fulfillment.insert(completed, NO_SCOPE);
       expect(await backend.fulfillment.get(completed.fulfillment_id)).toEqual(completed);

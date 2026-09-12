@@ -242,10 +242,33 @@ describe("WASLA vertical slice", () => {
     expect(
       (await core.outbox.all()).filter((r) => r.event.event_type === "core.fulfillment.cancelled"),
     ).toHaveLength(1);
-    // A late completion for a cancelled fulfillment is refused.
-    await expect(
-      core.fulfillment.consumeMoveCompletion(move.completion("job-1", "completed", "corr-6")),
-    ).rejects.toThrow(/cancelled/);
+    // A late completion for a cancelled fulfillment does not reopen it, does not
+    // move money, and is not thrown away either: CORE records that the work was
+    // performed after the cancellation and publishes the fact, because MARKET has
+    // already told this customer their order was cancelled and refunded them
+    // (B-29). Before that, this report was refused, retried until it was
+    // dead-lettered, and the order read as a finished cancellation.
+    const late = await core.fulfillment.consumeMoveCompletion(
+      move.completion("job-1", "completed", "corr-6"),
+    );
+    expect(late).toMatchObject({
+      status: "cancelled",
+      settlement_state: "released",
+      executed_after_cancellation_job_reference: "job-1",
+    });
+    await settle();
+    expect(
+      (await core.outbox.all()).filter(
+        (r) => r.event.event_type === "core.fulfillment.executed_after_cancellation",
+      ),
+    ).toHaveLength(1);
+    // The money did not move a second time on the way through.
+    expect(await core.money.balance(wallet.wallet_id)).toMatchObject({
+      posted_minor: 20_000,
+      held_minor: 0,
+    });
+    // And the case is now in the queue for money questions CORE cannot answer.
+    expect(await core.fulfillment.listPendingFinancialDecision()).toHaveLength(1);
   });
 
   it("7. MOVE failing to create a job fails the fulfillment and refunds the hold", async () => {
