@@ -203,7 +203,11 @@ describe.each(backends)("single closure on $name", (backend) => {
       correlation_id: CORRELATION,
       entity_type: "operational_job",
       entity_id: `job-${fulfillmentId.slice(0, 8)}`,
-      payload: { fulfillment_id: fulfillmentId, reason },
+      // `rejected_at` is required by `contracts/events/move.job.rejected.schema.json`.
+      // This fixture omitted it and the consumer accepted it anyway, because the
+      // consumer checked the payload itself instead of the contract. Normalisation
+      // now enforces the schema, which is what surfaced the gap.
+      payload: { fulfillment_id: fulfillmentId, reason, rejected_at: clock.now().toISOString() },
     });
   }
 

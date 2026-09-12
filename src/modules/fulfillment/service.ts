@@ -5,9 +5,16 @@ import type {
 import type { AuditLog } from "../../platform/audit/audit.js";
 import type { Clock } from "../../platform/clock.js";
 import { conflict, invalid, notFound } from "../../platform/errors.js";
-import { newId, assertId } from "../../platform/ids.js";
+import { newId } from "../../platform/ids.js";
 import type { EventEnvelope } from "../../platform/eventing/envelope.js";
 import { makeEvent } from "../../platform/eventing/envelope.js";
+import type {
+  MarketOrderCreatedPayload,
+  MoveJobAcceptedPayload,
+  MoveJobCompletedPayload,
+  MoveJobRejectedPayload,
+} from "../../platform/eventing/normalize.js";
+import { canonicalPayload } from "../../platform/eventing/normalize.js";
 import type { OutboxStore } from "../../platform/eventing/outbox.js";
 import {
   withTransaction,
@@ -18,10 +25,6 @@ import { journalMapWrite } from "../../platform/persistence/transaction.js";
 import type {
   Fulfillment,
   FulfillmentStatus,
-  MarketOrderCreatedPayload,
-  MoveJobAcceptedPayload,
-  MoveJobCompletedPayload,
-  MoveJobRejectedPayload,
   FinancialDisposition,
   SettlementState,
 } from "./domain.js";
@@ -418,19 +421,12 @@ export class FulfillmentService {
    * ask MOVE to execute work it already knows it cannot settle.
    */
   async consumeMarketOrder(event: EventEnvelope): Promise<Fulfillment> {
-    if (event.event_type !== "market.order.created" || event.version !== 1) {
-      throw invalid("unsupported market event");
-    }
-    const payload = event.payload as Partial<MarketOrderCreatedPayload>;
-    if (!payload.order_id || !payload.organization_id || !payload.requested_service) {
-      throw invalid("market.order.created payload is incomplete");
-    }
-    // organization_id and payment_authorization_id are CORE identifiers that
-    // MARKET is echoing back to us; order_id is MARKET's own and stays opaque.
-    assertId("organization_id", payload.organization_id);
-    if (payload.payment_authorization_id !== undefined && payload.payment_authorization_id !== null) {
-      assertId("payment_authorization_id", payload.payment_authorization_id);
-    }
+    // One call replaces the type check, the version check and the field-by-field
+    // payload check this method used to carry, along with the three near-copies
+    // of them in the other consumers. Version interpretation now lives in
+    // `platform/eventing/normalize.ts` and nowhere else, so a handler cannot
+    // develop its own opinion about what an old event means.
+    const payload = canonicalPayload<MarketOrderCreatedPayload>(event, "market.order.created");
     const existing = await this.repo.findByOrderReference(payload.order_id);
     if (existing) return existing;
     const authorizationId = payload.payment_authorization_id ?? null;
@@ -525,13 +521,7 @@ export class FulfillmentService {
    * poisoning the consumer with a permanent conflict.
    */
   async consumeJobAccepted(event: EventEnvelope): Promise<Fulfillment> {
-    if (event.event_type !== "move.job.accepted" || event.version !== 1) {
-      throw invalid("unsupported move event");
-    }
-    const payload = event.payload as Partial<MoveJobAcceptedPayload>;
-    if (!payload.fulfillment_id || !payload.job_id || !payload.accepted_at) {
-      throw invalid("move.job.accepted payload is incomplete");
-    }
+    const payload = canonicalPayload<MoveJobAcceptedPayload>(event, "move.job.accepted");
     const current = await this.require(payload.fulfillment_id);
     if (isClosed(current.status) || current.status === "dispatched") {
       return await this.acceptanceOn(current, payload.job_id, event.correlation_id);
@@ -566,7 +556,7 @@ export class FulfillmentService {
       );
       uow.audit(this.auditEntry("fulfillment.dispatched", updated, event.correlation_id));
       return updated;
-    }, (winner) => this.acceptanceOn(winner, payload.job_id!, event.correlation_id));
+    }, (winner) => this.acceptanceOn(winner, payload.job_id, event.correlation_id));
   }
 
   /**
@@ -604,13 +594,12 @@ export class FulfillmentService {
 
   /** MOVE could not create an operational job — the request fails and money is released. */
   async consumeJobRejected(event: EventEnvelope): Promise<Fulfillment> {
-    if (event.event_type !== "move.job.rejected" || event.version !== 1) {
-      throw invalid("unsupported move event");
-    }
-    const payload = event.payload as Partial<MoveJobRejectedPayload>;
-    if (!payload.fulfillment_id || !payload.reason) {
-      throw invalid("move.job.rejected payload is incomplete");
-    }
+    // This handler used to accept a payload the published contract forbids: it
+    // required only `fulfillment_id` and `reason`, while
+    // `contracts/events/move.job.rejected.schema.json` also requires
+    // `rejected_at`. Four independent payload checks is exactly how a consumer
+    // and its contract drift apart without anyone noticing.
+    const payload = canonicalPayload<MoveJobRejectedPayload>(event, "move.job.rejected");
     const current = await this.require(payload.fulfillment_id);
     if (isClosed(current.status)) return this.rejectionOn(current);
     // One transaction: the release and the closure commit together or not at
@@ -628,7 +617,7 @@ export class FulfillmentService {
           uow,
           current,
           "failed",
-          payload.reason!,
+          payload.reason,
           outcome,
           event.correlation_id,
           event.event_id,
@@ -645,13 +634,7 @@ export class FulfillmentService {
    * CORE never reports success for work it could not settle.
    */
   async consumeMoveCompletion(event: EventEnvelope): Promise<Fulfillment> {
-    if (event.event_type !== "move.job.completed" || event.version !== 1) {
-      throw invalid("unsupported move event");
-    }
-    const payload = event.payload as Partial<MoveJobCompletedPayload>;
-    if (!payload.fulfillment_id || !payload.job_id || !payload.outcome || !payload.completed_at) {
-      throw invalid("move.job.completed payload is incomplete");
-    }
+    const payload = canonicalPayload<MoveJobCompletedPayload>(event, "move.job.completed");
     const current = await this.require(payload.fulfillment_id);
     if (isClosed(current.status)) return this.completionOn(current, payload.job_id);
 

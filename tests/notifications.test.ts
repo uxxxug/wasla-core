@@ -679,11 +679,15 @@ describe.each(backends)("notifications on $name", (backend) => {
           correlation_id: "corr-fin",
           entity_type: "operational_job",
           entity_id: "job-fin",
+          // No `reason` key: `move.job.completed` declares
+          // `additionalProperties: false` and does not have one. The consumer
+          // used to ignore unknown fields, so this fixture carried a field the
+          // contract forbids; the closure reason CORE records for a failed
+          // outcome is its own (`move_execution_failed`), not MOVE's.
           payload: {
             fulfillment_id: created.fulfillment_id,
             job_id: "job-fin",
             outcome: "failed",
-            reason: "move_job_failed",
             completed_at: core.clock.now().toISOString(),
           },
         }),

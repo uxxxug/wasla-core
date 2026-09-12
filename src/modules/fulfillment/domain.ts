@@ -185,29 +185,10 @@ export function isFinanciallyConsistent(fulfillment: Fulfillment): boolean {
   );
 }
 
-export interface MarketOrderCreatedPayload {
-  order_id: string;
-  organization_id: string;
-  requested_service: string;
-  /** Optional CORE money hold created by MARKET before submitting the order. */
-  payment_authorization_id?: string | null;
-}
-
-export interface MoveJobAcceptedPayload {
-  fulfillment_id: string;
-  job_id: string;
-  accepted_at: string;
-}
-
-export interface MoveJobRejectedPayload {
-  fulfillment_id: string;
-  reason: string;
-  rejected_at: string;
-}
-
-export interface MoveJobCompletedPayload {
-  fulfillment_id: string;
-  job_id: string;
-  outcome: "completed" | "failed";
-  completed_at: string;
-}
+/*
+ * The inbound payload shapes used to be declared here, duplicating the published
+ * contracts. They now live in `platform/eventing/normalize.ts` next to the rules
+ * that read them, because they describe what arrives from outside CORE rather
+ * than anything this module owns — and because two declarations of one contract
+ * is one too many.
+ */
