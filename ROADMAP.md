@@ -81,19 +81,29 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved scope — reputation and trust signals in CORE (ADR 0015), branch
-`reputation-adr-0015`.** This repository has no reservation mechanism other than
-this section, so the reservation is this entry, committed and pushed before any
-implementation file was touched. Nobody else may open `src/modules/reputation/`,
-migration `0018`, `contracts/events/core.reputation.*`,
-`contracts/events/market.review.*` or the reputation rows of
-`docs/event-catalog.md` / `docs/data-ownership.md` while it stands. Chosen
-because it is the only capability on the ownership list that is still
-unimplemented *and* not waiting on a decision CORE does not own: ADR 0015
-already places reputation in CORE and review content in MARKET, and `README.md`
-names reputation as the one remaining gap. The "Remaining, in dependency order"
-table omits reputation entirely — a gap in this document, not in the ownership
-list, and it is corrected in the same cycle that closes the capability.
+**Reserved scope — the database half of the suite must run in CI (measurement
+honesty), branch `ci-database-gate`.** This repository has no reservation
+mechanism other than this section, so the reservation is this entry, committed
+and pushed before any implementation file was touched. Nobody else may open
+`.github/workflows/ci.yml`, the `test` scripts in `package.json`, or
+`tests/migration-0011-lifecycle.test.ts` while it stands.
+
+Chosen because it is the largest remaining gap between what this repository
+verifies and what it *claims* to verify, and it depends on nobody: CI sets no
+`DATABASE_URL`, so every Postgres adapter, every trigger, every check
+constraint and every live-schema assertion is **skipped in the only place that
+gates a merge**. The gap is measured, not estimated — 385 tests pass in the run
+CI performs and 687 pass with a database, so roughly 300 assertions have never
+once been enforced automatically. Every cycle that wrote "verified locally" was
+resting on a developer's own machine.
+
+Prerequisite inside the same scope: `tests/migration-0011-lifecycle.test.ts`
+times out in teardown under full-suite contention and passes in isolation. It
+has been carried as a known flake for several cycles, which was tolerable while
+no gate depended on it. Turning the database on in CI without fixing it would
+buy automatic enforcement at the price of a gate that fails at random — and a
+gate that cries wolf is disabled by the first person in a hurry, which is worse
+than no gate.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
