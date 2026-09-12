@@ -164,6 +164,64 @@ operator's route is to settle or refund the affected authorizations first.
 Verified by reproducing the state on a real database and running the down
 migration against it.
 
+## The fulfillment side of the fourth status
+
+Migration 0009 gave the hold a fourth status, but the fulfillment row that binds
+money to execution was left with the old vocabulary
+(`none | held | captured | released | unsettled`). The two disagreed for a whole
+cycle, and the disagreement was silent.
+
+`settlement_state = 'released'` is a claim with a precise documented meaning:
+**the hold was voided and no money moved**. Three paths wrote it for a hold that
+had already moved part of the payer's money, because
+`FulfillmentPaymentPort.voidWithin` returned `unknown` — fulfillment had no way
+to ask how much had moved, so it assumed nothing had:
+
+| path | what happened | what CORE recorded |
+| --- | --- | --- |
+| `move.job.rejected` / `cancel` after a partial capture | the remainder was released, 2 500 of 6 000 stayed gone | `released` |
+| intake of an order whose hold had already closed part-captured | refused, correctly | `released`, reason `payment_hold_not_authorized` |
+| `move.job.completed` on a hold already closed | capture refused, outcome flipped to `failed` | `released` |
+
+In all three the reconciliation read was blind: `isFinanciallyConsistent`
+returned `true`, `listFinanciallyInconsistent()` returned nothing, and the
+closure event told MARKET the money had been returned when it had not.
+
+Migration 0011 and the fulfillment service now carry `partially_captured` end to
+end. The port publishes a shape (`{ status, captured_minor }`) instead of
+`unknown`, and `release()` derives the state from what money reports rather than
+from what the call site hoped:
+
+```
+captured_minor > 0  ->  partially_captured
+otherwise           ->  released
+```
+
+### Why a failed fulfillment may hold it, and why it is still "inconsistent"
+
+`fulfillment_settlement_alignment_check` **accepts** `partially_captured` against
+`failed` and `cancelled`. Nothing is broken when it happens: the money state is
+terminal and truthful. But the payer has paid for work that did not complete, and
+whether that money is refunded, kept as a cancellation fee or split is a policy
+decision CORE has not been given (blocker B-20).
+
+So the schema stores it and `isFinanciallyConsistent` reports it as inconsistent.
+Those are not in conflict — one is about what is recordable, the other about what
+needs a human. Refusing to store it would only force the service back to writing
+`released`, which is the falsehood this work removed. Surfacing it is the
+reversible direction: an operator can act on a case CORE reported and cannot act
+on one it hid.
+
+Against `completed`, `partially_captured` is fully consistent — a job that cost
+less than the consented ceiling is the ordinary outcome of a capture in legs.
+
+### Rolling back 0011
+
+Same refusal as 0009, for the same reason: narrowing the value list back leaves
+no honest value for an existing row. `released` would claim no money moved and
+`captured` would claim all of it did. The rollback refuses while any row is
+`partially_captured` and points the operator at the query that lists them.
+
 ## Not implemented: multiple holds per fulfillment
 
 Deliberately left out, recorded as an external dependency rather than invented.
