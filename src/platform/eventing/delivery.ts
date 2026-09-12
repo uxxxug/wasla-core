@@ -134,6 +134,24 @@ export interface DeliveryStore {
     error: string,
     status: number | null,
   ): Promise<boolean>;
+  /**
+   * Stops a delivery because CORE has been told not to send to this subscriber
+   * any more, rather than because sending failed (B-28).
+   *
+   * Lands in `dead`, which is the only state that means "no further automatic
+   * attempt, visible to an operator, recoverable only when a human acts" — exactly
+   * what a suppressed delivery is. B-25 set the precedent: its new route to `dead`
+   * reused the status and distinguished itself by `last_error` and its own count,
+   * rather than adding a fourth status, a migration and a wider check constraint.
+   *
+   * Separate from `markDead` for one reason: it must **not** charge an attempt. No
+   * request was made, so incrementing `attempts` would record a failure that never
+   * happened, inflate the backoff of a later attempt, and — since a revival
+   * preserves `attempts` (B-27) — could hand back a row that is already at
+   * `maxAttempts` without anything ever having been sent. `last_status` stays null
+   * for the same reason: there was no response to record.
+   */
+  markSuppressed(deliveryId: string, fence: Fence, reason: string): Promise<boolean>;
   byStatus(status: DeliveryStatus): Promise<EventDelivery[]>;
   /**
    * A scoped page of **dead** deliveries, in `(created_at, delivery_id)` order
@@ -387,6 +405,21 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     return true;
   }
 
+  /** See `DeliveryStore.markSuppressed`. */
+  async markSuppressed(deliveryId: string, fence: Fence, reason: string): Promise<boolean> {
+    const existing = this.deliveries.get(deliveryId);
+    if (!existing || isFenced(existing.claim_token, fence)) return false;
+    this.deliveries.set(deliveryId, {
+      ...existing,
+      status: "dead",
+      // `attempts` and `last_status` deliberately untouched: nothing was sent.
+      last_error: reason,
+      claimed_at: null,
+      claim_token: null,
+    });
+    return true;
+  }
+
   async counts(): Promise<Record<string, number>> {
     return tallyByStatus(
       [...this.deliveries.values()],
@@ -594,6 +627,13 @@ export interface DeliveryWorkerResult {
    * this worker actually takes, not that a subscriber misbehaved.
    */
   fenced: number;
+  /**
+   * Deliveries stopped because their subscription is no longer active (B-28).
+   * Separate from `dead`, which is a fact about the subscriber's answers, and from
+   * `reclaim_exhausted`, which is a fact about this worker: this is a fact about a
+   * decision an operator took. Nothing was sent and no attempt was charged.
+   */
+  suppressed: number;
 }
 
 /**
@@ -634,6 +674,7 @@ export class DeliveryWorker {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
@@ -659,6 +700,50 @@ export class DeliveryWorker {
     for (const delivery of due) {
       const stop = this.metrics.startItem();
       const subscription = await this.store.getSubscription(delivery.subscription_id);
+      if (subscription && !subscription.active) {
+        // B-28: fan-out only ever queues a delivery for an active subscription, so
+        // deactivating one is how an operator stops CORE sending to a subscriber —
+        // the only control there is. Until this check existed the queue kept
+        // draining afterwards: rows already pending were still claimed, signed and
+        // POSTed, for up to `maxAttempts` spread over hours of backoff. An operator
+        // switching off a compromised or leaking endpoint got "stop queueing new
+        // work", not "stop sending", which is not a defensible reading of a
+        // security control.
+        //
+        // Checked here rather than swept when the subscription is deactivated,
+        // because a sweep cannot close the race it would leave behind: fan-out
+        // reads the active subscriptions, the deactivation commits, and then
+        // fan-out queues its row. Deciding at the moment of sending is the only
+        // place that sees the current answer. It costs nothing — the subscription
+        // was already being read here for its endpoint and secret.
+        //
+        // Dead-lettered rather than left pending. Skipping without a write would
+        // leave rows that are claimed and released on every drain for ever, absent
+        // from the `retrying` reading and counted as ordinary backlog. `dead` says
+        // the true thing — no further automatic attempt until a human acts — and
+        // since B-27 the way back is one journalled command: reactivate the
+        // subscription, then `npm run revive --queue event-delivery`. Revival
+        // refuses while the subscription is still inactive, so the two halves
+        // cannot contradict each other.
+        const applied = await this.store.markSuppressed(
+          delivery.delivery_id,
+          delivery.claim_token,
+          `subscription ${delivery.subscription_id} is not active; delivery suppressed`,
+        );
+        if (applied) {
+          result.suppressed += 1;
+          // No outcome of its own in the metric vocabulary: from a queue's point of
+          // view this delivery ended permanently without being delivered, which is
+          // what `failed_permanent` already means. `reclaim_exhausted` is reported
+          // the same way, and the worker result carries the distinction for anyone
+          // who needs it.
+          this.metrics.outcome("failed_permanent");
+        } else {
+          this.countFenced(result);
+        }
+        stop();
+        continue;
+      }
       const record = await this.outbox.get(delivery.event_id);
       const event = record?.event;
       if (!subscription || !event) {

@@ -305,6 +305,21 @@ export class PgDeliveryStore implements DeliveryStore {
     return result.rows.length === 1;
   }
 
+  /** See `DeliveryStore.markSuppressed`. */
+  async markSuppressed(deliveryId: string, fence: Fence, reason: string): Promise<boolean> {
+    const result = await this.pool.query(
+      // No `attempts = attempts + 1` and no `last_status`, unlike `markDead`
+      // directly above: nothing was sent, so there is no failure to charge and no
+      // response to record (B-28). Fenced like every other acknowledgement.
+      `update event_delivery
+       set status = 'dead', last_error = $3, claimed_at = null, claim_token = null
+       where delivery_id = $1 and ($2::text is null or claim_token = $2)
+       returning delivery_id`,
+      [deliveryId, fence, reason],
+    );
+    return result.rows.length === 1;
+  }
+
   async counts(): Promise<Record<string, number>> {
     const result = await this.pool.query<CountRow>(
       `select status,
