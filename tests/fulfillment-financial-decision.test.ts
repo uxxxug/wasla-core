@@ -399,14 +399,15 @@ describe.each(backends)("financial decision boundary on $name", (backend) => {
       posted_minor: 0,
       held_minor: 0,
     });
-    // Money stays single-valued because the capture is keyed in the ledger, so
-    // the duplicate delivery re-reads the same transaction instead of drawing
-    // again. Event emission has no such key: when the two transactions truly
-    // overlap, both commit and MARKET receives the same closure twice under two
-    // event ids. Every copy is true and identical, which is why this is a
-    // delivery defect and not a money defect — finding G-13.
+    // Money stays single-valued because the capture is keyed in the ledger, and
+    // since B-21 the closure is single-valued too: the closing update applies
+    // only while the row is still open, so the losing transaction rolls back and
+    // takes its outbox row with it. Exactly one closure event, whichever
+    // transaction won. `tests/fulfillment-single-closure.test.ts` holds the full
+    // proof; this file keeps the assertion because the money facts it asserts
+    // are only meaningful if the event carrying them is not duplicated.
     const settledEvents = await closureEvents(settledFulfillment.fulfillment_id);
-    expect(settledEvents.length).toBeGreaterThanOrEqual(1);
+    expect(settledEvents).toHaveLength(1);
     for (const closure of settledEvents) {
       expect(closure.payload).toMatchObject({
         outcome: "completed",
@@ -448,16 +449,12 @@ describe.each(backends)("financial decision boundary on $name", (backend) => {
       (await core.fulfillment.require(releasedFulfillment.fulfillment_id)).settlement_state,
     ).toBe("partially_captured");
 
-    // Two cancels that genuinely overlap can each publish a closure event: both
-    // read an open fulfillment before either committed, and neither update is
-    // conditional on the row still being open. The money is still moved once —
-    // that is what the balance above proves — so every event published is true,
-    // but MARKET can receive the same cancellation twice under distinct event
-    // ids. Pinned as it behaves rather than as it should behave, and recorded as
-    // finding G-13 / the next milestone, because making the closure conditional
-    // is a change to the repository contract and not to settlement semantics.
+    // Two cancels that genuinely overlap now produce one cancellation: the
+    // conditional closing write (B-21) lets exactly one commit, and the other
+    // unwinds completely — no second event, no second release. Before that fix
+    // this assertion had to tolerate two.
     const events = await closureEvents(releasedFulfillment.fulfillment_id);
-    expect(events.length).toBeGreaterThanOrEqual(1);
+    expect(events).toHaveLength(1);
     for (const closure of events) {
       expect(closure.payload).toMatchObject({
         settlement_state: "partially_captured",

@@ -33,7 +33,14 @@ function failingUpdate(inner: FulfillmentRepository): FulfillmentRepository {
     get: (id) => inner.get(id),
     all: () => inner.all(),
     findByOrderReference: (r) => inner.findByOrderReference(r),
+    insertIfAbsent: (f, s) => inner.insertIfAbsent(f, s),
     update: async (_f: Parameters<FulfillmentRepository["update"]>[0], _s?: TransactionScope) => {
+      throw new Error("the fulfillment row could not be written");
+    },
+    // The closure now goes through the conditional write (B-21), so the fault
+    // has to be injected there as well or these tests would stop exercising the
+    // failure they describe.
+    updateIfStatusIn: async () => {
       throw new Error("the fulfillment row could not be written");
     },
   };
