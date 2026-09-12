@@ -375,6 +375,55 @@ describe.each(backends)("queue revival on $name", (backend) => {
     expect(transport.sent).toHaveLength(0);
   });
 
+  it("completes the loop: switched off, suppressed, switched on, revived, sent", async () => {
+    // B-27 and B-28 are two halves of one operator story, and this is the whole of
+    // it. Neither half is much use alone: suppression without a revival path parks
+    // events with no way back, and a revival path without suppression brings back
+    // rows that were still being sent anyway.
+    const transport = new RecordingTransport();
+    const core = app(transport);
+    const subscription = await core.subscriptions.register({
+      subscriber: "wasla-move",
+      event_type: "core.fulfillment.created",
+      endpoint_url: "https://move.example.com/events",
+      signing_secret: SECRET,
+    });
+    const envelope = event("round-trip");
+    await store.outbox.append(envelope, NO_SCOPE);
+    await core.publisher.drainOnce();
+
+    // 1. Switched off. The queued delivery is suppressed rather than sent.
+    await core.subscriptions.setActive(subscription.subscription_id, false);
+    expect((await core.deliveries.drainOnce()).suppressed).toBe(1);
+    expect(transport.sent).toHaveLength(0);
+    const delivery = (await store.delivery.byStatus("dead"))[0] as { delivery_id: string };
+
+    // 2. Reviving now is refused, so the two halves cannot contradict each other:
+    // an operator working from the dead-letter queue cannot undo the switch by
+    // reviving past it.
+    const refused = await core.revival.run(
+      { queue: "event_delivery", delivery_ids: [delivery.delivery_id], limit: 5 },
+      OPERATOR,
+    );
+    expect(refused.counts.skipped_subscription_inactive).toBe(1);
+    expect(refused.counts.revived).toBe(0);
+
+    // 3. Switched back on, then revived. One journalled command, no hand-written SQL.
+    await core.subscriptions.setActive(subscription.subscription_id, true);
+    const revived = await core.revival.run(
+      { queue: "event_delivery", delivery_ids: [delivery.delivery_id], limit: 5 },
+      OPERATOR,
+    );
+    expect(revived.counts.revived).toBe(1);
+
+    // 4. And the subscriber finally receives the event it was always owed, under the
+    // id it deduplicates on — nothing was lost by switching the subscription off.
+    await core.deliveries.drainOnce();
+    expect(transport.sent).toHaveLength(1);
+    expect(JSON.parse(transport.sent[0]?.body ?? "{}").event_id).toBe(envelope.event_id);
+    expect((await store.delivery.byStatus("delivered"))).toHaveLength(1);
+  });
+
   it("plans without writing anything at all", async () => {
     const core = app(new RecordingTransport());
     const envelope = event("plan-only");

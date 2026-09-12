@@ -241,6 +241,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
 
     const after = await store.delivery.forEvent(event.event_id);
@@ -313,6 +314,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     const failed = (await store.delivery.forEvent(event.event_id))[0];
     expect(failed?.status).toBe("pending");
@@ -330,6 +332,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     expect(transport.sent).toHaveLength(1);
 
@@ -341,6 +344,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     expect((await store.delivery.forEvent(event.event_id))[0]?.status).toBe("delivered");
   });
@@ -372,6 +376,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     expect(await store.delivery.counts()).toMatchObject({ in_flight: 1, abandoned: 0 });
 
@@ -386,6 +391,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 1,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     expect(transport.sent).toHaveLength(1);
 
@@ -415,6 +421,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     const dead = (await store.delivery.forEvent(event.event_id))[0];
     expect(dead?.status).toBe("dead");
@@ -441,6 +448,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     const pending = (await store.delivery.forEvent(event.event_id))[0];
     expect(pending?.status).toBe("pending");
@@ -483,8 +491,90 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
     expect(transport.sent).toHaveLength(0);
+  });
+
+  it("stops sending work already queued when a subscriber is switched off", async () => {
+    // The other half of the same intent, and the one that was missing (B-28).
+    // Fan-out honoured `active`; the worker did not, so every delivery already
+    // pending when the subscription was switched off was still claimed, signed and
+    // POSTed. An operator switching off a compromised endpoint got "stop queueing
+    // new work" when they asked for "stop sending".
+    const transport = new ScriptedTransport([]);
+    const core = app(transport);
+    const subscription = await subscribe(core);
+    const event = await emit();
+    // Queued while the subscription was still active, which is the only way a row
+    // for an inactive subscription can exist at all.
+    await core.publisher.drainOnce();
+    expect(await store.delivery.forEvent(event.event_id)).toHaveLength(1);
+
+    await core.subscriptions.setActive(subscription.subscription_id, false);
+
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+      fenced: 0,
+      // Counted apart from `dead`: that is a fact about the subscriber's answers,
+      // this is a fact about a decision an operator took.
+      suppressed: 1,
+    });
+    // The assertion that matters. Nothing left the building.
+    expect(transport.sent).toHaveLength(0);
+
+    const [row] = await store.delivery.forEvent(event.event_id);
+    expect(row?.status).toBe("dead");
+    // No attempt was made, so none is charged, and there is no response to record.
+    // Charging one would inflate a later backoff and, because a revival preserves
+    // `attempts` (B-27), could hand back a row already at `maxAttempts` without
+    // anything ever having been sent.
+    expect(row?.attempts).toBe(0);
+    expect(row?.last_status).toBeNull();
+    expect(row?.last_error).toMatch(/not active/);
+    // And the claim is released, so the row is not left held by a worker that has
+    // finished with it.
+    expect(row?.claimed_at).toBeNull();
+    expect(row?.claim_token).toBeNull();
+
+    // Repeating the drain finds nothing: the row is terminal, not skipped-and-left,
+    // so it is not re-claimed on every pass for ever.
+    expect((await core.deliveries.drainOnce()).suppressed).toBe(0);
+  });
+
+  it("does not charge the suppression against an attempt already spent", async () => {
+    // A subscriber that failed once and is then switched off mid-backoff. The point
+    // is that `attempts` is exactly where the failure left it: the suppression adds
+    // nothing, so what an operator later reads on the row is the number of times a
+    // request was actually made.
+    const transport = new ScriptedTransport([{ status: 503 }]);
+    const core = app(transport);
+    const subscription = await subscribe(core);
+    await emit();
+    await core.publisher.drainOnce();
+    expect((await core.deliveries.drainOnce()).failed).toBe(1);
+    expect(transport.sent).toHaveLength(1);
+
+    await core.subscriptions.setActive(subscription.subscription_id, false);
+    // Past the backoff, so the row is genuinely due and the suppression is what
+    // stopped it rather than the schedule.
+    clock.advance(60_000);
+
+    expect((await core.deliveries.drainOnce()).suppressed).toBe(1);
+    expect(transport.sent).toHaveLength(1);
+    const dead = await store.delivery.byStatus("dead");
+    expect(dead).toHaveLength(1);
+    expect(dead[0]?.attempts).toBe(1);
+    // `last_error` is replaced, because the last thing that happened to this row is
+    // that CORE was told to stop — that is what an operator needs to read first.
+    expect(dead[0]?.last_error).toMatch(/not active/);
+    // `last_status` is not, so the evidence of the real attempt survives: the row
+    // still says a receiver answered 503 once.
+    expect(dead[0]?.last_status).toBe(503);
   });
 
   it("keeps a subscriber's outage from holding up another subscriber", async () => {
@@ -506,6 +596,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
       reclaimed: 0,
       reclaim_exhausted: 0,
       fenced: 0,
+      suppressed: 0,
     });
 
     const rows = await store.delivery.forEvent(event.event_id);
@@ -563,6 +654,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
         reclaimed: 0,
         reclaim_exhausted: 0,
         fenced: 0,
+        suppressed: 0,
       });
     } finally {
       store.delivery.getSubscription = originalGet;
