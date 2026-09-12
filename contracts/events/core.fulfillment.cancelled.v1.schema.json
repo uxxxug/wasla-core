@@ -13,8 +13,8 @@
     "cancelled_at": { "type": "string", "format": "date-time" },
     "settlement_state": {
       "type": "string",
-      "enum": ["none", "held", "captured", "released", "unsettled"],
-      "description": "State of the CORE money hold at closure. `released` means the hold was returned; `unsettled` means CORE could not bring the hold to a terminal state and the case needs reconciliation. Optional and additive; consumers may ignore it."
+      "enum": ["none", "held", "captured", "partially_captured", "released", "unsettled"],
+      "description": "State of the CORE money hold at closure. `released` means the hold was returned and no money moved; `partially_captured` means part of the consented amount had already moved and only the remainder was returned, so the payer has paid for work that was cancelled; `unsettled` means CORE could not bring the hold to a terminal state. The last two need reconciliation. Optional and additive; consumers may ignore it, and a consumer that reads it must treat an unrecognised value as \"do not assume\" rather than as `released`."
     }
   },
   "examples": [

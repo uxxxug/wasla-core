@@ -44,10 +44,11 @@
         "none",
         "held",
         "captured",
+        "partially_captured",
         "released",
         "unsettled"
       ],
-      "description": "State of the CORE money hold at closure. A completed outcome is always captured or none; a failed outcome is released, none or unsettled. Optional and additive; consumers may ignore it."
+      "description": "State of the CORE money hold at closure. A completed outcome is captured, partially_captured or none; a failed outcome is released, partially_captured, none or unsettled. `released` means no money moved at all, `partially_captured` means part of the consented amount moved and the remainder was released, and `unsettled` means CORE could not bring the hold to a terminal state. Optional and additive; consumers may ignore it, and a consumer that reads it must treat an unrecognised value as \"do not assume\" rather than as `released`."
     }
   },
   "examples": [

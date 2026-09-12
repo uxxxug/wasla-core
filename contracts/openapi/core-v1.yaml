@@ -669,7 +669,9 @@ paths:
         Reconciliation read. Returns fulfillments where execution state and
         settlement_state do not agree — for example a closed fulfillment whose
         hold could not be brought to a terminal state (settlement_state
-        `unsettled`). An empty list is the invariant CORE is expected to hold.
+        `unsettled`), or a failed or cancelled fulfillment whose hold had already
+        moved part of the payer's money (`partially_captured`). An empty list is
+        the invariant CORE is expected to hold.
       parameters:
         - name: organization_id
           in: query
@@ -685,7 +687,10 @@ paths:
       description: >-
         Returns opaque cross-system references, never order or job details.
         `status` is the execution state and `settlement_state` is its financial
-        counterpart (none, held, captured, released, unsettled).
+        counterpart (none, held, captured, partially_captured, released,
+        unsettled). `released` asserts that no money moved; `partially_captured`
+        asserts that part of the consented amount moved and the remainder was
+        released.
       parameters:
         - name: fulfillment_id
           in: path
