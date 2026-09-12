@@ -74,6 +74,25 @@ describe.skipIf(!url)("migration 0011 lifecycle", () => {
     );
   }
 
+  /**
+   * Rolls back one migration at a time until `version` itself is rolled back.
+   *
+   * The runner only ever removes the newest applied migration, so a test about
+   * 0011 has to peel off whatever was added after it. A loop rather than a
+   * fixed number of calls, because the fixed version is what broke when 0012
+   * arrived: the assertions silently started describing the wrong migration.
+   * A rejection from any step propagates, which is what step 5 relies on.
+   */
+  async function downThrough(version: string): Promise<{ stdout: string }> {
+    for (let i = 0; i < 20; i++) {
+      const applied = await versions();
+      const newest = applied[applied.length - 1];
+      const result = await migrate("down");
+      if (newest === version) return result;
+    }
+    throw new Error(`rollback never reached ${version}`);
+  }
+
   beforeAll(async () => {
     scratch = `wasla_mig_${Date.now().toString(36)}`;
     const parsed = new URL(url!);
@@ -95,7 +114,7 @@ describe.skipIf(!url)("migration 0011 lifecycle", () => {
 
     // 2. roll back to 0010 with no rows in the new state — the rollback must
     //    succeed, because nothing depends on the widened list.
-    const down = await migrate("down");
+    const down = await downThrough("0011_fulfillment_partial_settlement");
     expect(down.stdout).toContain("0011_fulfillment_partial_settlement");
     expect(await versions()).not.toContain("0011_fulfillment_partial_settlement");
 
@@ -127,7 +146,9 @@ describe.skipIf(!url)("migration 0011 lifecycle", () => {
     //    and the applied version must both still be there afterwards. This is
     //    the property that stops a rollback from silently rewriting money
     //    history into a value that is not true.
-    await expect(migrate("down")).rejects.toThrow(/partially_captured/);
+    await expect(downThrough("0011_fulfillment_partial_settlement")).rejects.toThrow(
+      /partially_captured/,
+    );
     expect(await versions()).toContain("0011_fulfillment_partial_settlement");
     expect(
       (await query("select 1 from fulfillment where settlement_state = 'partially_captured'")).rows,
