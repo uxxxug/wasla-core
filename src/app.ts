@@ -42,6 +42,8 @@ import { GeographyService } from "./modules/geography/service.js";
 import { registerGeographyRoutes } from "./modules/geography/http.js";
 import { SubscriptionService } from "./modules/subscription/service.js";
 import { registerSubscriptionRoutes } from "./modules/subscription/http.js";
+import { ReputationService } from "./modules/reputation/service.js";
+import { registerReputationRoutes } from "./modules/reputation/http.js";
 import {
   NotificationDispatcher,
   NotificationFanOut,
@@ -105,6 +107,11 @@ export interface CoreApp {
    */
   billing: SubscriptionService;
   fulfillment: FulfillmentService;
+  /**
+   * ADR 0015: reported reputation signals and the standing derived from them.
+   * No score is stored anywhere on this bundle or under it.
+   */
+  reputation: ReputationService;
   geography: GeographyService;
   clock: Clock;
   /**
@@ -270,6 +277,27 @@ export function createCoreApp(
     await fulfillment.consumeMoveCompletion(event);
   });
 
+  const reputation = new ReputationService(
+    store.reputation,
+    outbox,
+    boundary,
+    audit,
+    clock,
+  );
+  // Two subscriptions rather than one handler branching on the event type: each
+  // consumer name is a separate delivery position, so a poisoned retraction
+  // cannot stall the ingestion of new ratings behind it.
+  bus.subscribe("core.reputation.market-review", "market.review.rated", async (event) => {
+    await reputation.consumeReviewRated(event);
+  });
+  bus.subscribe(
+    "core.reputation.market-review-retraction",
+    "market.review.retracted",
+    async (event) => {
+      await reputation.consumeReviewRetracted(event);
+    },
+  );
+
   const notificationRecipients = new NotificationRecipientRegistry(
     store.notification,
     channelDirectory,
@@ -334,6 +362,7 @@ export function createCoreApp(
   registerDeliveryRoutes(router, subscriptions, identity);
   registerGeographyRoutes(router, geography, identity);
   registerSubscriptionRoutes(router, billing, identity);
+  registerReputationRoutes(router, reputation, identity);
   registerNotificationRoutes(router, notificationRecipients, notifications, identity);
 
   return {
@@ -360,6 +389,7 @@ export function createCoreApp(
     money,
     billing,
     fulfillment,
+    reputation,
     geography,
     clock,
     persistence: store.kind,

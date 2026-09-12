@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/market.review.retracted.v1.schema.json",
+  "title": "market.review.retracted v1",
+  "description": "Consumed by CORE when MARKET withdraws a rating it previously reported. CORE marks the signal retracted rather than deleting or reversing it: the row keeps stating what was reported and gains the fact that it was withdrawn, and a withdrawn signal stops counting towards any derived standing. A retraction naming a review CORE never received, or one already withdrawn, is answered rather than refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "review_reference",
+    "organization_id",
+    "reason",
+    "retracted_at"
+  ],
+  "properties": {
+    "review_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The same MARKET identifier the rating was reported under."
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The CORE tenant the signal belongs to."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Why the rating was withdrawn. Required: a withdrawal nobody can explain is a withdrawal nobody can review."
+    },
+    "retracted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When MARKET withdrew the rating."
+    }
+  },
+  "examples": [
+    {
+      "review_reference": "review-8821",
+      "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070",
+      "reason": "moderated as abusive content",
+      "retracted_at": "2026-09-12T11:00:00.000Z"
+    }
+  ]
+}

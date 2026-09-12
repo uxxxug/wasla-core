@@ -81,11 +81,19 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The CI database-gate scope reserved earlier in this cycle is
-closed: CI now runs the suite against a real PostgreSQL server, each Vitest
-worker owns its own database, and the migration-lifecycle files run in their own
-pass. The flake this repository carried for several cycles is explained and gone,
-and a second, worse defect was found while measuring it — see the cycle entry.
+Nothing is reserved. Two scopes were reserved and closed in this cycle, and both
+are now on `main`:
+
+- Reputation and trust signals (ADR 0015): migration 0018,
+  `src/modules/reputation/`, four contracts and `docs/reputation.md`. What is
+  left of it is not implementable in CORE — no producer publishes
+  `market.review.*` yet, and weighting, decay, thresholds and cross-tenant
+  aggregation are owner decisions recorded as **B-31…B-34**.
+- The CI database gate: CI now runs the suite against a real PostgreSQL server,
+  each Vitest worker owns its own database, and the migration-lifecycle files run
+  in their own pass. The flake this repository carried for several cycles is
+  explained and gone, and a worse defect — a suite verdict that depended on
+  scheduling — was found while measuring it.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -114,7 +122,9 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
 | 8 | Security hardening pass and observability export | **Observability export and ingress rate limiting complete; the hardening pass itself is bounded by B-5** | Deny-by-default RLS on every table (including the new `rate_limit_counter`), hardened `search_path`, token hashing, audit scrubbing, correlation ids — unchanged. Added in the 2026-09-12 (fifth) cycle: `src/platform/observability/` (a **declared** metric catalogue that refuses an undeclared name, a missing label, an extra label or an identifier-shaped label value; a deterministic Prometheus 0.0.4 renderer; per-worker counters and histograms; a `DepthSampler` on the operator's cadence, never on the scrape, with `core_sample_timestamp_seconds` and `core_sample_failures_total` so staleness is visible) and `src/platform/http/rate-limit.ts` + `pg-rate-limit.ts` + migration 0013 (fixed window, per hashed credential and route class, one atomic `insert … on conflict … do update … returning`, 429 with `retry-after`, workers unreachable from the limiter by construction). Scope decisions recorded in `docs/observability.md`: **system-level metrics only, never tenant-scoped**, and per-credential rather than per-organization keying because resolving a token to a tenant would put a database read in front of the limiter. 48 new tests × both backends where applicable, including a real-Postgres concurrency test falsified against a deliberately racy store. Still open: no tracing/span export (nothing consumes it; `correlation_id` already threads the audit trail), `/metrics` is unauthenticated and therefore depends on network placement (B-5), and lease expiry was not countable for three of the four workers (**B-24**, resolved in the 2026-09-12 worker-lease cycle by migration 0014) |
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
-| 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) arrive with the open reputation PR; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
+| 10 | Reputation and trust signals (ADR 0015) | **CORE side complete; ingestion has no producer, and the policy above the signals is not CORE's to decide** | This row is new, and its absence was the defect the cycle opened with: reputation was on the ownership list in `docs/data-ownership.md`, named as the one remaining gap in `README.md`, and missing from this table entirely — so the document that decides what is next could not have selected it. Now: migration 0018 (`reputation_signal`, append-only by trigger, closed `signal_kind` vocabulary, `UNIQUE (organization_id, source_system, source_reference)`, retraction marker), `src/modules/reputation/` (pure domain + port + Postgres adapter + service + two read routes), four contracts, `docs/reputation.md`, 28 tests × both backends including cross-backend equality of the grouped rows a standing folds from. No score and no review text is stored anywhere: a standing is derived on every read, and there is no column or contract field text could arrive in. Not implementable here: MARKET publishes neither `market.review.rated` nor `market.review.retracted` today, so no signal reaches a deployed CORE; `completion`/`cancellation` cannot be attributed at all until MOVE names the CORE identity that executed a job (external dependency below); weighting, decay, thresholds and cross-tenant aggregation are **B-31…B-34** |
+| 11 | CORE degradation rules (ADR 0010) | **Not implemented, and until this cycle not tracked here at all** | The second roadmap-source gap this cycle found. `docs/adr/README.md` has carried ADR 0010 as `not yet implemented | pending` since the foundation cycle, and no milestone or blocker in this document ever mentioned it, so it could not be selected as next work — the same failure that hid reputation, in a row nobody was reading. What exists today is fail-closed behaviour, not degradation policy: `/ready` reports the wired backend, the outbox relay, inbound dispatcher, delivery worker and notification dispatcher classify failures, retry with backoff, lease, reclaim within a budget (B-25) and dead-letter, and the HTTP surface answers canonical errors under rate limiting. What does not exist is a decision about what CORE *serves* while a dependency is down — whether access checks answer from a cache when Postgres is unreachable, whether reads degrade while writes refuse, and what MOVE and MARKET are told to do meanwhile. That is not implementable from the ADR's title, which is all this repository records of it: the ADR text is not in the repository. Recorded as **B-35** rather than guessed at, because a wrong degradation rule fails exactly when nothing else is working |
+| 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 
 ### What was claimed complete and actually is
 
@@ -168,6 +178,11 @@ Nothing.
 | B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
 | B-20 | What is owed when work fails after part of the hold was already captured | CORE records the truth and stops. A `failed`/`cancelled` fulfillment holding `settlement_state = 'partially_captured'` derives `financial_disposition = 'decision_required'`, both closure events carry `financial_decision_required: true` with the observed `captured_minor`, and `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly these cases apart from CORE defects. CORE does **not** refund, retain, split, or mark the operation settled. `MoneyService.refund` is exactly-once, so whichever answer is chosen is executable the day it exists | Five separate owner decisions, listed under "B-20 as a contract gap" in the 2026-09-12 (second) cycle: who states the executed amount, who decides whether partial work earns partial settlement, who authorises a refund, whether a cancellation fee exists, and which system sends the final disposition |
 | B-30 | What is owed when MOVE delivers work after the order was cancelled | CORE records the fact and stops. The fulfillment stays `cancelled` with the hold released, the marker columns added in migration 0017 say the work was performed anyway, `financial_disposition` derives `decision_required`, `core.fulfillment.executed_after_cancellation` carries it to MARKET, and no money moves. CORE cannot move any: the cancellation voided the hold, a voided hold cannot be captured, and re-charging a payer who has been told their order was cancelled is not a decision CORE was given. Raised by the B-29 cycle, which closed the part CORE owns — losing the fact — and left the part it does not | An owner decision, of exactly B-20's kind: whether MOVE is paid out of band, whether the payer is asked again or the order reinstated, and who absorbs the loss when neither happens. One answer per branch is enough; CORE has the reading and the event to act on it the moment the answer exists |
+| B-31 | How much each signal kind is worth against the others | CORE stores every signal with its kind and derives per-kind groups — count, and average rating where a rating exists — and stops there. It publishes no composite score and stores none. Deriving one would require CORE to decide what a dispute costs against a five-star rating, and that number is what decides who gets work: it is product policy under ADR 0018, not coordination | An owner decision, per branch, on the weights. CORE can fold them the day they exist: `deriveStanding` already receives the grouped rows and is pure, so a weighting is a function over data CORE already produces, with no schema change |
+| B-32 | Whether reputation decays, and how fast | Nothing decays. Every unretracted signal counts equally for ever, which is the only reading with no invented half-life — and it is stated rather than hidden: `occurred_at` (the producer's claim) and `recorded_at` (CORE's clock) are both stored per signal, so any decay function can be applied later over real timestamps without a backfill | An owner decision on the window and the curve, and on which of the two timestamps it is measured from |
+| B-33 | What standing is good enough — thresholds, gating, suspension | CORE answers reads and gates nothing. There is no minimum rating, no suspension state and no consumer of a standing inside CORE. A threshold would make CORE decide who may be offered work, which is MOVE's and MARKET's business rule | An owner decision on the thresholds and on which system enforces them. Note the shape of the enforcement question too: if the enforcing system needs a synchronous answer, that is a new path under ADR 0008 and needs its own ADR, exactly as B-14 does for entitlement |
+| B-34 | Whether a standing crosses tenants | A standing is per organization, because `reputation_signal.organization_id` scopes every signal and every read requires it. That is deliberate and it is the reversible direction: signals recorded per tenant can be aggregated later, whereas signals recorded globally cannot be separated afterwards. It is also a real limitation — the same identity working for two organizations has two standings, and neither reflects the whole | An owner decision that is as much legal as product: whether a person's record follows them across organizations, what a subject is told, and under what basis one tenant may see conduct reported by another. CORE will not infer it |
+| B-35 | ADR 0010's degradation rules are not recorded anywhere in this repository | CORE currently fails closed: a dependency that is unreachable produces a canonical error, a queue that cannot be worked retries with backoff, leases, a reclaim budget and finally a dead letter, and `/ready` says which backend is wired. Nothing is served from a stale cache and no write is accepted without its transaction, which is the reversible direction — a system that refused too much can be relaxed once the rules exist, whereas one that answered from a stale cache has already given wrong answers about access and money. But fail-closed is a consequence of the implementation, not a decision anybody wrote down, and the ADR that would decide it exists in this repository only as a title in `docs/adr/README.md` | The ADR 0010 text, or an owner decision standing in for it: which reads may degrade and from what source, whether an access check may ever be answered without Postgres and for how long, what happens to in-flight authorizations when the ledger is unreachable, and what CORE tells MOVE and MARKET while degraded. CORE will not invent it: a degradation rule takes effect precisely when nothing else is working, so the cost of guessing wrong is paid at the worst moment and is not observable in any test until then |
 | B-21 | **Resolved.** Two overlapping closures both committed, because the closing `update` named the row and not its version, so the loser overwrote the winner's terminal row and published a second closure event. `updateIfStatusIn` / `insertIfAbsent` return `applied` \| `stale` and the service treats `stale` as "somebody else closed it", so one closure produces one closure event. Money was never wrong; only the events were multi-valued | resolved | — |
 | B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
 | B-23 | **Resolved.** The three closure/dispatch payloads carried no `organization_id`, so a tenant-scoped notification recipient for them could never match and had to be refused outright (HTTP 400), and MARKET/MOVE could not route a closure without calling CORE back. CORE owns tenancy and is the only system that can state it, so the omission was CORE's to fix. `core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry a **required** `organization_id`, read from the fulfillment row rather than from any prior event — which is what makes it correct on the intake-refusal path, where the row is created and closed in one transaction and no `created` event is ever published. `TENANT_SCOPED_EVENT_TYPES` widened accordingly; the registry's refusal is unchanged and still guards `core.*` events that genuinely name no organization (`core.payment.captured`). Proven by `tests/fulfillment-lifecycle-contract.test.ts`, which also validates emitted payloads against the published schemas, and by an end-to-end fan-out test in `tests/notifications.test.ts` showing two tenants watching one event type and only the right one being messaged | resolved | — |
@@ -3716,6 +3731,244 @@ before it can be recovered: revive the `inbound_event` rows whose `last_error`
 carries `fulfillment was cancelled` (B-27, `npm run revive`) and the new path records
 them properly. No MOVE or MARKET code was read or written in this cycle.
 
+## Cycle 2026-09-12 (fourteenth) — reputation and trust signals in CORE (ADR 0015)
+
+Scope: the last capability on CORE's ownership list with no implementation and
+no blocking decision above it. Chosen from this document, and the choosing
+exposed the first defect before any code was written.
+
+### The roadmap was the first defect
+
+`docs/data-ownership.md` lists `Reputation` and `Trust signal` as CORE's, ADR
+0015 decides the split between CORE and MARKET, and `README.md` printed
+`Reputation | **not implemented**`. The "Remaining, in dependency order" table
+listed nine milestones and did not mention reputation in any of them. The
+document that decides what happens next could not have selected the one
+capability that was both owned and absent. Corrected by adding milestone 10
+rather than by quietly implementing around the omission, because the next cycle
+will read the table, not this paragraph.
+
+### What was built
+
+One table, migration 0018: `reputation_signal`, append-only, one row per
+reported fact.
+
+- `subject_type` ∈ {`identity`, `organization`} — CORE subjects only, never a
+  MOVE or MARKET entity.
+- `signal_kind` is a **closed** vocabulary: `service_rating`, `completion`,
+  `cancellation`, `dispute`, `compliment`, `complaint`. An open one would let a
+  producer invent a kind, be told it landed, and have every derived standing
+  ignore it — a fact accepted and then discarded is worse than a fact refused.
+- `rating_value` 1…5 for `service_rating` and `NULL` for everything else,
+  enforced in the schema, because a `dispute` carrying a 4 would be read as
+  satisfaction by anything that trusts the column.
+- `UNIQUE (organization_id, source_system, source_reference)` — exactly-once on
+  the producer's own reference, which is the only thing that can recognise a
+  retry that carries a new `event_id`.
+- `occurred_at` (the producer's claim) is stored and never used for ordering;
+  `recorded_at` (CORE's clock) orders everything, so one producer's skew cannot
+  reorder another's facts.
+- Retraction is a marker (`retracted_at` + `retraction_reason`, both or
+  neither, single-valued), not a delete and not a compensating negative signal.
+  A delete destroys the evidence that a rating was reported and counted; a
+  negative signal makes an average mix a rating with its own reversal, so no
+  reader can tell "withdrawn" from "rated twice". A retracted signal counts
+  towards `signal_count` and `retracted_count` and towards nothing else, and is
+  still listed, with its reason.
+- A trigger refuses `DELETE`, any field edit, a re-retraction and an
+  un-retraction. Not a service-layer rule: a trigger is the only thing that
+  also stops a migration or a console session.
+
+**No score is stored anywhere.** `GET /v1/reputation/{subject_type}/{subject_id}`
+groups the signals and folds them through a pure `deriveStanding` on every
+request. A cached aggregate would be a second source of truth for something the
+signals already determine, and this repository has paid that bill twice —
+settlement state drifting from the ledger (B-9's cycle) and the entitlement
+table ADR 0013 refused to create.
+
+**No review text can reach CORE.** There is no column for it and no field in
+`market.review.rated`, and the normaliser refuses a payload that invents one
+rather than dropping it. So MARKET stays the only place that can moderate,
+redact or delete what a person wrote.
+
+Two read routes, both requiring `reputation.read` (`platform_admin`,
+`org_admin`, `support_agent` — deliberately not `org_member`: reading everyone's
+standing is an administrative act, and not `service` either). No write route:
+signals arrive only as events, since a second ingestion path would have none of
+the properties the first one has, and ADR 0008 keeps the synchronous list
+closed. `average_rating_milli` is an integer in thousandths — a float would make
+two backends disagree in the last digit of a number shown to a person — and is
+`null`, never `0`, when nothing was rated, because a subject with no ratings is
+not a subject rated badly.
+
+Events published carry the fact and nothing derived. A running total computed at
+publication time is computed without whatever was recorded concurrently with it,
+so two events about one subject would each carry a different total and no
+consumer could tell which is current.
+
+### Defects found by the tests, and what they were
+
+**1. Both `CHECK` constraints accepted exactly the rows they existed to refuse.**
+Written first in the obvious form:
+
+```sql
+(signal_kind = 'service_rating' AND rating_value BETWEEN 1 AND 5)
+  OR (signal_kind <> 'service_rating' AND rating_value IS NULL)
+```
+
+A `service_rating` with `rating_value IS NULL` makes the first branch `NULL`, the
+second `false`, and `NULL OR false` is `NULL` — and a `CHECK` rejects only
+`FALSE`. The unratable rating was the one row the constraint let through. The
+retraction guard had the identical bug through `length(trim(NULL)) > 0`, so a
+withdrawal with a timestamp and no reason — an unreviewable withdrawal, the
+precise thing the constraint was written to prevent — was accepted. Both are now
+`CASE` expressions, which return a boolean on every input. Found because the
+constraints were asserted against real SQL rather than through the service,
+which had its own guards and would have hidden both for ever.
+
+**2. A test asserted an ordering CORE does not guarantee.** The audit assertion
+compared the two entries in the order the log returned them. Under a fixed clock
+both carry the same instant, so the order is an accident of the query plan: it
+passed on memory, passed on the first Postgres run, and failed on the next. It
+now compares sorted actions, and asserts what is actually guaranteed instead —
+the exact metadata key set of both entries, which is what proves no review text
+is in the audit trail rather than merely unasserted.
+
+**3. A guarantee had no test that could fail.** See below.
+
+### Mutation evidence
+
+Six mutations; the first five were killed by the suite as written, the sixth
+survived and was the finding.
+
+| Mutation | Result |
+|---|---|
+| Count retracted signals in the standing totals | 3 tests fail |
+| Drop `ON CONFLICT … DO NOTHING` from the insert | 1 test fails |
+| Average `0` instead of `null` with no ratings | 2 tests fail |
+| Grant `reputation.read` to `org_member` | 3 tests fail |
+| Order a listing by `occurred_at` instead of `recorded_at` | 2 tests fail |
+| **Delete `AND retracted_at IS NULL` from the retraction `UPDATE`** | **survived** |
+
+The survivor is B-12's failure mode in a new place. The service reads the signal,
+sees it is already retracted and returns early, so its own path never reaches
+the condition in the write — and that condition is the entire guarantee under
+concurrency, where two copies of one withdrawal both pass any preceding read.
+Closed by testing the port directly rather than by trusting the service: a new
+dual-backend test calls `insertIfAbsent` and `retractIfStanding` straight, and
+asserts a duplicate is *reported* rather than raised (at-least-once delivery
+makes redelivery the expected case, and an exception here would be retried until
+the event dead-lettered over an instruction already carried out), that a second
+withdrawal is `stale` and cannot overwrite the first reason, and that a
+reference from another tenant is not reachable. Re-running the mutation with
+that test present: 2 tests fail.
+
+### Tests and gates
+
+- `tests/reputation.test.ts`: 28 tests, every one against both backends, plus an
+  `afterAll` comparing the two backends' grouped rows and derived standings to
+  each other — a memory double more permissive than the database certifies bugs
+  (B-12), so the doubles restate the `CHECK`s and the `UNIQUE` themselves.
+- `tests/event-normalisation.test.ts`: the inventory now asserts the exact
+  six-type list, so a new inbound type cannot be added without being declared
+  here, plus acceptance and refusal cases for both new payloads.
+- Verified counts: **687 tests pass with `DATABASE_URL` set** (39 files), and
+  **385 pass with 48 skipped** in the dependency-free run CI performs. `README.md`
+  said 326/572 and is corrected. `tests/migration-0011-lifecycle.test.ts` still
+  times out in teardown under full-suite contention and passes in isolation
+  (2.1s) — pre-existing, unrelated to this cycle, and not silenced.
+- Governance, contracts (26 schemas, 17 emitted types covered) and migrations
+  (18 forward, all with rollbacks) all pass. Typecheck clean.
+
+### What CORE still needs from elsewhere
+
+**MARKET must publish:**
+
+| Direction | Contract | Note |
+|---|---|---|
+| publish | `market.review.rated` v1 | rating, subject and MARKET's opaque review reference — **no text**; CORE refuses a payload carrying any |
+| publish | `market.review.retracted` v1 | the same reference plus a reason; CORE marks, never deletes |
+
+Both are consumed today by the local bus and **no producer exists**. Until one
+does, no reputation signal exists in a deployed CORE and `service_rating` is the
+only reachable kind. Recorded in `docs/event-catalog.md` on the rows themselves
+rather than in prose only.
+
+**MOVE must name the CORE identity that executed a job.** This is a finding, not
+an oversight. CORE closes fulfillments and therefore knows every completion and
+cancellation, but it cannot attribute one: the executor appears in CORE only as
+an opaque `move_job_reference`, and no CORE-owned field names the identity
+behind it. So the `completion` and `cancellation` kinds exist in the vocabulary
+and cannot be recorded from CORE's own knowledge. Either MOVE includes the CORE
+identity in its job reports, or those kinds stay unreachable. CORE will not
+infer an identity from an opaque reference.
+
+### Decisions recorded, deliberately not implemented
+
+- **No reputation event was added to `TENANT_SCOPED_EVENT_TYPES` and no
+  notification template was written.** Both payloads carry `organization_id`, so
+  either could be routed — but a message telling a person their rating was
+  recorded is product messaging, and reviews are MARKET's surface. CORE
+  publishing it would put the same message in two systems' hands.
+- **Only Postgres enforces the `organization_id` foreign key.** The in-memory
+  double restates the `CHECK`s and the `UNIQUE` but has no organization table to
+  reference. Stated here because B-12 is about divergences being discovered by
+  production rather than by a test; this one is known, bounded, and covered by
+  the cross-backend comparison for everything the double *can* express.
+- **No standing threshold, weight, decay or cross-tenant rule** — B-31…B-34
+  above, with the reason each is a decision rather than a gap.
+
+Milestones 1, 3, 4, 6, 8 and now 10 are CORE-complete; 2 is partial with
+multi-hold blocked; 5 waits on external adoption; 7 remains blocked on B-2/B-3
+and 9 on B-5/B-6. **B-2…B-6**, **B-14…B-20**, **B-30**, the new **B-31…B-34** and
+**D-6…D-8** are open owner decisions. No MOVE or MARKET code was read or written
+in this cycle.
+
+### CI verdict for this cycle — read, not assumed
+
+Head `069bd67` on `reputation-adr-0015`, pushed to `uxxxug/wasla-core`:
+
+| Run | Event | Verdict |
+|---|---|---|
+| `34716967545` | push | **success**, 38s |
+| `34716991234` | pull_request (PR #2 → `main`) | **success**, 32s |
+
+The `verify` job passes on both. What that verdict does **not** cover, stated so
+no later reader mistakes green for proof: CI sets no `DATABASE_URL`, so the 302
+database-backed assertions — every Postgres half of the dual-backend suites, the
+append-only trigger, both corrected `CHECK` constraints and the live-schema
+checks — are **skipped there** and were verified locally against PostgreSQL 18.6
+(687 passing). Migration 0018 has been applied and rolled forward locally only;
+no deployed database has run it. Per this repository's own rule, code and tests
+existing is not production proof.
+
+PR #1 (the reservation entry) was merged to `main` before implementation began;
+PR #2 carries the implementation and is open for review.
+
+### Second finding of this cycle: a milestone nobody could select
+
+Reputation was missing from the milestone table (fixed as milestone 10 above).
+Looking for other rows in the same state turned up one: **ADR 0010, CORE
+degradation rules**, carried as `pending` in `docs/adr/README.md` since the
+foundation cycle and mentioned nowhere in this document — not as a milestone, not
+as a blocker, not as an external dependency. Two capabilities were therefore
+invisible to the process that decides what happens next, and only one of them was
+implementable.
+
+Recorded as milestone 11 and **B-35** rather than implemented, and the
+distinction matters: reputation had an ADR that decided the design, so CORE could
+build it. ADR 0010's text is not in this repository, so implementing "degradation
+rules" would mean CORE inventing the policy that governs what it does when
+nothing works — a rule whose cost is paid at the worst possible moment and which
+no test can expose beforehand. What exists today is stated in the blocker: CORE
+fails closed, deliberately, because that is the direction that can be relaxed
+later.
+
+With that, no CORE-owned capability on the ownership list is both unimplemented
+and unblocked. Every remaining milestone waits on something CORE does not own:
+milestone 2's multi-hold on a MARKET contract decision, 5 on MOVE/MARKET
+adoption, 7 on B-2/B-3, 9 on B-5/B-6, 10's ingestion on a MARKET producer and its
+policy on B-31…B-34, and 11 on B-35.
 ## Cycle 2026-09-13 (fifteenth) — the gate was not measuring the thing it gated
 
 Scope: make CI run the half of the suite it had never run. No feature was added
@@ -3831,7 +4084,10 @@ Head `5f51d9b` on `ci-database-gate`, run `34722170193` (push):
 | `Verify without a database` | **success**, 32s | the dependency-free pass still stands on its own |
 | `Verify against PostgreSQL` | **success**, 1m37s | migrations 0001…0017 applied against `postgres:16`; **656 tests passed in 37 files** with `DATABASE_URL` set, then the migration-lifecycle pass **1 passed in 4.74s**; newest migration rolled back and re-applied |
 
-657 assertions now run in CI where 368 ran before. The number that matters most
+657 assertions now run in CI where 368 ran before — and **687** once this branch
+was brought up to date with the reputation module already on `main`, measured on
+the merge commit: 686 in the main pass plus the migration-lifecycle pass, and 385
+with 47 skipped in the dependency-free run. The number that matters most
 is the 4.74s: the file this repository called a flake for several cycles, which
 timed out at 60s under contention, completes in under five seconds once nothing
 competes with it — which is the evidence that the diagnosis was contention rather

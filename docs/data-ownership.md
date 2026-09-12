@@ -35,6 +35,20 @@ marketplace and B2B/partner commerce surfaces, store pricing.
 
 Enforced by `scripts/check-governance.mjs` and `tests/governance.test.ts`.
 
+## Reputation, where the line actually falls
+
+`Reputation` and `Trust signal` above are CORE's; `commercial review content`
+under MARKET is not. The split is enforced by shape, not by convention: the
+`reputation_signal` table has no text column beyond a retraction reason, and the
+`market.review.rated` contract has no field a review could arrive in — an
+inbound payload that invents one is refused rather than trimmed. CORE holds the
+rating, the subject, the producer and the producer's opaque reference to the
+review; MARKET holds what a person wrote, and is therefore the only system that
+can moderate it, redact it or delete it.
+
+A standing is CORE's answer and CORE stores none of it: it is derived from the
+signals on every read. See `docs/reputation.md`.
+
 ## Cross-references CORE may hold
 
 `order_ref`, `job_ref`, `fulfillment_ref` — opaque strings. CORE stores them to

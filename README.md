@@ -39,14 +39,14 @@ package, no cross-database access.
 | Execution/money consistency: `settlement_state`, hold verification at intake, reconciliation read | implemented, covered by the fulfillment settlement tests |
 | Subscriptions: periods, collection, past-due, renewal sweep, cancellation, expiry | implemented |
 | Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
-| Reputation | **not implemented** |
+| Reputation: append-only signals, exactly-once ingestion, retraction marker, standing derived on every read | implemented; no producer publishes `market.review.*` yet, and weighting/decay/thresholds are undecided (B-31…B-34) |
 
-**368 tests** pass in the dependency-free default run and **657** with
+**385 tests** pass in the dependency-free default run and **687** with
 `DATABASE_URL` set, because the database-backed files stop being skipped and the
 dual-backend suites run their Postgres half.
 
 **Both numbers are now produced by CI, on every push.** They were not until the
-CI database cycle: the workflow set no `DATABASE_URL`, so roughly 290 assertions
+CI database cycle: the workflow set no `DATABASE_URL`, so roughly 300 assertions
 — every Postgres adapter, every trigger, every check constraint, every
 live-schema check — were skipped in the only place that gates a merge, and each
 cycle's "verified against Postgres" meant verified on somebody's laptop. There

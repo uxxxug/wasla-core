@@ -32,6 +32,7 @@ import { testId } from "./support/ids.js";
 const RECEIVED_AT = "2026-03-04T10:00:00.000Z";
 const ORG = testId("norm-org");
 const FULFILLMENT = testId("norm-fulfillment");
+const SUBJECT = testId("norm-subject");
 
 function envelope(
   eventType: string,
@@ -291,7 +292,89 @@ describe("inbound event normalisation", () => {
     // Two lists would drift, and the drift would be silent in the worst
     // direction: a type accepted at the edge that no normaliser can read.
     expect([...ACCEPTED_INBOUND_TYPES].sort()).toEqual([...normalizableEventTypes()].sort());
-    expect(normalizableEventTypes()).toHaveLength(4);
+    // The list itself, not just its length: a count alone would pass if a type
+    // were replaced by another, and this is the list that decides what CORE will
+    // accept at its edge.
+    expect([...normalizableEventTypes()].sort()).toEqual([
+      "market.order.created",
+      "market.review.rated",
+      "market.review.retracted",
+      "move.job.accepted",
+      "move.job.completed",
+      "move.job.rejected",
+    ]);
+  });
+
+  it("reads a rating without letting the review in with it", () => {
+    const event = accepted(
+      envelope("market.review.rated", {
+        review_reference: "review-1",
+        organization_id: ORG,
+        subject_type: "identity",
+        subject_id: SUBJECT,
+        rating: 4,
+        rated_at: "2026-03-04T08:30:00.000Z",
+      }),
+    );
+    expect(event.payload).toEqual({
+      review_reference: "review-1",
+      organization_id: ORG,
+      subject_type: "identity",
+      subject_id: SUBJECT,
+      rating: 4,
+      rated_at: "2026-03-04T08:30:00.000Z",
+    });
+    expect(event.organization_id).toBe(ORG);
+
+    // The field a review's text would arrive in does not exist, and inventing
+    // one is refused rather than dropped: ADR 0015 keeps content in MARKET, and
+    // a payload CORE silently trimmed would let a producer believe CORE had
+    // stored what it wrote.
+    expect(
+      rejection(
+        envelope("market.review.rated", {
+          review_reference: "review-1",
+          organization_id: ORG,
+          subject_type: "identity",
+          subject_id: SUBJECT,
+          rating: 4,
+          rated_at: "2026-03-04T08:30:00.000Z",
+          comment: "terrible service",
+        }),
+      ).detail,
+    ).toContain("comment");
+  });
+
+  it("refuses a rating out of bounds, a subject CORE does not own and a retraction with no reason", () => {
+    const rated = (overrides: Record<string, unknown>) =>
+      rejection(
+        envelope("market.review.rated", {
+          review_reference: "review-2",
+          organization_id: ORG,
+          subject_type: "identity",
+          subject_id: SUBJECT,
+          rating: 4,
+          rated_at: "2026-03-04T08:30:00.000Z",
+          ...overrides,
+        }),
+      ).detail;
+    // Out of range, not an integer, and absent: all refused at the boundary
+    // rather than stored and averaged.
+    expect(rated({ rating: 6 })).toContain("rating");
+    expect(rated({ rating: 0 })).toContain("rating");
+    expect(rated({ rating: 4.5 })).toContain("rating");
+    // A rating about a MOVE or MARKET entity has no subject in CORE.
+    expect(rated({ subject_type: "operational_job" })).toContain("subject_type");
+
+    expect(
+      rejection(
+        envelope("market.review.retracted", {
+          review_reference: "review-2",
+          organization_id: ORG,
+          retracted_at: "2026-03-04T09:30:00.000Z",
+        }),
+      ).detail,
+    ).toContain("reason");
   });
 
   it("raises a 400-shaped error at the edge", () => {

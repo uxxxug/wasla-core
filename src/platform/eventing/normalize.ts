@@ -64,6 +64,32 @@ export interface MoveJobRejectedPayload {
   rejected_at: string;
 }
 
+/**
+ * A rating MARKET collected, without the review it came from (ADR 0015).
+ *
+ * There is no text field, and there is not going to be one: review content
+ * belongs to MARKET, and a copy in CORE would be a second place to moderate,
+ * redact and honour a deletion request from. `review_reference` is MARKET's own
+ * identifier for the review, opaque to CORE and used only as the exactly-once
+ * key, so CORE can refuse a duplicate without knowing what was written.
+ */
+export interface MarketReviewRatedPayload {
+  review_reference: string;
+  organization_id: string;
+  subject_type: "identity" | "organization";
+  subject_id: string;
+  rating: number;
+  rated_at: string;
+}
+
+/** MARKET withdrawing a rating it previously reported. */
+export interface MarketReviewRetractedPayload {
+  review_reference: string;
+  organization_id: string;
+  reason: string;
+  retracted_at: string;
+}
+
 export interface MoveJobCompletedPayload {
   fulfillment_id: string;
   job_id: string;
@@ -237,6 +263,66 @@ const RULES: Readonly<Record<string, TypeRules>> = {
       },
     },
     tenant: (payload) => (payload as MarketOrderCreatedPayload).organization_id,
+  },
+  "market.review.rated": {
+    versions: {
+      1: (payload) => {
+        noExtraFields(payload, [
+          "review_reference",
+          "organization_id",
+          "subject_type",
+          "subject_id",
+          "rating",
+          "rated_at",
+        ]);
+        const subjectType = requiredString(payload, "subject_type");
+        if (subjectType !== "identity" && subjectType !== "organization") {
+          // The subject of a reputation signal is a CORE entity. A rating about
+          // a MARKET or MOVE entity has nowhere to go in CORE and is refused
+          // rather than attributed to something CORE does not own.
+          fail(`subject_type must be "identity" or "organization"`);
+        }
+        const rating = payload["rating"];
+        if (!Number.isInteger(rating) || (rating as number) < 1 || (rating as number) > 5) {
+          // Bounds are the contract's, not a domain import: this file is the
+          // executable twin of the published schema, and a normaliser that
+          // reached into a module would make the boundary run the wrong way.
+          fail("rating must be an integer between 1 and 5");
+        }
+        const canonical: MarketReviewRatedPayload = {
+          review_reference: requiredString(payload, "review_reference"),
+          organization_id: requiredId(payload, "organization_id"),
+          subject_type: subjectType,
+          subject_id: requiredId(payload, "subject_id"),
+          rating: rating as number,
+          rated_at: requiredInstant(payload, "rated_at"),
+        };
+        return canonical;
+      },
+    },
+    tenant: (payload) => (payload as MarketReviewRatedPayload).organization_id,
+  },
+  "market.review.retracted": {
+    versions: {
+      1: (payload) => {
+        noExtraFields(payload, [
+          "review_reference",
+          "organization_id",
+          "reason",
+          "retracted_at",
+        ]);
+        const canonical: MarketReviewRetractedPayload = {
+          review_reference: requiredString(payload, "review_reference"),
+          organization_id: requiredId(payload, "organization_id"),
+          // Required, not optional: a withdrawal nobody can explain is a
+          // withdrawal nobody can review, and the schema refuses it too.
+          reason: requiredString(payload, "reason"),
+          retracted_at: requiredInstant(payload, "retracted_at"),
+        };
+        return canonical;
+      },
+    },
+    tenant: (payload) => (payload as MarketReviewRetractedPayload).organization_id,
   },
   "move.job.accepted": {
     versions: {
