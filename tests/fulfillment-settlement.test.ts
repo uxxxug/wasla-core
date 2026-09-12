@@ -290,7 +290,7 @@ describe("an unreleasable hold is reported, never swallowed", () => {
       voidWithin: async () => {
         throw new Error("a captured authorization cannot be voided");
       },
-      getAuthorization: async () => ({ status: "authorized", expires_at: null }),
+      getAuthorization: async () => ({ status: "authorized", captured_minor: 0, expires_at: null }),
     };
   }
 

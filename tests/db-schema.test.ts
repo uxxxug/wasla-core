@@ -97,11 +97,21 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
     ["coordinating", "held"],
     ["dispatched", "held"],
     ["completed", "captured"],
+    // A job that cost less than the consented ceiling: part of the hold moved
+    // and the remainder was released. Legitimate since migration 0009 made a
+    // hold capturable in legs.
+    ["completed", "partially_captured"],
     ["completed", "unsettled"],
     ["failed", "released"],
     ["failed", "unsettled"],
     ["cancelled", "released"],
     ["cancelled", "unsettled"],
+    // Storable on purpose: money moved for work that did not complete. It is a
+    // true statement about a real outcome, so the schema records it rather than
+    // forcing the service to write `released` — which would claim nothing
+    // moved. The reconciliation read is what flags it (blocker B-20).
+    ["failed", "partially_captured"],
+    ["cancelled", "partially_captured"],
   ])("accepts %s / %s, which CORE actually produces", async (status, settlement) => {
     expect(await insertFulfillment(status, settlement)).toEqual({ accepted: true });
   });
@@ -115,6 +125,9 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
     ["dispatched", "released"],
     ["coordinating", "released"],
     ["completed", "released"],
+    // Open work may never claim a terminal money state, including the new one.
+    ["coordinating", "partially_captured"],
+    ["dispatched", "partially_captured"],
   ])("refuses %s / %s as financially inconsistent", async (status, settlement) => {
     const result = await insertFulfillment(status, settlement);
     expect(result.accepted).toBe(false);
@@ -122,8 +135,15 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
   });
 
   it("refuses a settlement_state outside the known vocabulary", async () => {
-    const result = await insertFulfillment("completed", "partially_captured");
-    expect(result.accepted).toBe(false);
+    // Deliberately not a plausible near-miss: the point is that the value list
+    // is closed, so a state the domain has never heard of cannot be persisted
+    // by a future adapter that invents one.
+    const result = await insertFulfillment("completed", "settled_somehow");
+    if (result.accepted) throw new Error("an unknown settlement_state was persisted");
+    // Two constraints reject it and Postgres names whichever it evaluated
+    // first, so the assertion is that a settlement constraint refused it — not
+    // which one, which would pin an evaluation order nothing guarantees.
+    expect(result.constraint).toMatch(/^fulfillment_settlement_/);
   });
 
   it("pins a search_path on every trigger function", async () => {
