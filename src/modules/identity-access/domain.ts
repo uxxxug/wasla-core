@@ -90,6 +90,12 @@ export type Permission =
   | "money.authorize"
   | "support.act"
   | "events.submit"
+  // Replaying history is separate from submitting an event, and much stronger:
+  // it can re-drive consumers over facts from months ago and, in `reapply` mode,
+  // ask handlers to act on them again. `events.submit` is held by every service
+  // caller, so reusing it would have handed MARKET and MOVE the ability to
+  // replay CORE's history. It is granted to `platform_admin` alone.
+  | "events.replay"
   // Plans and their prices are operator territory; reading a subscription is
   // not. Split into two so a tenant can see what it is paying for without
   // also being able to publish a plan or collect a charge. The names are
@@ -113,6 +119,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "money.authorize",
     "support.act",
     "events.submit",
+    "events.replay",
     "subscription.read",
     "subscription.write",
   ],

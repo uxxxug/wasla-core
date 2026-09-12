@@ -33,6 +33,7 @@ import { PgSubscriptionRepository } from "../../modules/subscription/pg-reposito
 import type { OrganizationRepository } from "../../modules/organization/service.js";
 import { PgOrganizationRepository } from "../../modules/organization/pg-repository.js";
 import type { Queryable } from "./postgres.js";
+import { InProcessReplayLock, PgAdvisoryReplayLock, type ReplayLock } from "../replay/lock.js";
 import { PgTransactionBoundary } from "./postgres.js";
 import { InMemoryTransactionBoundary, type TransactionBoundary } from "./transaction.js";
 
@@ -55,6 +56,13 @@ export interface Persistence {
   /** Notifications to people, as opposed to `delivery`, which is to systems. */
   notification: NotificationStore;
   boundary: TransactionBoundary;
+  /**
+   * Mutual exclusion for replay runs. Part of the bundle because the correct
+   * lock depends entirely on the backend: in-process is right for the memory
+   * store and wrong for Postgres, where two CORE instances share one database
+   * and only the database can arbitrate between them.
+   */
+  replayLock: ReplayLock;
   /**
    * Ingress rate-limit windows. Part of the bundle so that choosing Postgres and
    * choosing the shared, cross-instance limiter is one decision rather than two:
@@ -87,6 +95,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     delivery: new InMemoryDeliveryStore(),
     notification: new InMemoryNotificationStore(),
     boundary: new InMemoryTransactionBoundary(),
+    replayLock: new InProcessReplayLock(),
     rateLimit: new InMemoryRateLimitWindowStore(),
     identity: new InMemoryIdentityRepository(),
     organization: new InMemoryOrganizationRepository(),
@@ -115,6 +124,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     delivery: new PgDeliveryStore(pool, clock),
     notification: new PgNotificationStore(pool),
     boundary: new PgTransactionBoundary(pool as never),
+    replayLock: new PgAdvisoryReplayLock(pool),
     rateLimit: new PgRateLimitWindowStore(pool),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),

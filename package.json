@@ -3,12 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "WASLA CORE — shared operating layer, shared engines, event backbone, fulfillment coordination.",
+  "description": "WASLA CORE \u2014 shared operating layer, shared engines, event backbone, fulfillment coordination.",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "replay": "vite-node src/platform/replay/cli.ts --",
     "test": "vitest run",
     "check:governance": "node scripts/check-governance.mjs",
     "check:roadmap": "node scripts/check-roadmap.mjs",

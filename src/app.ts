@@ -6,6 +6,7 @@ import { memoryPersistence, type Persistence } from "./platform/persistence/back
 import { type TransactionBoundary } from "./platform/persistence/transaction.js";
 import { OutboxPublisher } from "./platform/eventing/publisher.js";
 import { EventIngress } from "./platform/eventing/ingress.js";
+import { ReplayService } from "./platform/replay/service.js";
 import { registerIngressRoutes } from "./platform/eventing/ingress-http.js";
 import { InboundDispatcher } from "./platform/eventing/dispatcher.js";
 import {
@@ -58,6 +59,14 @@ export interface CoreApp {
   publisher: OutboxPublisher;
   ingress: EventIngress;
   dispatcher: InboundDispatcher;
+  /**
+   * Historical replay (milestone 6). On the bundle rather than behind the CLI so
+   * it is the same object, with the same consumers subscribed, that an operator
+   * drives and a test asserts on. A replay path wired separately from the
+   * application would be a second delivery path, and the whole point is that
+   * there is only one.
+   */
+  replay: ReplayService;
   subscriptions: SubscriptionRegistry;
   deliveries: DeliveryWorker;
   /**
@@ -187,8 +196,18 @@ export function createCoreApp(
   );
   // Ingress records; the dispatcher is what actually hands the event over.
   // Splitting them is the point: see `EventIngress` and `InboundDispatcher`.
-  const ingress = new EventIngress(store.inbound, (work) =>
-    boundary.run((scope) => work(scope)),
+  const ingress = new EventIngress(
+    store.inbound,
+    (work) => boundary.run((scope) => work(scope)),
+    clock,
+  );
+  const replay = new ReplayService(
+    store.inbound,
+    bus,
+    inbox,
+    audit,
+    clock,
+    store.replayLock,
   );
   const dispatcher = new InboundDispatcher(
     store.inbound,
@@ -310,6 +329,7 @@ export function createCoreApp(
     publisher,
     ingress,
     dispatcher,
+    replay,
     subscriptions,
     deliveries,
     notificationRecipients,
