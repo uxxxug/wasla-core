@@ -1,0 +1,156 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+/**
+ * The full lifecycle of migration 0011 against a real PostgreSQL server.
+ *
+ * 0011 widened two check constraints so a fulfillment can record
+ * `partially_captured`, and its rollback deliberately **refuses** while any row
+ * holds that value: narrowing the list back leaves no honest value for such a
+ * row — `released` would claim no money moved and `captured` would claim all of
+ * it did. That refusal is the safety property, so it is tested rather than
+ * described, in both directions: it must refuse when such a row exists and it
+ * must succeed when none does.
+ *
+ * Everything runs in a throwaway database created and dropped by this suite. It
+ * applies and rolls back real DDL, so sharing the development database with the
+ * rest of the suite would make the two interfere.
+ */
+
+const url = process.env.DATABASE_URL;
+const run = promisify(execFile);
+
+const ORG = "11111111-1111-4111-8111-111111111111";
+
+describe.skipIf(!url)("migration 0011 lifecycle", () => {
+  let adminUrl: string;
+  let scratchUrl: string;
+  let scratch: string;
+
+  async function admin<T = unknown>(sql: string): Promise<{ rows: T[] }> {
+    const { Client } = await import("pg");
+    const client = new Client({ connectionString: adminUrl });
+    await client.connect();
+    try {
+      return (await client.query(sql)) as unknown as { rows: T[] };
+    } finally {
+      await client.end();
+    }
+  }
+
+  async function query<T = unknown>(sql: string): Promise<{ rows: T[] }> {
+    const { Client } = await import("pg");
+    const client = new Client({ connectionString: scratchUrl });
+    await client.connect();
+    try {
+      return (await client.query(sql)) as unknown as { rows: T[] };
+    } finally {
+      await client.end();
+    }
+  }
+
+  /** The real runner, against the scratch database only. */
+  async function migrate(...args: string[]): Promise<{ stdout: string; stderr: string }> {
+    return await run("node", ["scripts/db-migrate.mjs", ...args], {
+      env: { ...process.env, DATABASE_URL: scratchUrl },
+    });
+  }
+
+  async function versions(): Promise<string[]> {
+    const result = await query<{ version: string }>(
+      "select version from schema_migrations order by version",
+    );
+    return result.rows.map((row) => row.version);
+  }
+
+  /** A fulfillment row written straight to SQL, bypassing the service. */
+  async function insertFulfillment(reference: string, settlement: string, status: string) {
+    await query(
+      `insert into fulfillment (fulfillment_id, organization_id, market_order_reference,
+         status, settlement_state, created_at, completed_at)
+       values (gen_random_uuid(), '${ORG}', '${reference}', '${status}', '${settlement}',
+         now(), now())`,
+    );
+  }
+
+  beforeAll(async () => {
+    scratch = `wasla_mig_${Date.now().toString(36)}`;
+    const parsed = new URL(url!);
+    adminUrl = url!;
+    parsed.pathname = `/${scratch}`;
+    scratchUrl = parsed.toString();
+    await admin(`create database ${scratch}`);
+  }, 60_000);
+
+  afterAll(async () => {
+    if (scratch) await admin(`drop database if exists ${scratch}`);
+  }, 60_000);
+
+  it("applies cleanly to an empty database, then over existing data, and rolls back and forward again", async () => {
+    // 1. apply clean
+    const first = await migrate("up");
+    expect(first.stdout).toContain("0011_fulfillment_partial_settlement");
+    expect(await versions()).toContain("0011_fulfillment_partial_settlement");
+
+    // 2. roll back to 0010 with no rows in the new state — the rollback must
+    //    succeed, because nothing depends on the widened list.
+    const down = await migrate("down");
+    expect(down.stdout).toContain("0011_fulfillment_partial_settlement");
+    expect(await versions()).not.toContain("0011_fulfillment_partial_settlement");
+
+    // 3. apply over existing data: rows written under the pre-0011 constraints
+    //    must survive the widening untouched.
+    await query(
+      `insert into organization (organization_id, name, country_code, source_system)
+       values ('${ORG}', 'migration-lifecycle', 'SA', 'test')`,
+    );
+    await insertFulfillment("mig-released", "released", "cancelled");
+    await insertFulfillment("mig-captured", "captured", "completed");
+    await migrate("up");
+    const survived = await query<{ market_order_reference: string; settlement_state: string }>(
+      "select market_order_reference, settlement_state from fulfillment order by market_order_reference",
+    );
+    expect(survived.rows).toEqual([
+      { market_order_reference: "mig-captured", settlement_state: "captured" },
+      { market_order_reference: "mig-released", settlement_state: "released" },
+    ]);
+
+    // 4. the widened constraint actually accepts the new pair, and still
+    //    refuses a value outside the list.
+    await insertFulfillment("mig-partial", "partially_captured", "cancelled");
+    await expect(insertFulfillment("mig-nonsense", "settled_somehow", "cancelled")).rejects.toThrow(
+      /fulfillment_settlement_/,
+    );
+
+    // 5. rollback with a real row in the new state: it must refuse, and the row
+    //    and the applied version must both still be there afterwards. This is
+    //    the property that stops a rollback from silently rewriting money
+    //    history into a value that is not true.
+    await expect(migrate("down")).rejects.toThrow(/partially_captured/);
+    expect(await versions()).toContain("0011_fulfillment_partial_settlement");
+    expect(
+      (await query("select 1 from fulfillment where settlement_state = 'partially_captured'")).rows,
+    ).toHaveLength(1);
+
+    // 6. once the operator has decided what those rows are — which is the part
+    //    CORE cannot decide for them — the rollback goes through, and 0011
+    //    re-applies afterwards. Deleting here stands in for that decision; it is
+    //    a scratch database, not a policy.
+    await query("delete from fulfillment where settlement_state = 'partially_captured'");
+    await migrate("down");
+    expect(await versions()).not.toContain("0011_fulfillment_partial_settlement");
+    // Narrowed again: the pair the rollback exists to protect is refused.
+    await expect(
+      insertFulfillment("mig-partial-again", "partially_captured", "cancelled"),
+    ).rejects.toThrow(/fulfillment_settlement_/);
+
+    // 7. re-apply
+    await migrate("up");
+    expect(await versions()).toContain("0011_fulfillment_partial_settlement");
+    await insertFulfillment("mig-partial-reapplied", "partially_captured", "failed");
+    expect(
+      (await query("select 1 from fulfillment where settlement_state = 'partially_captured'")).rows,
+    ).toHaveLength(1);
+  }, 120_000);
+});
