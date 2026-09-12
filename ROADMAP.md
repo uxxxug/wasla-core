@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Milestone 4 — notifications to people. A CORE state change now reaches a person through the same outbox it already used to reach a system: transactional outbox → leased claim → channel adapter → accepted / retryable / permanent, with a stable idempotency key, restart recovery and fencing. Building it exposed **B-22**: three of the four background workers claimed work by *reading* (`select … for update skip locked` as a single autocommit statement), so two workers received the same rows — measured at 100% overlap on a real database. All six claim implementations now claim by writing a lease. 440 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 440 passed / 29 files; `npm test` without a database 246 passed / 39 skipped; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
+**Last milestone:** Milestone 8 — metrics export and rate limiting on the ingress edge. CORE can now be asked, from inside itself, how much arrived, how much was refused, how much is waiting, how much is retrying, what failed for good and how many financial decisions are queued — through one deterministic `GET /metrics` (Prometheus text exposition 0.0.4) that runs no query and changes no state. The HTTP edge refuses a caller that asks too often with 429, `retry-after` and `x-ratelimit-*`, keyed on the hashed credential rather than the address, counted by a single atomic upsert so the B-22 read-then-write shape cannot recur. Metrics are **system-level only**: no metric carries a tenant or an entity dimension, and the guard that enforces it is asserted, not intended. 488 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 488 passed / 31 files (run twice); `npm test` without a database 273 passed / 41 skipped; governance, contract, migration and roadmap gates passing. Migration 0013 applied, rolled back and re-applied on PostgreSQL 18.6. Instrumentation overhead measured, not asserted: ≈ +1 µs per request for the metrics, ≈ +5 µs for the in-process limiter, ≈ +200 µs (one statement) for the shared Postgres limiter.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -100,7 +100,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
 | 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
 | 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
-| 8 | Security hardening pass and observability export | **Partially complete** | Deny-by-default RLS on every table, hardened `search_path`, token hashing, audit scrubbing, correlation ids. No metrics/trace export, no rate limiting on the new ingress edge |
+| 8 | Security hardening pass and observability export | **Observability export and ingress rate limiting complete; the hardening pass itself is bounded by B-5** | Deny-by-default RLS on every table (including the new `rate_limit_counter`), hardened `search_path`, token hashing, audit scrubbing, correlation ids — unchanged. Added in the 2026-09-12 (fifth) cycle: `src/platform/observability/` (a **declared** metric catalogue that refuses an undeclared name, a missing label, an extra label or an identifier-shaped label value; a deterministic Prometheus 0.0.4 renderer; per-worker counters and histograms; a `DepthSampler` on the operator's cadence, never on the scrape, with `core_sample_timestamp_seconds` and `core_sample_failures_total` so staleness is visible) and `src/platform/http/rate-limit.ts` + `pg-rate-limit.ts` + migration 0013 (fixed window, per hashed credential and route class, one atomic `insert … on conflict … do update … returning`, 429 with `retry-after`, workers unreachable from the limiter by construction). Scope decisions recorded in `docs/observability.md`: **system-level metrics only, never tenant-scoped**, and per-credential rather than per-organization keying because resolving a token to a tenant would put a database read in front of the limiter. 48 new tests × both backends where applicable, including a real-Postgres concurrency test falsified against a deliberately racy store. Still open: no tracing/span export (nothing consumes it; `correlation_id` already threads the audit trail), `/metrics` is unauthenticated and therefore depends on network placement (B-5), and lease expiry is not countable for three of the four workers (**B-24**) |
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
 
 ### What was claimed complete and actually is
@@ -157,6 +157,7 @@ Nothing.
 | B-21 | **Resolved.** Two overlapping closures both committed, because the closing `update` named the row and not its version, so the loser overwrote the winner's terminal row and published a second closure event. `updateIfStatusIn` / `insertIfAbsent` return `applied` \| `stale` and the service treats `stale` as "somebody else closed it", so one closure produces one closure event. Money was never wrong; only the events were multi-valued | resolved | — |
 | B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
 | B-23 | Closure event payloads carry no `organization_id`, so a tenant-scoped recipient for them is unmatchable | Of the notifiable events only `core.subscription.*` (owner_type/owner_id) and `core.fulfillment.created` carry a tenant. `core.fulfillment.dispatched`, `.completed` and `.cancelled` do not, so a recipient registered for one *scoped to an organization* could never match and would silently notify nobody. Rather than change a published event contract inside a notification milestone, `NotificationRecipientRegistry.register` **refuses** a non-null `organization_id` for those types (HTTP 400) — a loud refusal instead of a quiet silence. Consequence: closure notifications can only be registered platform-wide today | Widening the three closure payloads with `organization_id`, which is a versioned contract change MOVE and MARKET consume, so it belongs in a contract cycle and not in this one |
+| B-24 | Lease expiry is indistinguishable from a scheduled retry for three of the four workers, so `core_worker_outcomes_total{outcome="reclaimed"}` can only be reported for notifications | The B-22 fix made every claim write a lease, but for the outbox relay, the inbound dispatcher and the delivery worker the lease rides on `next_attempt_at`, which is also the retry-schedule field. When such a row becomes claimable again nothing records whether a worker died holding it or it was simply due, so an expired lease cannot be counted for those three. Only `PgNotificationStore` can, because it has a separate `reclaimExpired` and a `claim_token`. Operationally the gap is visible only indirectly, as claims exceeding completions + retries + permanent failures | A `processing` status or a `claimed_at` column on `outbox`, `inbound_event` and `event_delivery` — a schema change to the eventing tables with a rollback path and a decision about existing rows, so it belongs in its own cycle rather than being smuggled into an observability one |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -183,8 +184,8 @@ Nothing.
 
 ## Tests that pass at this commit
 
-**341 of 341 across 23 files** with `DATABASE_URL` set (both backends), 185
-without. Counted by running the suite at this commit.
+**488 of 488 across 31 files** with `DATABASE_URL` set (both backends), 273
+passed / 41 skipped without. Counted by running the suite at this commit, twice.
 
 The per-area list below was written when the suite stood at 71 tests across 11
 files and describes those cases only; it was never extended as later cycles
@@ -2142,3 +2143,241 @@ Not chosen: a real Telegram adapter (no credential, and the port makes it a late
 one-file change); B-23's payload widening (a versioned contract change that MOVE
 and MARKET consume, so it belongs in a contract cycle); D-6 and D-7, which are not
 CORE's to decide and were not started.
+
+## Cycle 2026-09-12 (fifth) — Milestone 8, metrics export and ingress rate limiting (CORE-only agent)
+
+**Scope:** CORE only. MOVE (`noor-seez/ceezr`) and MARKET (`skyosv10-art/wasla`)
+untouched. No contract change to any existing endpoint or event payload; the
+OpenAPI additions are a new read-only path, a new reusable 429 response, and a
+new error code in the `Error` enum — all additive within v1.
+
+### What the milestone actually meant, after reading the code
+
+The ROADMAP line said "no metrics/trace export, no rate limiting on the new
+ingress edge" and named neither a format nor a scope, so both were decided in
+this cycle and written down rather than left implicit. Reading the code first
+changed three things about the plan:
+
+1. **There is no middleware layer.** `Router.handle()` is the single funnel every
+   HTTP request passes through. So the instrumentation and the limiter went
+   *there*, and no middleware abstraction was introduced to host them. One call
+   site does not need a pipeline.
+2. **There is no metrics abstraction, and none was added.** One registry, one
+   declared catalogue, one renderer. No exporter interface, no tracing layer —
+   nothing in CORE consumes those today.
+3. **The four workers already had every fact worth counting**, but they were
+   reporting it only as a return value from `drainOnce()`. The counters are
+   recorded at those same points, so no metric describes a state the system does
+   not have. Where a state genuinely does not exist, it is *not* invented — see
+   B-24.
+
+### Metrics: the catalogue and its dimensions
+
+Declared in `src/platform/observability/metrics.ts`. The registry refuses an
+undeclared name, a missing label, an extra label and a wrong metric type.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `core_http_requests_total` | counter | `route`, `method`, `status` |
+| `core_http_request_duration_seconds` | histogram | `route`, `method` |
+| `core_http_rate_limited_total` | counter | `rate_class`, `subject_kind` |
+| `core_worker_claims_total` | counter | `worker` |
+| `core_worker_outcomes_total` | counter | `worker`, `outcome` |
+| `core_worker_item_duration_seconds` | histogram | `worker` |
+| `core_queue_depth` | gauge | `queue`, `state` |
+| `core_reconciliation_depth` | gauge | `queue` |
+| `core_sample_timestamp_seconds` | gauge | — |
+| `core_sample_failures_total` | counter | — |
+
+`worker` ∈ `outbox_relay`, `inbound_dispatcher`, `event_delivery`,
+`notification`. `outcome` ∈ `completed`, `retried`, `failed_permanent`, `fenced`,
+`reclaimed` — `retried` and `failed_permanent` are separate because a retry is
+the system working and a permanent failure is work that will not happen without a
+person; `fenced` is a stale acknowledgement refused (the B-22 protection firing)
+and must never be counted as a completion.
+
+`route` is always the route **template**, and an unmatched path collapses to the
+literal `unmatched`: an unknown path is attacker-controlled text and would be
+unbounded cardinality. `status` is the exact numeric code, because "how many
+401s" and "how many 500s" are different questions.
+
+`core_queue_depth{state}` includes `retrying`, which is **derived at read time**
+(`pending` with `attempts > 0`) inside the same aggregate query on both backends.
+No table has a `retrying` status, and the gauge does not pretend one exists.
+
+`core_reconciliation_depth` covers `inconsistent`, `pending_financial_decision`
+and `stale_holds` as counts only — the size of a queue a human must work
+through, never who is in it.
+
+### Export
+
+One endpoint, `GET /metrics`, Prometheus text exposition **0.0.4**,
+`text/plain; version=0.0.4; charset=utf-8`. Chosen because a consumer for it
+already exists everywhere; inventing a JSON shape would have meant writing the
+consumer too. It renders in catalogue order, so two scrapes of unchanged state
+are byte-identical, and it walks in-memory maps only: **no query, no lock, no
+transaction, no state change**, asserted by snapshotting the outbox, inbound
+events, notifications, audit trail and reconciliation queues around repeated
+scrapes. The one thing a scrape does is count itself, like every other request,
+and the test asserts exactly that difference and nothing more.
+
+The depth gauges are refreshed by `DepthSampler.sample()` on the operator's
+cadence, **not** by the scrape: sampling in the scrape would turn monitoring
+frequency into database load and would make the endpoint fail exactly when the
+database is unwell. The cost of that choice — staleness — is made visible instead
+of hidden, by `core_sample_timestamp_seconds` next to the gauges and
+`core_sample_failures_total` for sampling errors. A failed sample leaves the
+previous values and the old timestamp in place rather than publishing zeros,
+because "empty" and "I could not look" are different facts.
+
+### Rate limiting: where it sits and what it counts
+
+At the HTTP edge in `Router.handle()`, **after route matching and before any
+handler**, and nowhere else. Not in domain services: a limit there would be a
+business rule with a status code attached and would fire for background work done
+on nobody's behalf. It does not join the request's transaction — the counter is
+one statement on the pool — so a rolled-back request cannot refund budget and a
+refusal cannot roll back domain work.
+
+**Subject:** sha256 of the presented bearer token (`credential`), falling back to
+the hashed first hop of `x-forwarded-for` / `x-real-ip` / `x-client-ip`, else the
+constant `unattributed` (`network`). The address is never used when a credential
+is present, so two callers behind one NAT are two budgets. Only the hash is ever
+stored, and the metrics carry `subject_kind` only, never the hash.
+
+**Organization is deliberately not the key:** resolving a token to a tenant needs
+a session lookup, i.e. a database read *in front of* the limiter, which would mean
+a flood of invalid tokens still costs a query per request — the exact thing the
+limiter exists to prevent. Recorded as a scope decision, not an oversight.
+
+**Policy:** fixed 60 s window aligned to the epoch; per subject, per route class.
+`ingress_events` 600, `write` 120, `read` 300, `unmatched` 60. `/health`,
+`/ready` and `/metrics` are never limited and advertise no budget headers.
+Class, not route, because the class is both a policy key and a metric label. The
+known cost of a fixed window is the boundary burst, bounded at twice the limit and
+documented rather than discovered.
+
+**Refusal semantics:** HTTP **429**, code `rate_limited`, `retryable: true` — a
+first-class error code mapped to 429 in `src/platform/errors.ts`, not a
+repurposed `unavailable` and not a domain error. `retry-after` in whole seconds,
+minimum 1; `x-ratelimit-limit`/`-remaining`/`-reset` on allowed responses too.
+The message carries no subject, no hash and no address.
+
+**Workers are unreachable from the limiter by construction**, not by an exemption
+list: they are invoked directly by the process that runs them and there is no code
+path from a worker to the router.
+
+### Concurrency
+
+The store contract is one operation returning the post-increment count, so there
+is no version of the code where a `select` precedes an `update` — the shape that
+was B-22. Postgres does it as `insert … on conflict … do update set hits = hits +
+1 … returning hits`, which holds a row lock for the statement, run on the pool and
+never inside the request's transaction scope. The in-memory store is atomic only
+because its increment contains no `await`, which is correct within one process and
+explicitly not across processes; that is why the limiter backend is bound to the
+persistence bundle rather than chosen separately.
+
+Asserted on **real Postgres**: 40 requests issued before anything is awaited over
+a pool with `max: 16`, against a limit of 5 → exactly 5 admitted, 35 refused, and
+the stored counter equal to 40. The assertion was **falsified** against a
+deliberately racy read-then-write implementation of the same store, which admitted
+all 40 — so the test is known to be capable of failing.
+
+### Privacy
+
+**Decision: system-level metrics only. No metric carries a tenant dimension, and
+tenant-scoped metrics were not added alongside them.** A count alone is enough to
+leak: a per-organization request counter tells any reader that a tenant exists,
+roughly how large it is, and when it is in trouble. Per-tenant operational
+answers already exist, already authorized, through the reconciliation and
+delivery endpoints. Enforced three ways: the catalogue is asserted to declare no
+tenant- or entity-named dimension; every label value is checked against a strict
+pattern that rejects uuids, addresses, phone numbers and token-shaped strings
+(and the rejection message never echoes the value it refused); and a full
+lifecycle test — ingress, dispatch, publication, a notification whose adapter
+fails with an error containing both the recipient's address and an api key —
+asserts the exposition contains no token, tenant id, order reference, identity id,
+address or provider error text, and **no uuid anywhere at all**.
+
+### Tests added (48, both backends where applicable)
+
+- `tests/observability.test.ts` (25): registry refuses an undeclared name, a
+  missing/extra label and a wrong type; refuses uuid, email, phone, api-key and
+  overlong label values without echoing them; deterministic exposition with
+  cumulative buckets, `_sum` and `_count`; the catalogue declares no
+  tenant/entity dimension; ingress counted by template and exact status with the
+  concrete path absent; relay and dispatcher counters matching actual drains;
+  retry vs permanent failure kept apart for outbound delivery; an abandoned claim
+  appearing as `reclaimed` and then completing; a **fenced** acknowledgement
+  produced by a real in-flight lease expiry (gated channel) counted as `fenced`
+  and never as a completion; queue-depth and reconciliation gauges with no tenant
+  in the output; `retrying` derived identically on both backends; `/metrics`
+  serving without touching the database and changing nothing; the leak test; the
+  sampler reporting its own failure instead of publishing zeros or throwing; and
+  the bounded request log.
+- `tests/rate-limit.test.ts` (23): route classification and exemptions; subject
+  keying and the network fallback; finite defaults; under/at/over the limit →
+  429 with usable `retry-after` and the `x-ratelimit-*` headers; the caller
+  admitted again after obeying `retry-after`; **a refused request changing no
+  state at all** across fulfillments, ledger transactions, authorizations,
+  outbox, inbox, inbound events, deliveries, notifications and audit — and not
+  consuming idempotency; per-credential isolation with a shared address; route
+  class isolation; liveness and the scrape never refused; workers still draining
+  while the edge refuses; an unauthenticated flood attributed to `network` and
+  refused before authentication; probes of unknown paths counted without the path
+  becoming a label; and, on real Postgres, the concurrency guarantee plus
+  per-window counting and pruning.
+
+### Measured cost
+
+`scripts/measure-ingress-overhead.mjs`, 20 000 requests per configuration
+against the same no-op handler: bare router p50 ≈ 8 µs; **+ metrics ≈ +1 µs**
+(within run-to-run noise); + in-process limiter ≈ +5 µs; + Postgres limiter
+≈ +200 µs, which is one database round trip and the intrinsic price of a limit
+that holds across instances. Nothing in the sampler runs on a request path.
+
+### Fixed on the way, because the milestone made them visible
+
+- `router.logs` was an unbounded in-memory array — one record per request for the
+  lifetime of the process. Now capped at 1000.
+- `/ready` reported outbox depth by loading **every** pending row, so the
+  readiness probe got more expensive the busier the system was. Queue `counts()`
+  is now an aggregate query on all four queues, which the sampler needed anyway.
+
+### New blocker
+
+**B-24** — lease expiry is not countable for the outbox relay, the inbound
+dispatcher or the delivery worker, because their lease rides on `next_attempt_at`,
+which is also the retry-schedule field. Recorded, not worked around: inventing a
+`reclaimed` count for them would have meant a metric describing a state the
+schema does not have. Needs a `processing` status or a `claimed_at` column on
+three eventing tables, with a rollback path and a decision about existing rows.
+
+### Did this unblock B-23, D-7 or D-8?
+
+No, and none was touched. **B-23** (closure payloads carry no `organization_id`)
+is unchanged: it is a versioned change to three published event contracts that
+MOVE and MARKET consume, so it belongs in a contract cycle. **D-7** (routing
+ownership) and **D-8** (provider delivery confirmation) are external decisions.
+Observability makes their absence *visible* — `core_worker_outcomes_total` will
+show notifications ending as `accepted` and never `delivered`, which is exactly
+D-8 — but visibility is not a resolution.
+
+### Next task, and why it is this one
+
+**Milestone 6 — event normalisation and historical replay tooling.** It is next
+because it is the only remaining milestone that is entirely inside CORE and has
+no external dependency: `inbound_event` now keeps every envelope, the inbox
+deduplicates per consumer, and this cycle added the aggregate reads that make a
+replay's effect observable while it runs. It also has a real operational
+customer: with four workers, terminal failures and a `failed_permanent` counter,
+the question "replay these events safely" is now one an operator will actually
+ask.
+
+Not chosen: **B-24**, which is a schema change to three eventing tables and
+deserves its own cycle rather than being appended to this one (it is the strongest
+candidate after milestone 6); a live channel adapter (no provider credential, and
+the port keeps it a one-file change); B-23's payload widening and D-6/D-7/D-8,
+which are contract or external decisions; milestone 9, which is blocked on B-5
+and B-6.
