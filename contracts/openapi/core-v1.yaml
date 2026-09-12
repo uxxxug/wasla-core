@@ -713,6 +713,39 @@ paths:
         "200": { description: Count and list of fulfillments awaiting a financial decision }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /v1/fulfillments/reconciliation/stale-holds:
+    get:
+      summary: List open work whose money hold can no longer settle it
+      description: >-
+        Reconciliation read across two modules. Returns fulfillments that are
+        still open while the authorization they name can no longer settle them —
+        expired, voided, or captured out of band. Neither of the two reads above
+        can find these, because both look only at the fulfillment row and the
+        contradiction is between the fulfillment and the hold.
+
+
+        This is not a false record and not a bookkeeping defect: the row says the
+        work is open, which is true. It is a liveness condition, and CORE only
+        reports it. Each item carries `reason` (why the hold is unusable, in the
+        same vocabulary intake uses), `hold_captured_minor` (how much already
+        moved), and `settlement_state_if_closed` (the settlement state this
+        fulfillment would take if it closed now — which says in advance whether it
+        will land in the pending-decision queue).
+
+
+        CORE does not act on these. Re-authorising, abandoning the execution, or
+        completing it unfunded are commercial answers CORE has not been given
+        (dependency D-6), so the queue is reported and never drained
+        automatically. The read mutates nothing.
+      parameters:
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Count and list of open fulfillments with an unusable hold }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}:
     get:
       summary: Read CORE fulfillment coordination state

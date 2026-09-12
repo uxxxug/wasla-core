@@ -1649,3 +1649,226 @@ a read is worth more once the writes it reconciles are single-valued.
 It is also not cosmetic. The fix changes the repository contract — a conditional
 update that reports whether it matched — and both backends must agree about it,
 which is exactly the class of difference that produced B-12.
+
+## Cycle 2026-09-12 (third) — one closure, one closing event (CORE-only agent)
+
+B-21, taken as the approved next task, and then the row-19 reconciliation that the
+previous cycle put behind it. Both were done in the recorded order; nothing was
+reordered because it looked easier.
+
+### B-21 root cause, precisely
+
+The closure was an unconditional write:
+
+```sql
+update fulfillment set status = $2, settlement_state = $3, ... where fulfillment_id = $1
+```
+
+Under READ COMMITTED two transactions can both read an open row. The first
+commits. The second was already blocked on the row lock, wakes up, re-evaluates
+its predicate — `fulfillment_id = $1`, which still matches — overwrites the
+winner's terminal row with its own, and commits its own outbox row. Both had
+staged a closing event, so MARKET received the same closure twice under two event
+ids.
+
+Two properties of SQL made this invisible to the service:
+
+1. an `update` that matches zero rows is not an error, so nothing distinguished a
+   first closure from a second;
+2. the predicate said which row, never which version of it, so the row lock only
+   serialised the writes — it never rejected the second one.
+
+Money was never wrong, because the ledger keys its capture and the second
+transaction re-read the same transaction instead of drawing again. Only the events
+were multi-valued, which is why the previous cycle classified this as a delivery
+defect rather than a money defect — and why it still had to be fixed: a consumer
+that reacts to a closure has no way to tell CORE's second copy from a real second
+closure.
+
+### The repository contract, now explicit
+
+`FulfillmentRepository` gained two writes whose result is a value, not a hope:
+
+```ts
+type ConditionalWrite = "applied" | "stale";
+type InsertOutcome = "inserted" | "duplicate_order_reference";
+
+updateIfStatusIn(f: Fulfillment, expected: readonly FulfillmentStatus[], scope?): Promise<ConditionalWrite>;
+insertIfAbsent(f: Fulfillment, scope?): Promise<InsertOutcome>;
+```
+
+- `applied` — this call moved the row, and no other call did.
+- `stale` — the row is not in any `expected` status any more, so nothing was
+  written. Not an error, not a silent success: a distinct answer the caller must
+  handle.
+- `duplicate_order_reference` — another transaction already created the
+  fulfillment for this order.
+
+The store decides, never the service: PostgreSQL adds `and status = any($8::text[])`
+and reports `rowCount === 1 ? "applied" : "stale"`; the insert is
+`on conflict (market_order_reference) do nothing` and reports its own `rowCount`.
+There is no read-then-write anywhere in either path, no in-process mutex, no
+cache — the decision happens inside one statement in the database that owns the
+row.
+
+`InMemoryFulfillmentRepository` implements the same semantics in one uninterrupted
+step, and its `insert` now throws on a duplicate `market_order_reference`, which
+the schema has enforced since migration 0002 and the double silently allowed. A
+memory store more permissive than PostgreSQL certifies bugs, so this was a defect
+in the double, not a convenience.
+
+`insert` and `update` remain for writes that are not transitions (traceability
+back-fill) and say so in their doc comments.
+
+### How the operation became atomic
+
+`stale` is raised as a sentinel *inside* the staged mutation, at the point of the
+write, so `withTransaction` unwinds everything the loser staged:
+
+- money mutation staged **before** the closure → rolled back;
+- the closure row itself → never applied;
+- outbox append staged **after** it → rolled back;
+- audit entry → rolled back.
+
+The loser then re-reads the committed row and answers through the same resolver
+the sequential repeat uses (`completionOn`, `cancellationOn`, `rejectionOn`,
+`acceptanceOn`). That is the part that makes the guarantee stable rather than
+lucky: a concurrent duplicate and a redelivered duplicate are the same question,
+so they cannot return different answers.
+
+Success is therefore exactly one commit containing new status + closing event +
+outbox row; failure by prior closure is no event, no outbox row, no financial
+mutation, no state change.
+
+### Proven on a real database, not with mocks
+
+`tests/fulfillment-single-closure.test.ts` — 10 cases, both backends, 20 tests,
+`Pool({ max: 12 })` so the contenders are genuinely concurrent:
+
+| Scenario | Before the fix | After |
+| --- | --- | --- |
+| 2 concurrent cancels | 2 closure events, 2 outbox rows | 1 event, 1 outbox row, 1 release |
+| 8 concurrent cancels | up to 8 closure events | exactly 1 |
+| 2 concurrent identical completions | 2 completed events | 1 event, 1 capture |
+| cancel racing completion | 2 conflicting closures | 1 event, and it matches the stored row |
+| loser's partial trace (2 500 already captured) | extra outbox row + duplicate money attempt | 3 outbox rows total, wallet 3 500, 1 pending-decision row |
+| retry after a committed closure | new event each retry | no new event, same answer |
+| 2 concurrent intakes of one order | 2 fulfillments possible | 1 fulfillment, 1 created event |
+| 2 concurrent acceptances | 2 dispatch events | 1 `core.fulfillment.dispatched` |
+
+The fix was proven by removing it: dropping `and status = any($8::text[])` and the
+in-memory status check makes **14 of the 20 fail**; restoring them makes all 20
+pass. The two earlier assertions that had to tolerate the defect
+(`expect(events.length).toBeGreaterThanOrEqual(1)` in
+`tests/fulfillment-financial-decision.test.ts`) are now `toHaveLength(1)`.
+
+InMemory and PostgreSQL produce identical results on all 10 cases, with one honest
+asymmetry, asserted rather than hidden: when two identical completions overlap,
+the loser's capture collides with the ledger's own idempotency key while both
+transactions are open, and that surfaces as a write conflict instead of a silent
+no-op. CORE reports it rather than claiming the command was applied, and the
+retrying consumer is then answered from the committed row — which the same test
+asserts. Command idempotency (the same command twice) and delivery idempotency
+(the same event twice) stay separate guarantees; the inbox was not touched.
+
+### A second defect, found by reviewing the paths instead of the race
+
+Reviewing every terminal closure path turned up one that no concurrency test would
+have found: **the refusal of an order whose declared hold does not exist could not
+commit on PostgreSQL at all.** `fulfillment.payment_authorization_id` is a foreign
+key, the refusal row named a hold CORE does not have, and the insert violated
+`fulfillment_payment_authorization_id_fkey`. The path was only ever exercised in
+memory (`tests/fulfillment-settlement.test.ts` runs in-memory), so a documented,
+tested refusal was unreachable on the real database: MARKET sending a stale or
+mistyped reference got an error and endless redelivery instead of a refusal.
+
+Fixed without inventing policy: the unresolvable reference is not stored — the
+column exists to point at a hold CORE holds — and the declared reference is kept
+on the audit entry as `unresolved_hold_reference`, under a key the scrubber does
+not redact. Status, `closure_reason`, and the closing event are unchanged, MOVE is
+still never asked to work, and no money exists to move.
+
+### Row 19 — cross-module reconciliation, and what it is not
+
+A hold can stop being able to settle its execution while the execution is still
+open: the expiry sweep closed it, an operator voided it, or it was captured out of
+band. Detection: `listStaleHolds` / `GET /v1/fulfillments/reconciliation/stale-holds`
+compares every open funded fulfillment against its authorization through the same
+`inspectHold` predicate that guards intake, so the sweep cannot drift from the rule
+the write path applies.
+
+The broken invariant is *open work is guarded by a hold that can still settle it*
+— which lives in neither module alone. Classification, deliberately:
+
+- **not `inconsistent`** — the row is not false. It says the work is open, and it
+  is; a hold guarded it when the row was written.
+- **not `decision_required`** — that queue means money moved for work that did not
+  complete. Here the work has not finished at all.
+- **not a new state** — "open but unfunded" would be a second, staler copy of the
+  money state inside the fulfillment row, the exact duplication
+  `financial_disposition` exists to avoid. Detection must not create state.
+
+It is a liveness condition. CORE's action is to report it, with why the hold is
+unusable, how much already moved, and the `settlement_state` the fulfillment would
+take if it closed now — so an operator sees in advance which cases will land in the
+`decision_required` queue. CORE does **not** act: re-authorising, abandoning the
+execution, or completing it unfunded are three commercial answers, recorded as
+dependency **D-6** rather than invented. `tests/fulfillment-stale-holds.test.ts`
+(8 tests, both backends) asserts the read finds each case, ignores closed and
+unfunded work, changes nothing, and is stable across repeated reads.
+
+### External dependencies — unchanged, plus one
+
+D-1…D-5 stand exactly as recorded (partial-capture policy, `partially_captured`
+adoption, `executed_amount_minor` + currency, the financial decision command and
+its contract). Nothing was implemented on their behalf and B-21 did not wait for
+them.
+
+- **D-6 — the fate of open work whose funding disappeared.** Who decides between
+  re-authorising, abandoning the execution and completing it unfunded; whether
+  MOVE must stop working on a job whose hold is gone; and whether MARKET is told
+  before or after that decision. Until it exists the stale-hold queue is reported
+  and never drained automatically.
+
+### Regression
+
+- `npx tsc --noEmit` clean; governance, contracts (21 schemas, 14 emitted types)
+  and migrations (11 forward, all with rollbacks) green.
+- `DATABASE_URL=… npm test`: **384 passed / 27 files** (356 before this cycle;
+  +20 single-closure, +8 stale-hold). No previously passing test was changed to
+  accommodate the fix — the only edits to existing assertions tightened two that
+  had been pinned loose *because* of B-21.
+- `npm test` without a database: 216 passed, 39 skipped.
+
+### Roadmap triage after this cycle
+
+**Complete inside CORE:** everything listed in the previous cycle, plus a
+single-valued closure on every terminal path, an intake refusal that works on the
+real database, and the cross-module stale-hold reconciliation read.
+
+**Blocked on a decision outside CORE:** B-20 (D-1…D-5); the stale-hold policy
+(D-6); multi-hold per fulfillment (MARKET); the entitlement-check endpoint (B-14,
+needs an ADR); proration, grace, trials, rollover, overrides (B-15…B-19); contract
+adoption in MARKET and MOVE (B-2…B-6); staging and cutover.
+
+**Actionable inside CORE right now, needing no external answer:**
+
+1. **Channels and notifications (milestone 4).** The largest remaining piece of
+   product surface with no external blocker, and the natural consumer of the
+   closing events that are now single-valued.
+2. Metrics and trace export, rate limiting on the ingress edge (milestone 8).
+3. A set-based stale-hold sweep, if the volume of open work makes the current
+   one-read-per-fulfillment reconciliation expensive. Not needed yet, and the fix
+   would be a query, never a stored copy of the money state.
+
+### Next task, and why it is this one
+
+**Milestone 4 — channels and notifications.** It is next because the write side of
+coordination is now closed: every terminal path emits exactly one event, that
+event carries the money truth including `financial_decision_required`, and the two
+reconciliation queues plus the stale-hold read cover the cases where truth and
+policy diverge. Notification is the first thing that *consumes* those events, and
+it was never worth building on top of a closure that could be published twice.
+
+Not chosen: B-14…B-19 and B-20 need answers CORE does not own, and inventing one
+to make progress would be the one thing this repository is not allowed to do.

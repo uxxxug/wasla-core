@@ -298,18 +298,79 @@ stored, so it cannot drift from them:
 CORE defect and an unanswered business question in the same queue. They need
 different people.
 
-### Known gap: row 19, a stale hold on open work
+### Closed: row 19, a stale hold on open work
 
-If the expiry sweep closes a hold while the fulfillment is still open, the
-fulfillment row keeps `settlement_state = 'held'` until a MOVE event arrives.
-When one arrives the outcome is truthful (rows 12 and 15 handle it). If none ever
-arrives, the row sits open and the reconciliation reads cannot see the problem,
-because both of them look only at the fulfillment row and the contradiction is
-between two modules.
+If a hold stops being able to settle its execution while the execution is still
+open — the expiry sweep closed it, an operator voided it, or it was captured out
+of band — the fulfillment row keeps `settlement_state = 'held'` and stays open.
+When a MOVE event eventually arrives the outcome is truthful (rows 12 and 15
+handle it). If none arrives, the row sits open forever, and neither of the two
+reconciliation reads above can see the problem, because both look only at the
+fulfillment row while the contradiction is between two modules.
 
-This is a liveness gap, not a false record: CORE never claims money came back.
-Closing it needs a reconciliation that compares open fulfillments against their
-authorizations, which is the next milestone rather than part of this one.
+Classified deliberately, because it is none of the three things it resembles:
+
+- not `inconsistent`: the row is not false. It says work is open, and it is; it
+  says a hold guarded it, and one did when the row was written.
+- not `decision_required`: that queue means money moved for work that did not
+  complete. Here the work has not finished at all yet.
+- not a new status: "open but unfunded" would be a second, staler copy of the
+  money state living in the fulfillment table — exactly the duplication
+  `financial_disposition` exists to avoid. Detection must not create state.
+
+So it is a liveness condition, and CORE reports it:
+`listStaleHolds` / `GET /v1/fulfillments/reconciliation/stale-holds` compares
+every open funded fulfillment against its authorization through the same
+`inspectHold` predicate that guards intake, so the sweep cannot drift from the
+rule the write path applies. Each row carries why the hold is unusable, how much
+of it already moved, and the `settlement_state` the fulfillment would take if it
+closed now — which tells an operator in advance which of these will land in the
+`decision_required` queue.
+
+What CORE does **not** do is act on it. Re-authorising, abandoning the execution,
+or completing the work unfunded are three different commercial answers, and
+choosing one is the same class of decision as D-1…D-5. Recorded as dependency
+**D-6**: who decides the fate of open work whose funding disappeared, and does
+MOVE stop working on it. Until then the queue is reported, never drained
+automatically, and the read mutates nothing — `tests/fulfillment-stale-holds.test.ts`
+asserts that on both backends.
+
+### One terminal closure, one closing event
+
+Every terminal path closes through one conditional write. The write applies only
+while the row is still in a status it is allowed to leave, and the store — not the
+service — decides whether it applied, by reporting how many rows it matched:
+
+```sql
+update fulfillment set ... where fulfillment_id = $1 and status = any($8::text[])
+```
+
+A transition that matches nothing is `stale`. `stale` aborts the transaction, so
+the money mutation staged before it and the outbox row staged after it are both
+rolled back, and the loser then answers from the row that actually committed
+using the same resolver the sequential repeat uses. This is why a concurrent
+duplicate and a redelivered duplicate cannot give different answers.
+
+| Terminal path | Left states | Closing event | Concurrency-proven |
+| --- | --- | --- | --- |
+| completion (`completed`) | `coordinating`, `dispatched` | `core.fulfillment.completed` | yes |
+| completion (`failed`) | `coordinating`, `dispatched` | `core.fulfillment.failed` | yes |
+| MOVE rejection | `coordinating`, `dispatched` | `core.fulfillment.failed` | yes |
+| cancellation | any open status | `core.fulfillment.cancelled` | yes |
+| intake refusal (unusable hold) | none — created closed | `core.fulfillment.failed` | yes |
+| intake refusal (unresolvable hold) | none — created closed | `core.fulfillment.failed` | yes |
+| partial capture + terminal outcome | `coordinating`, `dispatched` | outcome event with `financial_decision_required` | yes |
+| stale hold on open work | none — stays open | none, by design (D-6) | n/a |
+
+The two intake refusals are terminal at creation, so their invariant is the
+uniqueness of `market_order_reference` rather than a status predicate: the insert
+is `on conflict do nothing`, the loser reads back the winner, and only one closure
+event exists. The unresolvable-hold refusal additionally cannot store the
+reference MARKET declared — `fulfillment.payment_authorization_id` is a foreign
+key to a hold CORE does not have — so the column is left null and the declared
+reference is kept on the audit entry as `unresolved_hold_reference`. Before that,
+this documented path could not commit on PostgreSQL at all, and only worked
+in memory.
 
 ## Not implemented: multiple holds per fulfillment
 
