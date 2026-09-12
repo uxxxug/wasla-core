@@ -9,7 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "replay": "vite-node src/platform/replay/cli.ts --",
+    "replay": "vite-node src/platform/replay/main.ts --",
     "test": "vitest run",
     "check:governance": "node scripts/check-governance.mjs",
     "check:roadmap": "node scripts/check-roadmap.mjs",

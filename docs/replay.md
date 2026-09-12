@@ -339,7 +339,7 @@ Decisions, and why:
 ## Tests
 
 `tests/event-normalisation.test.ts` — 17 tests.
-`tests/replay.test.ts` — 21 in-memory, 43 with `DATABASE_URL` set (both
+`tests/replay.test.ts` — 24 in memory, 46 with `DATABASE_URL` set (both
 backends plus the two PostgreSQL-only suites).
 
 The dangerous cases, all of which run on real PostgreSQL: dry-run zero-mutation
@@ -349,7 +349,17 @@ entry; a re-wrapped duplicate; an out-of-order stale event causing no regression
 ordering by receipt rather than by the producer's clock; failure with a
 diagnosable report and a working resume; cursor paging; tenant unknown and
 tenant mismatch; unnormalisable rows left untouched; cross-pool advisory-lock
-exclusion; lock release on an unexpected error; and the authorisation boundary.
+exclusion; lock release on an unexpected error; the authorisation boundary; and
+the CLI parser's defaults and its refusals.
+
+The CLI's entry point lives in `main.ts` rather than behind an
+"am I the entry point" guard in `cli.ts`. The guard was tried first, on
+`process.argv[1]`, and the runner replaces that with its own path — so the
+command printed nothing and exited 0. Usage errors throw a `CliUsageError`
+instead of calling `process.exit` inside a parser, which is what makes the parser
+testable. The surface was also exercised end to end against a real database with a
+real `platform_admin` token: dry-run, `--execute`, a second `--execute` finding
+nothing, and four journal entries naming the principal.
 
 ## What this milestone did not do
 

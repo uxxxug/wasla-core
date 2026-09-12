@@ -32,16 +32,28 @@ import { systemClock } from "../clock.js";
 import { postgresPersistence } from "../persistence/backends.js";
 import type { ReplayMode, ReplayScope } from "./service.js";
 
-interface ParsedArgs {
+export interface ParsedArgs {
   scope: ReplayScope;
   mode: ReplayMode;
   execute: boolean;
   stopOnError: boolean;
 }
 
+/**
+ * A usage error, thrown rather than exited on.
+ *
+ * `process.exit` inside a parser makes the parser untestable, and an untestable
+ * parser is how this surface shipped silently broken once already: the entry
+ * point used to be guarded on `process.argv[1]`, which the runner rewrites, so
+ * the command printed nothing at all. The guard is gone, the parser is exported,
+ * and the only place that exits is the entry point in `main.ts`.
+ */
+export class CliUsageError extends Error {
+  readonly exitCode = 2;
+}
+
 function fail(message: string): never {
-  process.stderr.write(`${message}\n`);
-  process.exit(2);
+  throw new CliUsageError(message);
 }
 
 /** ISO-8601 in, ISO-8601 out; anything else stops before a run begins. */
@@ -51,7 +63,7 @@ function instant(flag: string, value: string): string {
   return parsed.toISOString();
 }
 
-function parseArgs(argv: readonly string[]): ParsedArgs {
+export function parseArgs(argv: readonly string[]): ParsedArgs {
   const values = new Map<string, string>();
   const flags = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
@@ -169,15 +181,4 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   } finally {
     await pool.end();
   }
-}
-
-// Only when invoked directly, so importing this module in a test never runs a
-// replay.
-if (process.argv[1]?.endsWith("cli.ts") || process.argv[1]?.endsWith("cli.js")) {
-  main()
-    .then((code) => process.exit(code))
-    .catch((error: unknown) => {
-      process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-      process.exit(1);
-    });
 }

@@ -35,6 +35,7 @@ import {
 } from "../src/platform/persistence/backends.js";
 import { ReplayService, type ReplayActor, type ReplayScope } from "../src/platform/replay/service.js";
 import { permissionsForRoles } from "../src/modules/identity-access/domain.js";
+import { CliUsageError, parseArgs } from "../src/platform/replay/cli.js";
 
 const url = process.env.DATABASE_URL;
 
@@ -1027,5 +1028,63 @@ describe("replay authorisation", () => {
       expect(permissionsForRoles([role]).has("events.replay")).toBe(false);
       expect(permissionsForRoles(["service"]).has("events.submit")).toBe(true);
     }
+  });
+});
+
+describe("replay CLI argument parsing", () => {
+  it("defaults to a dry-run and to stopping at the first failure", () => {
+    const parsed = parseArgs(["--event-types", "market.order.created", "--limit", "50"]);
+    // The safe thing has to be what happens when an argument is forgotten.
+    expect(parsed.execute).toBe(false);
+    expect(parsed.stopOnError).toBe(true);
+    expect(parsed.mode).toBe("pending_only");
+    expect(parsed.scope).toEqual({ limit: 50, event_types: ["market.order.created"] });
+  });
+
+  it("normalises timestamps and builds the resume cursor", () => {
+    const parsed = parseArgs([
+      "--event-types",
+      "move.job.completed",
+      "--received-from",
+      "2026-09-01T00:00:00Z",
+      "--after-received-at",
+      "2026-09-02T03:04:05Z",
+      "--after-event-id",
+      "11111111-1111-4111-8111-111111111111",
+      "--organization",
+      "22222222-2222-4222-8222-222222222222",
+      "--limit",
+      "10",
+      "--mode",
+      "reapply",
+      "--execute",
+      "--continue-on-error",
+    ]);
+    expect(parsed.scope.received_from).toBe("2026-09-01T00:00:00.000Z");
+    expect(parsed.scope.after).toEqual({
+      received_at: "2026-09-02T03:04:05.000Z",
+      event_id: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(parsed.mode).toBe("reapply");
+    expect(parsed.execute).toBe(true);
+    expect(parsed.stopOnError).toBe(false);
+  });
+
+  it("refuses what it cannot understand instead of guessing", () => {
+    // A usage error throws rather than exiting, which is the only reason this
+    // surface is testable at all — and it was not, once: the entry point was
+    // guarded on `process.argv[1]`, which the runner rewrites, so the command
+    // silently printed nothing and exited 0.
+    expect(() => parseArgs(["--limit"])).toThrow(CliUsageError);
+    expect(() => parseArgs(["positional"])).toThrow(/unexpected argument/);
+    expect(() => parseArgs(["--mode", "yolo", "--limit", "5"])).toThrow(/--mode/);
+    expect(() => parseArgs(["--limit", "abc"])).toThrow(/--limit/);
+    expect(() => parseArgs(["--received-from", "yesterday", "--limit", "5"])).toThrow(
+      /--received-from/,
+    );
+    // Half a cursor is not a cursor.
+    expect(() =>
+      parseArgs(["--after-received-at", "2026-09-01T00:00:00Z", "--limit", "5"]),
+    ).toThrow(/--after-event-id/);
   });
 });
