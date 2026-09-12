@@ -97,7 +97,15 @@ operational facts: a retry is the system working, a permanent failure is work
 that will never happen unless a person acts. `fenced` is an acknowledgement
 refused because the claim token was stale — the B-22 protection firing — and it
 must never be counted as a completion, or the counters would claim one message
-was delivered twice. `reclaimed` is a lease that expired and was taken back.
+was delivered twice. `reclaimed` is a lease that expired and was taken back — it
+is now reported by all four workers, not only the notification dispatcher (B-24,
+resolved below). It is the counter that separates a crash-looping worker from a
+bad payload: both leave work undone, but only one of them is your fault.
+
+A `reclaimed` item is **not** charged an attempt. Nobody observed it fail, so
+`attempts` is left alone and the row does not move towards its dead-letter limit.
+The cost of that choice is recorded as a blocker: a row whose worker dies on it
+every single time is retried for ever and never dead-lettered.
 
 Item duration is measured with `process.hrtime.bigint()`, not with the injectable
 domain clock: a test that freezes time must still be able to advance leases
@@ -114,13 +122,30 @@ without producing fictional latencies.
 
 `queue` ∈ `outbox`, `inbound` (accepted inbound events), `event_delivery`,
 `notification`.
-`state` is that queue's own status vocabulary plus `retrying`.
+`state` is that queue's own status vocabulary plus `retrying`, `in_flight` and
+`abandoned`.
 
-**`retrying` is derived, not stored.** No table has a `retrying` status; a
-retrying row is a pending row with at least one attempt spent
-(`status = 'pending' and attempts > 0`). It is computed inside the same aggregate
-query on both backends, and asserted identically for both, so the gauge cannot
-describe a state the system does not have.
+**`retrying`, `in_flight` and `abandoned` are derived, not stored.** No table has
+any of those statuses, and all three are cuts through the pending rows — subsets
+of `pending`, never additions to it, so summing every state double-counts:
+
+| state | derivation | what it means |
+| --- | --- | --- |
+| `retrying` | `pending and attempts > 0` | it failed and asked to be tried again |
+| `in_flight` | `pending and claimed_at is not null and next_attempt_at > now` | a worker is holding it right now |
+| `abandoned` | `pending and claimed_at is not null and next_attempt_at <= now` | a worker took it and never came back |
+
+All three are computed inside the same aggregate query on both backends, cut at
+the injected clock rather than at `now()` so a fixed clock in a test moves the
+store and the worker together, and asserted identically for both backends — the
+gauge cannot describe a state the system does not have (B-12).
+
+**`abandoned` is the gauge to alarm on.** A healthy queue holds a few rows
+`in_flight` for milliseconds at a time and abandons none. A non-zero `abandoned`
+that does not clear on the next worker tick means recovery itself is not running.
+Note that a row is only counted `abandoned` until the next tick reclaims it; the
+durable record of how often this happens is
+`core_worker_outcomes_total{outcome="reclaimed"}`, and the gauge is the snapshot.
 
 `core_reconciliation_depth{queue}` covers `inconsistent`,
 `pending_financial_decision` and `stale_holds` — the three existing
@@ -359,18 +384,44 @@ in the sampler runs on a request path.
 - B-23, D-6, D-7 and D-8 are untouched. Any contract change belongs to a
   contracts cycle.
 
-## Blocker recorded here: B-24
+## B-24, resolved: lease expiry is countable for all four workers
 
-**Lease expiry is not countable for three of the four workers.** The outbox
-relay, the inbound dispatcher and the delivery worker carry their lease on
-`next_attempt_at`, which is also the scheduled-retry field. When such a row
-becomes claimable again, nothing distinguishes "a worker died holding this" from
-"this was scheduled to be retried now", so `core_worker_outcomes_total{outcome=
-"reclaimed"}` can only be reported by the notification store, which has a
-separate `reclaimExpired` and a `claim_token`.
+**The defect.** The outbox relay, the inbound dispatcher and the delivery worker
+carried their lease on `next_attempt_at`, which is also the scheduled-retry
+field. One column, two meanings, and nothing on the row saying which. So when
+such a row became claimable again, nothing distinguished "a worker died holding
+this" from "this was scheduled to be retried now":
+`core_worker_outcomes_total{outcome="reclaimed"}` was unreportable for three of
+the four workers, a crash loop and a bad payload produced identical metrics, and
+"what is in flight" and "what is stuck" had no answer at all.
 
-Making it countable for the other three needs a schema change — a `processing`
-status or a `claimed_at` column — which is a contract-adjacent change to the
-eventing tables and belongs to its own cycle. **Recorded as B-24, not invented
-here.** Until it is done, an expired lease elsewhere is visible indirectly, as a
-claim count that exceeds completions plus retries plus permanent failures.
+**The fix.** A nullable `claimed_at timestamptz` on `outbox`, `inbound_event` and
+`event_delivery` (migration 0014), which makes the overloaded column readable:
+
+- `claimed_at is null` → `next_attempt_at` is a **retry schedule**.
+- `claimed_at is not null` → `next_attempt_at` is a **lease expiry**.
+
+`claimDue` now sets `claimed_at` and takes only rows where it is null, so an
+expired lease is no longer silently re-served. A separate `reclaimExpired(now,
+limit)` — mirroring the one the notification store already had — clears
+`claimed_at`, makes the row due immediately (it has already waited out a whole
+lease) and records `last_error = 'abandoned claim reclaimed after attempt N'`.
+Every worker runs recovery **before** claiming, so a recovered row is picked up in
+the same tick, and every acknowledgement clears `claimed_at`. A check constraint
+per table refuses `claimed_at` on a row that is not pending, so a finished row
+cannot be counted as in flight for ever even if a future writer forgets.
+
+**What was rejected, and why.** A `processing` status would have changed what
+every existing reader means by `pending` — a contract change to fix a metric. A
+`claim_token` would give real fencing, but needs tokens threaded through every
+acknowledgement on both backends; that is a bigger, separately reviewable change
+and is recorded as its own blocker rather than smuggled in here.
+
+**Deploying it.** Existing rows get `NULL`, meaning "not held". That is safe for
+rows genuinely in flight when the migration runs: they keep their future
+`next_attempt_at`, stay invisible until the lease would have expired anyway, and
+are then claimed exactly as today. No downtime and no need to stop the workers.
+The one cost is that claims held across the migration are not counted when they
+are taken over. Rolling **back** is the opposite order: roll the code back first,
+then the migration, because code that sets `claimed_at` against a schema without
+the column fails every claim and stops all three queues.

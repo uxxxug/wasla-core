@@ -365,7 +365,11 @@ nothing, and four journal entries naming the principal.
 
 - **B-24** was not touched: no `claimed_at`, no `processing` status, no schema
   columns, no migrations. Replay needed none of them, and inventing them here
-  would have pre-empted a decision that needs its own cycle.
+  would have pre-empted a decision that needs its own cycle. It has since been
+  resolved by migration 0014 with a `claimed_at` column — see
+  `docs/observability.md`. Replay is unaffected: it selects and re-enqueues
+  inbound events by status and time, never by lease, and a replayed row is
+  unclaimed like any other newly due row.
 - **B-23**, **D-6**, **D-7**, **D-8** remain external dependencies. Replay
   records where B-23 bites (tenant-scoped replay of `move.*`) rather than
   working around it.
