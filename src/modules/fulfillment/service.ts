@@ -22,9 +22,15 @@ import type {
   MoveJobAcceptedPayload,
   MoveJobCompletedPayload,
   MoveJobRejectedPayload,
+  FinancialDisposition,
   SettlementState,
 } from "./domain.js";
-import { isClosed, isFinanciallyConsistent } from "./domain.js";
+import {
+  financialDisposition,
+  isClosed,
+  isFinanciallyConsistent,
+  requiresFinancialDecision,
+} from "./domain.js";
 
 const PRODUCER = "wasla-core";
 
@@ -104,6 +110,26 @@ interface HoldInspection {
   usable: boolean;
   settlement: SettlementState;
   reason: string | null;
+  /**
+   * How much of the hold CORE observed as already moved, or `null` when there
+   * was nothing to observe (no hold, no readable port) — never 0 as a stand-in
+   * for "unknown".
+   */
+  captured_minor: number | null;
+}
+
+/**
+ * The outcome of bringing a hold to a terminal state.
+ *
+ * `captured_minor` is `null` for "CORE did not observe an amount here", which
+ * is not the same as zero and must never be published as zero — asserting that
+ * nothing moved is precisely the falsehood this seam produced before. It is a
+ * number only on the release path, where money hands the hold back and the
+ * amount is a fact CORE was told.
+ */
+interface SettlementOutcome {
+  settlement: SettlementState;
+  captured_minor: number | null;
 }
 
 export class FulfillmentService {
@@ -166,19 +192,21 @@ export class FulfillmentService {
       // authorized (for example an expired one awaiting the sweep) is released
       // as part of the refusal.
       return withTransaction(this.tx, async (uow) => {
-        const settlement =
+        const outcome: SettlementOutcome =
           hold.settlement === "held"
             ? await this.release(uow, fulfillment, `refused:${hold.reason}`, event.correlation_id)
-            : hold.settlement;
+            : { settlement: hold.settlement, captured_minor: hold.captured_minor };
         const refused: Fulfillment = {
           ...fulfillment,
           status: "failed",
-          settlement_state: settlement,
+          settlement_state: outcome.settlement,
           completed_at: this.clock.now().toISOString(),
           closure_reason: hold.reason,
         };
         uow.stage((scope) => this.repo.insert(refused, scope));
-        uow.emit(this.closureEvent(refused, event.correlation_id, event.event_id));
+        uow.emit(
+          this.closureEvent(refused, event.correlation_id, event.event_id, outcome.captured_minor),
+        );
         uow.audit(this.auditEntry("fulfillment.refused", refused, event.correlation_id));
         return refused;
       });
@@ -296,7 +324,7 @@ export class FulfillmentService {
     // all, so MOVE's rejection can never leave a refunded hold on an open
     // fulfillment, or an open hold on a failed one.
     return withTransaction(this.tx, async (uow) => {
-      const settlement = await this.release(
+      const outcome = await this.release(
         uow,
         current,
         `move_rejected:${payload.reason}`,
@@ -307,7 +335,7 @@ export class FulfillmentService {
         current,
         "failed",
         payload.reason!,
-        settlement,
+        outcome,
         event.correlation_id,
         event.event_id,
       );
@@ -344,29 +372,31 @@ export class FulfillmentService {
     return withTransaction(this.tx, async (uow) => {
       let outcome: FulfillmentStatus = payload.outcome === "completed" ? "completed" : "failed";
       let reason: string | null = payload.outcome === "completed" ? null : "move_execution_failed";
-      let settlement: SettlementState;
+      let settled: SettlementOutcome;
 
       if (outcome === "completed") {
         const result = await this.settle(uow, current, event.correlation_id);
-        settlement = result.settlement;
+        settled = { settlement: result.settlement, captured_minor: result.captured_minor };
         if (!result.ok) {
           outcome = "failed";
           reason = result.reason;
         }
       } else {
-        settlement = await this.release(uow, current, "move_execution_failed", event.correlation_id);
+        settled = await this.release(uow, current, "move_execution_failed", event.correlation_id);
       }
 
       const closed: Fulfillment = {
         ...current,
         move_job_reference: payload.job_id!,
         status: outcome,
-        settlement_state: settlement,
+        settlement_state: settled.settlement,
         completed_at: payload.completed_at!,
         closure_reason: reason,
       };
       uow.stage((scope) => this.repo.update(closed, scope));
-      uow.emit(this.closureEvent(closed, event.correlation_id, event.event_id));
+      uow.emit(
+        this.closureEvent(closed, event.correlation_id, event.event_id, settled.captured_minor),
+      );
       uow.audit(this.auditEntry("fulfillment.closed", closed, event.correlation_id));
       return closed;
     });
@@ -384,7 +414,7 @@ export class FulfillmentService {
     if (isClosed(current.status)) throw conflict("fulfillment is already closed");
     const reason = input.reason.trim();
     return withTransaction(this.tx, async (uow) => {
-      const settlement = await this.release(
+      const outcome = await this.release(
         uow,
         current,
         `cancelled:${reason}`,
@@ -395,7 +425,7 @@ export class FulfillmentService {
         current,
         "cancelled",
         reason,
-        settlement,
+        outcome,
         input.correlation_id,
         null,
       );
@@ -405,11 +435,35 @@ export class FulfillmentService {
   /**
    * Reconciliation read: fulfillments whose execution state and money state
    * disagree. An empty result is the invariant CORE is expected to hold.
+   *
+   * It reports both defects and pending decisions, because both mean the money
+   * question is open. `listPendingFinancialDecision` separates the half that is
+   * waiting on a business answer rather than on an engineer.
    */
   async listFinanciallyInconsistent(organizationId?: string): Promise<readonly Fulfillment[]> {
     return (await this.repo.all())
       .filter((item) => !organizationId || item.organization_id === organizationId)
       .filter((item) => !isFinanciallyConsistent(item));
+  }
+
+  /**
+   * Reconciliation read: fulfillments where money moved for work that did not
+   * complete, and CORE has not been told what should happen to it.
+   *
+   * Unlike the read above, a non-empty result here is not a CORE defect. It is
+   * the queue of cases blocked on the policy B-20 records as undecided, and it
+   * exists so those cases are counted and visible instead of being silently
+   * mixed with bookkeeping failures — or worse, silently closed.
+   */
+  async listPendingFinancialDecision(organizationId?: string): Promise<readonly Fulfillment[]> {
+    return (await this.repo.all())
+      .filter((item) => !organizationId || item.organization_id === organizationId)
+      .filter((item) => requiresFinancialDecision(item));
+  }
+
+  /** What CORE can say about the money behind one fulfillment. Derived, never stored. */
+  disposition(fulfillment: Fulfillment): FinancialDisposition {
+    return financialDisposition(fulfillment);
   }
 
   async require(fulfillmentId: string): Promise<Fulfillment> {
@@ -434,25 +488,54 @@ export class FulfillmentService {
     current: Fulfillment,
     status: FulfillmentStatus,
     reason: string | null,
-    settlement: SettlementState,
+    settled: SettlementOutcome,
     correlationId: string,
     causationId: string | null,
   ): Fulfillment {
     const closed: Fulfillment = {
       ...current,
       status,
-      settlement_state: settlement,
+      settlement_state: settled.settlement,
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
     uow.stage((scope) => this.repo.update(closed, scope));
-    uow.emit(this.closureEvent(closed, correlationId, causationId));
+    uow.emit(this.closureEvent(closed, correlationId, causationId, settled.captured_minor));
     uow.audit(this.auditEntry(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId));
     return closed;
   }
 
-  private closureEvent(fulfillment: Fulfillment, correlationId: string, causationId: string | null) {
+  /**
+   * The closure event for a fulfillment.
+   *
+   * Both closure events carry the money outcome, and `cancelled` in particular
+   * is read downstream as "the customer got their money back". That reading is
+   * false when part of the hold had already moved, so the event states the
+   * money facts CORE holds rather than leaving them to be inferred:
+   *
+   *  - `settlement_state` names where the money is, including
+   *    `partially_captured`;
+   *  - `captured_minor` is present only when CORE observed an amount, and is
+   *    omitted rather than sent as 0 when it did not;
+   *  - `financial_decision_required` is true when the execution closed without
+   *    delivering while money had moved. It is a fact about CORE's knowledge —
+   *    CORE has not been told whether that amount is refunded, retained
+   *    against work done, or charged as a fee — and never a policy CORE picked.
+   *    A consumer must not settle, refund or invoice on its own while it is
+   *    true (blocker B-20).
+   */
+  private closureEvent(
+    fulfillment: Fulfillment,
+    correlationId: string,
+    causationId: string | null,
+    capturedMinor: number | null,
+  ) {
     const cancelled = fulfillment.status === "cancelled";
+    const money = {
+      settlement_state: fulfillment.settlement_state,
+      financial_decision_required: requiresFinancialDecision(fulfillment),
+      ...(capturedMinor === null ? {} : { captured_minor: capturedMinor }),
+    };
     return makeEvent({
       event_type: cancelled ? "core.fulfillment.cancelled" : "core.fulfillment.completed",
       version: 1,
@@ -468,7 +551,7 @@ export class FulfillmentService {
             order_reference: fulfillment.market_order_reference,
             reason: fulfillment.closure_reason ?? "cancelled",
             cancelled_at: fulfillment.completed_at,
-            settlement_state: fulfillment.settlement_state,
+            ...money,
           }
         : {
             fulfillment_id: fulfillment.fulfillment_id,
@@ -476,7 +559,7 @@ export class FulfillmentService {
             outcome: fulfillment.status,
             completed_at: fulfillment.completed_at,
             reason: fulfillment.closure_reason,
-            settlement_state: fulfillment.settlement_state,
+            ...money,
           },
     });
   }
@@ -486,30 +569,43 @@ export class FulfillmentService {
     fulfillment: Fulfillment,
     correlationId: string,
   ): Promise<
-    | { ok: true; settlement: SettlementState }
-    | { ok: false; settlement: SettlementState; reason: string }
+    | { ok: true; settlement: SettlementState; captured_minor: number | null }
+    | { ok: false; settlement: SettlementState; captured_minor: number | null; reason: string }
   > {
     if (!this.payments || !fulfillment.payment_authorization_id) {
-      return { ok: true, settlement: "none" };
+      return { ok: true, settlement: "none", captured_minor: null };
     }
     try {
       await this.payments.captureWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
         correlation_id: correlationId,
       });
-      return { ok: true, settlement: "captured" };
+      // No amount is reported: a full capture takes the whole consented
+      // ceiling, which is the figure MARKET already holds from creating the
+      // hold, and `captureWithin` publishes a ledger transaction rather than
+      // the authorization total. Restating it from the transaction would be a
+      // guess on a hold captured in legs, where the last leg is not the total.
+      // Left as `null` — not observed — rather than filled in with a number
+      // CORE was not given. Recorded as an internal follow-up, not a blocker:
+      // no consumer has asked for the figure on the success path.
+      return { ok: true, settlement: "captured", captured_minor: null };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The capture was refused during its read phase, so nothing was staged
       // on `uow` and releasing instead is safe — the unit of work is still
       // clean at this point.
-      const settlement = await this.release(
+      const released = await this.release(
         uow,
         fulfillment,
         `settlement_failed:${message}`,
         correlationId,
       );
-      return { ok: false, settlement, reason: `payment_settlement_failed:${message}` };
+      return {
+        ok: false,
+        settlement: released.settlement,
+        captured_minor: released.captured_minor,
+        reason: `payment_settlement_failed:${message}`,
+      };
     }
   }
 
@@ -531,8 +627,10 @@ export class FulfillmentService {
     fulfillment: Fulfillment,
     reason: string,
     correlationId: string,
-  ): Promise<SettlementState> {
-    if (!this.payments || !fulfillment.payment_authorization_id) return "none";
+  ): Promise<SettlementOutcome> {
+    if (!this.payments || !fulfillment.payment_authorization_id) {
+      return { settlement: "none", captured_minor: null };
+    }
     try {
       const hold = await this.payments.voidWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
@@ -542,7 +640,10 @@ export class FulfillmentService {
       // `released` is a claim that no money moved. It is only true when the
       // hold never captured anything; a hold that moved part of its amount and
       // released the rest is a different fact and gets a different name.
-      return hold.captured_minor > 0 ? "partially_captured" : "released";
+      return {
+        settlement: hold.captured_minor > 0 ? "partially_captured" : "released",
+        captured_minor: hold.captured_minor,
+      };
     } catch (err) {
       // Deliberately OUT of the unit of work (B-9). Nothing was mutated here,
       // so there is no change for this entry to be atomic with, and it is the
@@ -565,7 +666,12 @@ export class FulfillmentService {
           error: err instanceof Error ? err.message : String(err),
         },
       });
-      return "unsettled";
+      // The amount is unknown by construction: the void failed, so CORE never
+      // got an answer about the hold. Reporting 0 would assert that nothing
+      // moved, which is the mistake this cycle exists to remove, so the
+      // `unsettled` state carries no amount and the audit entry carries the
+      // hold reference an operator needs to go and look.
+      return { settlement: "unsettled", captured_minor: null };
     }
   }
 
@@ -576,20 +682,32 @@ export class FulfillmentService {
    * remains the backstop.
    */
   private async inspectHold(authorizationId: string | null): Promise<HoldInspection> {
-    if (!authorizationId) return { usable: true, settlement: "none", reason: null };
+    if (!authorizationId) {
+      return { usable: true, settlement: "none", reason: null, captured_minor: null };
+    }
     if (!this.payments?.getAuthorization) {
-      return { usable: true, settlement: "held", reason: null };
+      return { usable: true, settlement: "held", reason: null, captured_minor: null };
     }
     let authorization: { status: string; captured_minor: number; expires_at: string | null };
     try {
       authorization = await this.payments.getAuthorization(authorizationId);
     } catch {
-      return { usable: false, settlement: "none", reason: "payment_hold_not_found" };
+      return {
+        usable: false,
+        settlement: "none",
+        reason: "payment_hold_not_found",
+        captured_minor: null,
+      };
     }
     if (authorization.status === "captured") {
       // Money already moved for work that has not been coordinated yet: the
       // order is refused and the mismatch is surfaced for reconciliation.
-      return { usable: false, settlement: "unsettled", reason: "payment_hold_already_captured" };
+      return {
+        usable: false,
+        settlement: "unsettled",
+        reason: "payment_hold_already_captured",
+        captured_minor: authorization.captured_minor,
+      };
     }
     if (authorization.status === "partially_captured") {
       // A closed hold that moved part of its amount. Refused for the same
@@ -601,18 +719,29 @@ export class FulfillmentService {
         usable: false,
         settlement: "partially_captured",
         reason: "payment_hold_partially_captured",
+        captured_minor: authorization.captured_minor,
       };
     }
     if (authorization.status !== "authorized") {
-      return { usable: false, settlement: "released", reason: "payment_hold_not_authorized" };
+      return {
+        usable: false,
+        settlement: "released",
+        reason: "payment_hold_not_authorized",
+        captured_minor: authorization.captured_minor,
+      };
     }
     if (
       authorization.expires_at &&
       Date.parse(authorization.expires_at) <= this.clock.now().getTime()
     ) {
-      return { usable: false, settlement: "held", reason: "payment_hold_expired" };
+      return {
+        usable: false,
+        settlement: "held",
+        reason: "payment_hold_expired",
+        captured_minor: authorization.captured_minor,
+      };
     }
-    return { usable: true, settlement: "held", reason: null };
+    return { usable: true, settlement: "held", reason: null, captured_minor: authorization.captured_minor };
   }
 
   /**
