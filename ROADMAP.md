@@ -81,19 +81,19 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Two scopes were reserved and closed in this cycle, and both
-are now on `main`:
-
-- Reputation and trust signals (ADR 0015): migration 0018,
-  `src/modules/reputation/`, four contracts and `docs/reputation.md`. What is
-  left of it is not implementable in CORE — no producer publishes
-  `market.review.*` yet, and weighting, decay, thresholds and cross-tenant
-  aggregation are owner decisions recorded as **B-31…B-34**.
-- The CI database gate: CI now runs the suite against a real PostgreSQL server,
-  each Vitest worker owns its own database, and the migration-lifecycle files run
-  in their own pass. The flake this repository carried for several cycles is
-  explained and gone, and a worse defect — a suite verdict that depended on
-  scheduling — was found while measuring it.
+**Reserved: uniqueness parity between the reference backend and Postgres
+(branch `uniqueness-parity`).** The schema declares 24 uniqueness rules — 21
+UNIQUE constraints, one `EXCLUDE USING gist`, and three partial unique indexes.
+Only three of them are restated by name anywhere in `src/`, and reading the
+reference stores shows several that are not enforced at all: two on `principal`,
+one on `session`, one on `membership`, one on `region`, `fulfillment`'s job
+reference, both `subscription_period` uniqueness rules including the overlap
+exclusion, and the two `legacy_id` partial indexes. Wherever that is true the
+in-memory backend accepts a row Postgres refuses, so a dual-backend test can pass
+on a race that production would have rejected — which is what B-12 was, declared
+resolved for money only. Scope: measure each rule against both backends, fix the
+reference store where they disagree, and add a gate so a new uniqueness rule
+cannot ship without parity.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
