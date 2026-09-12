@@ -3821,3 +3821,24 @@ the migrations CI applies are applied to a throwaway container. A green database
 job means the schema and the adapters agree with the tests on a supported major
 version; it is not a deployment rehearsal, which is still Milestone 9 and still
 blocked on B-5/B-6.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `5f51d9b` on `ci-database-gate`, run `34722170193` (push):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 32s | the dependency-free pass still stands on its own |
+| `Verify against PostgreSQL` | **success**, 1m37s | migrations 0001…0017 applied against `postgres:16`; **656 tests passed in 37 files** with `DATABASE_URL` set, then the migration-lifecycle pass **1 passed in 4.74s**; newest migration rolled back and re-applied |
+
+657 assertions now run in CI where 368 ran before. The number that matters most
+is the 4.74s: the file this repository called a flake for several cycles, which
+timed out at 60s under contention, completes in under five seconds once nothing
+competes with it — which is the evidence that the diagnosis was contention rather
+than a slow test.
+
+Both jobs are required by nothing yet: branch protection is not configured on this
+repository, so a red job blocks no merge automatically. That is a repository
+setting rather than a code change, and it is the one thing this cycle could not do
+from inside the tree — recorded here so the next cycle does not mistake a green
+badge for an enforced gate.
