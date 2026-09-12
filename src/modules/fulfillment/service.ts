@@ -186,10 +186,23 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
  * to express, however carefully each side was written.
  */
 export interface FulfillmentPaymentPort {
-  captureWithin(
+  /**
+   * Captures the hold and reports it as it now stands.
+   *
+   * The return value is the same kind of fact `voidWithin` reports, and it is
+   * required for the same reason. This method used to answer `unknown`, so the
+   * success path had no amount to publish and `core.fulfillment.completed`
+   * carried no `captured_minor` at all — while the *failure* path carried one.
+   * A consumer reading the two events therefore learned how much a payer paid
+   * for work that was never delivered, and nothing about what they paid for
+   * work that was. `captured_minor` here is the hold's running total, never the
+   * amount of the last leg: on a hold captured in legs those differ, and the
+   * total is the figure that is true.
+   */
+  captureHoldWithin(
     uow: UnitOfWork,
     input: { authorization_id: string; correlation_id: string },
-  ): Promise<unknown>;
+  ): Promise<{ status: string; captured_minor: number }>;
   /**
    * Releases whatever is still held and reports the hold as it now stands.
    *
@@ -910,19 +923,28 @@ export class FulfillmentService {
       return { ok: true, settlement: "none", captured_minor: null };
     }
     try {
-      await this.payments.captureWithin(uow, {
+      const hold = await this.payments.captureHoldWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
         correlation_id: correlationId,
       });
-      // No amount is reported: a full capture takes the whole consented
-      // ceiling, which is the figure MARKET already holds from creating the
-      // hold, and `captureWithin` publishes a ledger transaction rather than
-      // the authorization total. Restating it from the transaction would be a
-      // guess on a hold captured in legs, where the last leg is not the total.
-      // Left as `null` — not observed — rather than filled in with a number
-      // CORE was not given. Recorded as an internal follow-up, not a blocker:
-      // no consumer has asked for the figure on the success path.
-      return { ok: true, settlement: "captured", captured_minor: null };
+      // The amount is now reported, because money hands the hold back and its
+      // running total is a fact CORE was given rather than one it would have to
+      // guess. Previously this was `null` on the reasoning that no consumer had
+      // asked for it — which made the success event the only closure event that
+      // stated no amount, so "how much did this order actually cost" was
+      // answerable for cancelled work and not for delivered work.
+      //
+      // The settlement state is read off the hold rather than assumed to be
+      // `captured`. Today this call captures the whole remainder, so the hold
+      // always comes back closed and the second branch is a guard rather than a
+      // live path — but it is the guard that keeps this seam honest if
+      // fulfillment ever settles in legs: writing `captured` unconditionally
+      // would claim the entire consented ceiling moved on the strength of the
+      // call having not thrown, which is the class of assumption that produced
+      // the `released`-for-`partially_captured` defect on the release path.
+      const settlement: SettlementState =
+        hold.status === "captured" ? "captured" : "partially_captured";
+      return { ok: true, settlement, captured_minor: hold.captured_minor };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // The capture was refused during its read phase, so nothing was staged

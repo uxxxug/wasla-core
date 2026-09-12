@@ -311,11 +311,14 @@ describe.each(backends)("financial decision boundary on $name", (backend) => {
       settlement_state: "captured",
       financial_decision_required: false,
     });
-    // `captured_minor` is absent rather than 6 000: the capture port reports a
-    // ledger transaction, not the authorization total, and CORE publishes only
-    // amounts it was given. Absent means "not observed" — pinned here so it is
-    // never quietly turned into a 0, which would assert the opposite.
-    expect(event?.payload).not.toHaveProperty("captured_minor");
+    // `captured_minor` is the whole ceiling, and it is stated. This assertion
+    // used to pin the opposite — that the amount was absent because the capture
+    // port reported a ledger transaction rather than the hold. That made the
+    // success event the only closure event carrying no amount, so "what did this
+    // delivered order cost" was answerable for cancelled work and not for
+    // completed work. The port now reports the hold's running total, so the
+    // figure is one CORE was given and not one it inferred.
+    expect(event?.payload).toMatchObject({ captured_minor: 6_000 });
     expect(await core.fulfillment.listPendingFinancialDecision(organizationId)).toHaveLength(0);
     expect(await core.fulfillment.listFinanciallyInconsistent(organizationId)).toHaveLength(0);
   });

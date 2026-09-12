@@ -197,6 +197,40 @@ captured_minor > 0  ->  partially_captured
 otherwise           ->  released
 ```
 
+### The same fix, applied to the success path (2026-09-12)
+
+The release path reported an amount; the capture path did not. `captureWithin`
+answered `Promise<unknown>`, `settle()` discarded it, and
+`core.fulfillment.completed` published `captured_minor: null`. So the one closure
+a payer had certainly paid for was the one closure that named no figure, while a
+cancellation after a partial capture named one — exactly backwards.
+
+`MoneyService` now also exposes `captureHoldWithin`, which returns the
+`PaymentAuthorization` rather than the `LedgerTransaction`, mirroring
+`voidWithin`. This distinction is the whole point: the transaction is **one
+capture leg**, the authorization carries the **running total**. A hold of 6 000
+captured 2 500 out of band and then closed by CORE for the 3 500 remainder has a
+final leg of 3 500 and a total of 6 000; publishing the leg would have been a
+true number about the wrong thing, and an understatement of what the payer paid.
+
+`settle()` therefore reports `captured_minor` from the authorization, and derives
+the settlement state the same way `release()` does:
+
+```
+status = 'captured'  ->  captured
+otherwise            ->  partially_captured
+```
+
+The second branch is a guard, not a live path: today `settle()` captures the
+whole remaining hold, so a `captured` status is the only outcome reached. It is
+written as a derivation anyway, because the alternative is a hardcoded
+`captured` that would silently misreport the day a partial-capture settlement
+policy arrives (blocker B-20).
+
+`captured_minor` stays **optional** on both closure contracts. An order with no
+hold at all completes without it, and that must not become `0` — absent means
+"CORE observed no amount", whereas zero would assert that nothing moved.
+
 ### Why a failed fulfillment may hold it, and why it is still "inconsistent"
 
 `fulfillment_settlement_alignment_check` **accepts** `partially_captured` against

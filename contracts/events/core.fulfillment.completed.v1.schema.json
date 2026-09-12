@@ -59,7 +59,7 @@
     "captured_minor": {
       "type": "integer",
       "minimum": 0,
-      "description": "The amount of the hold, in minor units, that CORE observed as already moved at closure. Present only when CORE was given the figure by its money module; omitted when it was not observed, which is deliberately different from zero. Never treat an absent value as zero."
+      "description": "The running total of the hold, in minor units, that CORE had observed as moved at closure. Present whenever CORE was given the figure by its money module, which since the 2026-09-12 tenant-scope cycle includes the success path: a completed execution captures the hold and states the total it captured, so the amount a delivered order actually cost is readable from the event. It is the hold's total and never the amount of the last capture leg. Absent means CORE did not observe an amount — no hold guarded the fulfillment, or the settlement itself failed and left the hold `unsettled`. Absent is deliberately different from zero and must never be read as zero."
     },
     "financial_decision_required": {
       "type": "boolean",

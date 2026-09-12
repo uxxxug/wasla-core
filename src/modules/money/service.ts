@@ -276,6 +276,41 @@ export class MoneyService {
    * releases the remainder explicitly.
    */
   async captureWithin(uow: UnitOfWork, input: CaptureInput): Promise<LedgerTransaction> {
+    return (await this.applyCaptureWithin(uow, input)).transaction;
+  }
+
+  /**
+   * Captures and reports the **hold** rather than the ledger leg.
+   *
+   * The counterpart of `voidWithin`, and it exists for the same reason that one
+   * returns an authorization: a caller that has to record where the money now
+   * stands needs the hold's running total, and the ledger transaction only ever
+   * carries the amount of the leg that just moved. On a hold captured in legs
+   * the last leg is not the total, so a caller deriving the total from the
+   * transaction would understate what the payer paid — which is why
+   * `FulfillmentService` previously published no amount at all on the success
+   * path and left consumers to infer it.
+   *
+   * Same idempotency as `captureWithin`, because it is the same call: a retry
+   * returns the stored authorization, whose `captured_minor` already includes
+   * the earlier capture.
+   */
+  async captureHoldWithin(
+    uow: UnitOfWork,
+    input: CaptureInput,
+  ): Promise<PaymentAuthorization> {
+    return (await this.applyCaptureWithin(uow, input)).authorization;
+  }
+
+  /**
+   * The one capture implementation. Reports both facts it produces — the ledger
+   * leg and the hold as it now stands — so the two public forms are two
+   * projections of one write and cannot drift.
+   */
+  private async applyCaptureWithin(
+    uow: UnitOfWork,
+    input: CaptureInput,
+  ): Promise<{ transaction: LedgerTransaction; authorization: PaymentAuthorization }> {
     assertId("authorization_id", input.authorization_id);
     const authorization = await this.repo.getAuthorization(input.authorization_id);
     if (!authorization) throw notFound("payment authorization not found");
@@ -291,7 +326,10 @@ export class MoneyService {
       ? `capture:${authorization.authorization_id}:${input.capture_reference}`
       : `capture:${authorization.authorization_id}`;
     const existing = await this.repo.findTransactionByReference(reference);
-    if (existing) return existing;
+    // The stored authorization is the right answer for the hold on a retry: it
+    // already includes the capture this call is repeating, so a caller reading
+    // `captured_minor` from it sees the same total the first call produced.
+    if (existing) return { transaction: existing, authorization };
 
     if (authorization.status !== "authorized") throw conflict("authorization cannot be captured");
     if (this.isExpired(authorization)) {
@@ -371,7 +409,10 @@ export class MoneyService {
         authorization.currency,
       ),
     );
-    return transaction;
+    // `updated`, not `authorization`: the caller needs the hold as this capture
+    // leaves it. Returning the pre-capture row would report a total that is
+    // short by exactly the amount just captured.
+    return { transaction, authorization: updated };
   }
 
   /**
