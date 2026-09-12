@@ -137,11 +137,13 @@ replay scope, because such a row has `attempts` well below the limit and a
 `last_error` starting `reclaim limit exceeded` — the payload was never processed at
 all, so replaying it is a first attempt, not a retry.
 
-**Only `inbound_event` is replayable.** A dead `outbox` row — an event MOVE and
-MARKET will now never receive — and a dead `event_delivery` row have no revival
-path in CORE at all: no requeue, no revive, and replay does not read those tables.
-That gap is recorded as a blocker in `ROADMAP.md` rather than papered over here.
-Recovering such a row today means a manual `update` against the database.
+**Only `inbound_event` is replayable, and that is still true** — but the gap it
+used to leave is closed. A dead `outbox` row (an event MOVE and MARKET would never
+receive) and a dead `event_delivery` row are now recoverable through a separate
+command, `npm run revive`, documented in `docs/queue-revival.md` (B-27). Replay
+still does not read those tables, and revival still does not publish anything: the
+two are siblings, not one command with a switch. Recovering such a row no longer
+means a hand-written `update` against production.
 
 The reason for compulsory narrowing is reviewability: an operator, and later an
 auditor, must be able to read the command and know what it will touch before it
@@ -387,6 +389,12 @@ nothing, and four journal entries naming the principal.
 - **B-23**, **D-6**, **D-7**, **D-8** remain external dependencies. Replay
   records where B-23 bites (tenant-scoped replay of `move.*`) rather than
   working around it.
+- Nothing for the other two queues. Replay reads `inbound_event` and only
+  `inbound_event`; bringing back a dead `outbox` row or `event_delivery` row was
+  recorded as **B-27** and resolved later by the sibling command described in
+  `docs/queue-revival.md`, which returns rows to `pending` and publishes nothing
+  itself. Folding it in here would have made one service whose behaviour
+  bifurcates entirely on which table it was pointed at.
 - No new index on `inbound_event`. The selection is bounded and operator-driven,
   not on a request path; adding an index for a tool that runs by hand would be a
   migration in search of a problem.

@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Claim fencing — a claim is now exclusive for as long as it is held, not only at the instant it is taken. B-22 made claiming a write, B-24 made an abandoned claim visible, B-25 bounded how often it may be recovered; all three are about the moment of claiming, and none of them stopped a worker that stalled past its lease from waking up and acknowledging work that had already been reclaimed and finished by somebody else. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery`; `claimDue` stamps it, recovery and every acknowledgement clear it, and the nine acknowledgements across six store implementations match on it and return `boolean`. The three workers report a `fenced` count, so `core_worker_outcomes_total{outcome="fenced"}` is finally reportable by all four workers rather than by `notification` alone. The relay's refusal throws `FencedError` so its fan-out rolls back and no attempt is charged. **B-26 resolved.** 608 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **608 passed / 36 files**; `npm test` without a database 342 passed / 47 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied, with 0016 executed against that database and its `.down.sql` executed and re-applied rather than merely written. Falsifiable and checked by mutation: making `isFenced` never fence fails 5 of the 14 new tests, dropping the `claim_token = $2` predicate from the Postgres `markPublished` fails 2, and letting the in-memory recovery keep the token fails 2 — each mutation restored and `tsc` re-run clean afterwards. The `claim_token` column, its nullability, its absent default and the `*_claim_token_check` constraint are asserted against the **live** schema in `tests/db-schema.test.ts`, including that the constraint actually rejects a token on an unclaimed row. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` can time out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
+**Last milestone:** Queue revival — `dead` is no longer a state with no exit. B-22 gave the outbound queues a `dead` status, B-25 added a second route into it and B-26 made the acknowledgement that writes it fence-safe; none of the three built the way back, so a dead `outbox` row or `event_delivery` row was durable and unreachable at once and the recovery procedure was an `UPDATE` typed into a production console. `selectDead`/`revive` on both stores for both queues (no schema change: it is a status transition over existing columns), `QueueRevivalService` with a dry run that writes nothing at all, its own advisory-lock key, the `events.revive` permission for `platform_admin` alone, two audit entries per run, and `npm run revive` as a dry run unless `--execute`. The owner question that had blocked B-27 is answered and implemented: **revival re-publishes the original envelope unchanged** — it returns the row to `pending` and publishes nothing itself, so the existing relay and delivery worker send the stored envelope under the same `event_id`, and CORE still has exactly one publish path. `attempts` and `last_error` are preserved on purpose, which means a row that died at `maxAttempts` gets exactly one further attempt and every subsequent one costs another journalled decision. A delivery whose subscription has since been deactivated is refused. **B-27 resolved.** 636 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **636 passed / 37 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied — this cycle added no migration, because reviving a row is a status transition over columns that already exist. Falsifiable and checked by mutation: dropping `status = 'dead'` from the revival update fails 2 of the 28 new tests (one per backend), zeroing `attempts` on revival fails 2, and removing the inactive-subscription refusal fails 2 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) still applies.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -166,7 +166,8 @@ Nothing.
 | B-24 | **Resolved.** Lease expiry was indistinguishable from a scheduled retry for three of the four workers, so `core_worker_outcomes_total{outcome="reclaimed"}` could only be reported for notifications. The B-22 fix made every claim write a lease, but for the outbox relay, the inbound dispatcher and the delivery worker that lease rode on `next_attempt_at`, which is also the retry-schedule field — one column, two meanings, nothing on the row saying which. Migration 0014 adds a nullable `claimed_at timestamptz` to `outbox`, `inbound_event` and `event_delivery`, which makes the overloaded column readable: `claimed_at is null` means `next_attempt_at` is a retry schedule, `claimed_at is not null` means it is a lease expiry. `claimDue` sets it and takes only rows where it is null, so an expired lease is no longer silently re-served; `reclaimExpired(now, limit)` on all three ports (mirroring the one `PgNotificationStore` already had) clears it, makes the row due immediately and records `last_error = 'abandoned claim reclaimed after attempt N'`; every worker recovers **before** claiming, so a recovered row is worked in the same tick; every acknowledgement clears it, enforced by a per-table check constraint (`claimed_at IS NULL OR status = 'pending'`) so a finished row cannot be counted in flight for ever. `counts()` gains `in_flight` and `abandoned`, both subsets of `pending` and both cut at the injected clock so the two backends agree. Rejected: a `processing` status, which would change what every existing reader means by `pending` — a contract change to fix a metric; and a `claim_token`, which is real fencing and is recorded separately as B-26. **Decision about existing rows** (the roadmap required this be stated): they get `NULL` = "not held", which is safe for rows genuinely in flight during the migration — they keep their future `next_attempt_at`, stay invisible until the lease would have expired anyway, then are claimed as today. No downtime and no worker stop; the one cost is that claims held across the migration are not counted when taken over. Rollback is the reverse order — code first, then `0014_worker_claim_visibility.down.sql` — because code that writes `claimed_at` against a schema without it fails every claim and stops all three queues | resolved | — |
 | B-25 | **Resolved.** An abandoned claim did not spend an attempt, so a row whose worker died on it every time was recovered for ever and never dead-lettered: the one queue state that requires a human was the one state it could not reach. Fixed with a **second budget** rather than by reusing the first — `reclaims integer not null default 0` on `outbox`, `inbound_event` and `event_delivery` (migration 0015), incremented by `reclaimExpired(now, maxReclaims, limit)`, which dead-letters the row on the increment that passes the limit (default 3, `DEFAULT_MAX_RECLAIMS`) instead of freeing it. The three workers report the two counts as `reclaimed` and `failed_permanent`, plus a `reclaim_exhausted` field on their result. Charging `attempts` was rejected on evidence, not taste: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop would impose exponential delays a healthy row never earned, and `retrying` is derived as `pending and attempts > 0`, so a row nobody had tried would report as retrying. Charging the attempt at claim time — the notification store's single-counter approach — was rejected because B-22 declined to change `attempts` semantics for these three workers and it would silently halve every retry limit. `tests/reclaim-budget.test.ts` covers all three queues plus the worker-level result and metrics on both backends; the column, its default and its check constraint are asserted against the live schema | — |
 | B-26 | **Resolved.** A claim was exclusive at the instant it was taken (B-22), visible while held (B-24) and bounded in how often it could be taken back (B-25) — and none of that made it exclusive *over time*. A worker that stalled past its lease, was reclaimed, and then called `markPublished`/`markProcessed`/`markDelivered` succeeded, because the acknowledgement named the row and not the claim; the row then recorded the abandoned attempt instead of the one that happened. The worst case is a stale success on `inbound_event`: an event marked `processed` whose live attempt actually failed is never dispatched again and the failure is invisible. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery` — the shape `notification` has had since 0012 — stamped by `claimDue`, cleared by recovery and by every acknowledgement, and matched by all nine acknowledgements across the six store implementations, which now return `boolean`. `src/platform/eventing/fencing.ts` holds `newClaimToken()`, `isFenced()`, `UNFENCED` and `FencedError`. The three workers report a `fenced` count and emit `core_worker_outcomes_total{outcome="fenced"}`, an outcome that has been in the catalogue since Milestone 8 and that only `notification` could produce until now. The relay is the one transactional case: `markPublished` runs inside the transaction that queues the fan-out, so a refusal throws `FencedError` to roll those delivery rows back, and the catch block checks for it **before** the attempts arithmetic — a fence is not a failed publish and must not charge an attempt or impose a backoff. Replay passes `UNFENCED` and is the only caller in CORE entitled to: an operator advancing a `dead` row holds no claim, and a fence that applied to every caller would have broken the only recovery path this queue has. Rejected: `uuid` (to match `notification.claim_token text`), `gen_random_uuid()` in the database (unavailable to the in-memory backend — B-12), a token per row rather than per batch claim (one statement per row, refusing nothing extra), and the strong constraint "every claimed row carries a token" (false for rows already claimed when the migration runs, and a backfilled token would fence out a worker still doing real work). What it does **not** fix: the duplicate side effect. A POST or a bus publish that already happened is not undone — delivery stays at-least-once and subscribers still deduplicate on `event_id`. The fence protects what the row records | resolved | — |
-| B-27 | A dead `outbox` or `event_delivery` row has no revival path in CORE at all | Replay (`src/platform/replay/service.ts`) reads `inbound_event` only; its `DEFAULT_STATUSES = ["pending", "dead"]` is what makes a dead inbound event operator-recoverable. There is no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead `outbox` row — an event MOVE and MARKET will now **never** receive — and a dead `event_delivery` row are durable and unreachable at the same time, which is precisely the defect Milestone 6 was created to remove for inbound events. B-25 makes this matter more, not less: it adds a second, entirely new way for rows in exactly those two tables to reach `dead`. Recovering one today means a manual `update` against the database, unreviewed and unaudited | A revival command per queue that resets `status` to `pending`, clears `claimed_at`, zeroes `reclaims` and leaves `attempts` alone, under the same compulsory-narrowing and audit rules replay already enforces; or extend the replay service to cover all three queues rather than adding a third mechanism. Needs an owner decision on whether reviving a dead outbox row should re-publish the original envelope unchanged or emit a fresh one with a new `event_id` |
+| B-27 | **Resolved.** A dead `outbox` or `event_delivery` row had no revival path in CORE at all. Replay reads `inbound_event` only, and there was no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead outbox row — an event MOVE and MARKET would never receive — was durable and unreachable at the same time, which is the exact defect Milestone 6 removed for inbound events. B-25 had made it worse by adding a second route to `dead`. Recovering a row meant a manual `update` against the database, unreviewed and unaudited, and free to resurrect a row that had already been published | Closed by `selectDead`/`revive` on `OutboxStore` and `DeliveryStore` in both backends, `QueueRevivalService` (`src/platform/replay/revive.ts`), the `events.revive` permission and `npm run revive`, all documented in `docs/queue-revival.md`. The owner decision is taken and recorded: revival **re-publishes the original envelope unchanged**. It publishes nothing itself — the row goes back to `pending` and the existing relay and delivery worker do what they always do, which keeps one publish path in CORE and keeps `event_id` stable for every consumer inbox and every subscriber that deduplicates on it. A fresh envelope was rejected: it would need a second publish path and would make a month-old fact arrive as news |
+| B-28 | Deactivating a subscription does not stop deliveries already queued for it | `DeliveryFanOut` filters `subscriptionsFor` on `active`, so no new delivery is queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checks `active`, and a delivery that was already `pending` when the subscription was switched off is still claimed, signed and POSTed. Found while building B-27, which is why revival refuses a dead delivery for an inactive subscription: revival is a new decision to send, so it must honour the switch, while an already-pending row predates the decision and draining it may well be intended. Both readings are defensible, which is exactly why CORE should not pick one silently | Needs an owner answer: does deactivating a subscription mean *stop sending now* (the worker must skip and dead-letter or cancel pending rows for inactive subscriptions) or *stop queueing new work* (current behaviour, and the queue drains)? The second is cheaper and is what ships today; the first is what an operator switching off a compromised endpoint almost certainly expects. CORE has documented the current behaviour rather than changing it |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -3349,3 +3350,124 @@ shape of the code, so it should not be guessed. B-25 and now B-26 both make it m
 more: there are more ways to reach `dead`, and the rows that get there are still
 unreachable. **B-14…B-19** and **B-20** need owner decisions. **Milestone 9** is still
 blocked on B-5/B-6. No MOVE or MARKET code was read or written in this cycle.
+
+## Cycle 2026-09-12 (eleventh) — B-27, queue revival (CORE-only agent)
+
+Baseline `ec4ed8b`, working tree clean, 608 tests passing. No MOVE or MARKET code
+was read or written.
+
+### The defect
+
+`dead` was a state with no exit. B-22 introduced it, B-25 added a second route into
+it, B-26 made the acknowledgement that writes it fence-safe — and across those three
+cycles nobody built the way back. Replay could bring an `inbound_event` back;
+nothing in CORE could bring back an `outbox` row or an `event_delivery`. There was
+no `requeue`, no `revive`, no equivalent, anywhere. A dead outbox row was an event
+MOVE and MARKET would never receive, held safely in a table nobody could act on: a
+terminal state with no exit is not durability, it is a hole with a name. The
+recovery procedure in practice was an `UPDATE` typed into a production console by
+whoever happened to be awake — unjournalled, unbounded, and free to touch a row that
+had already been published.
+
+### The owner decision, and what it settled
+
+B-27 had been left open for one reason: does reviving a dead outbox row re-publish
+the original envelope, or emit a fresh one with a new `event_id`? The answer given
+was **re-publish the original envelope unchanged**, and it decided the shape of
+everything else.
+
+Because a revival must not change the envelope, **a revival publishes nothing at
+all.** It returns the row to `pending` and stops. The outbox relay then publishes
+it; the delivery worker then POSTs it. Both do exactly what they always do, to the
+bytes that were already stored — same `event_id`, same `occurred_at`, same payload,
+same signature. There is no second publish path, which was the point of the outbox
+in the first place. A fresh envelope would have required one, and every consumer
+inbox and every subscriber deduplicating on `event_id` would have seen a month-old
+fact as news: a duplicate effect bought for nothing.
+
+### What was written
+
+- **`src/platform/eventing/revival.ts`** — the selection vocabulary shared by both
+  backends: `OutboxRevivalSelection`, `DeliveryRevivalSelection`, their matchers, and
+  a row-value cursor comparison. Shared rather than duplicated because a filter that
+  means one thing in memory and another in Postgres is a test that passes on the
+  wrong backend (B-12 discipline).
+- **`selectDead` and `revive` on `OutboxStore` and `DeliveryStore`**, in the
+  in-memory and Postgres implementations. `revive` matches on `status = 'dead'`
+  inside the same statement, so it is a transition and not an overwrite and can
+  never resurrect a `published` row. Selects use bound parameters only: the filters
+  are operator-supplied and are therefore an injection surface.
+- **`src/platform/replay/revive.ts`** — `QueueRevivalService`, with `plan` (writes
+  nothing, not even an audit entry) and `run`. Compulsory narrowing, a mandatory
+  limit bounded at 1..1000, per-row commits, a resume cursor that on failure points
+  *before* the row that failed, and two journal entries per run.
+- **`src/platform/replay/revive-cli.ts` / `revive-main.ts`** and `npm run revive` —
+  dry run unless `--execute`, token from the environment rather than `argv`, both
+  halves of a cursor or neither.
+- **`events.revive`**, `platform_admin` only, and a **separate advisory-lock key**.
+- **`docs/queue-revival.md`**, and `docs/replay.md` corrected: it stated in plain
+  terms that those rows had no revival path, and that statement is now false.
+
+### No migration, and no index
+
+Neither was needed and neither was invented. Revival writes `status`,
+`next_attempt_at`, `claimed_at`, `claim_token` and `reclaims` — all columns that
+already exist — and the selection is a bounded, operator-driven query off any
+request path, so an index for it would be a migration in search of a problem. This
+is the first cycle since 0013 to add no migration, which is the correct outcome
+rather than a gap.
+
+### The asymmetry that is easy to get wrong
+
+`reclaims` is zeroed. `attempts` and `last_error` are not.
+
+`attempts` drives the backoff, drives the derived `retrying` reading, and is the
+only record of how many observed failures the row caused. Zeroing it would falsify
+two readings and convert one operator decision into an unbounded retry budget: die
+at five, revive, retry five, die, revive. `reclaims` counts worker deaths, which are
+evidence about the worker and not about the row, so it resets. `last_error` is the
+only on-row evidence of why the row died, and the revival itself belongs in the
+audit journal, where the actor is named.
+
+The consequence is stated in the docs rather than hidden: **a row that died at
+`maxAttempts` gets exactly one further attempt.** That is what makes revival bounded
+by construction and puts every retry decision beside a name.
+
+### A real defect found while building it
+
+`DeliveryFanOut` filters subscriptions on `active`; `DeliveryWorker.drainOnce` does
+not. So a delivery already queued when a subscription is switched off is still sent.
+Revival therefore refuses a dead delivery whose subscription is inactive — otherwise
+it would be the one path in CORE that POSTs to an endpoint somebody deliberately
+switched off, at the request of an operator looking at a dead-letter queue rather
+than at the subscription list. The worker's behaviour was **documented, not
+changed**: whether deactivation means "stop sending now" or "stop queueing new work"
+is an owner decision, recorded as **B-28**.
+
+### Verification
+
+`tests/queue-revival.test.ts`, 28 tests over both backends: the original envelope
+arriving unchanged at a bus consumer and at a subscriber; `attempts` and
+`last_error` surviving while the claim and the reclaim budget are cleared; a
+published row refusing to be resurrected through the service *and* directly through
+the store; an inactive subscription refusing a delivery and the row staying dead; a
+plan writing nothing including no audit entry; every refusal of a scope; the
+journal's counts and revived ids; a second run doing nothing; cursor paging over two
+rows without repeating or skipping; the advisory lock refusing a concurrent run;
+revival and replay not blocking each other; the permission held by `platform_admin`
+alone; and the parser's defaults and refusals.
+
+636 tests over 37 files pass with `DATABASE_URL`; `tsc --noEmit` clean; governance,
+contract, migration and roadmap gates pass. Three mutations confirm the tests can
+fail: dropping `status = 'dead'` from the revival update fails 2 (one per backend),
+zeroing `attempts` on revival fails 2, and removing the inactive-subscription
+refusal fails 2. Each was restored and `tsc` re-run clean.
+
+### What CORE still needs from elsewhere
+
+**B-28** is new and recorded above; it is a one-line owner answer, and CORE has
+documented current behaviour rather than guessing. With B-27 closed, every remaining
+blocker inside CORE's reach is now an owner decision rather than an implementation
+gap: **B-14…B-19** (subscription policy), **B-20** (what is owed when work fails
+after a partial capture), **D-6…D-8**. **Milestone 9** remains blocked on B-5/B-6.
+No MOVE or MARKET code was read or written in this cycle.

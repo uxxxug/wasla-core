@@ -106,6 +106,14 @@ get the identical refusal. Repeating it only delays someone noticing. A `dead`
 row stays visible at `GET /v1/event-deliveries/undelivered` so an operator can
 find it without reading logs.
 
+Once whatever refused the payload has been fixed, a dead delivery can be put back
+into the queue with `npm run revive` (B-27) — see `docs/queue-revival.md`. The
+revival changes the row's status and nothing else: the worker then POSTs the
+envelope that was already stored, under the same `event_id`, which is why
+subscribers must be idempotent on it. A revival is refused if the subscription has
+since been deactivated, because deactivating a subscription is how sending to that
+subscriber is stopped and the worker itself does not re-check it.
+
 ## Signing
 
 Each body is signed `HMAC-SHA256` with the subscription's secret, sent as
