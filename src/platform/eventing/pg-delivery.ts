@@ -8,6 +8,7 @@ import type {
   EventDelivery,
   EventSubscription,
 } from "./delivery.js";
+import { newClaimToken, type Fence } from "./fencing.js";
 import type { ReclaimOutcome } from "./reclaim.js";
 
 interface SubscriptionRow {
@@ -33,6 +34,7 @@ interface DeliveryRow {
   delivered_at: Date | null;
   claimed_at: Date | null;
   reclaims: number;
+  claim_token: string | null;
 }
 
 const toSubscription = (row: SubscriptionRow): EventSubscription => ({
@@ -59,6 +61,7 @@ const toDelivery = (row: DeliveryRow): EventDelivery => ({
   delivered_at: row.delivered_at === null ? null : isoRequired(row.delivered_at),
   claimed_at: iso(row.claimed_at),
   reclaims: row.reclaims,
+  claim_token: row.claim_token,
 });
 
 const SUB_COLUMNS = `subscription_id, subscriber, event_type, endpoint_url,
@@ -68,8 +71,11 @@ const SUB_COLUMNS = `subscription_id, subscriber, event_type, endpoint_url,
 const DEL_COLUMNS = `delivery_id, event_id, subscription_id, status, attempts,
   last_error, last_status, next_attempt_at, created_at, delivered_at`;
 
-/** Everything a read returns, including the claim (B-24) and its budget (B-25). */
-const DEL_SELECT_COLUMNS = `${DEL_COLUMNS}, claimed_at, reclaims`;
+/**
+ * Everything a read returns, including the claim (B-24), its budget (B-25) and the
+ * token that fences it (B-26).
+ */
+const DEL_SELECT_COLUMNS = `${DEL_COLUMNS}, claimed_at, reclaims, claim_token`;
 
 export class PgDeliveryStore implements DeliveryStore {
   constructor(
@@ -190,7 +196,8 @@ export class PgDeliveryStore implements DeliveryStore {
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
       `update event_delivery set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                                 claimed_at = $1
+                                 claimed_at = $1,
+                                 claim_token = $4
        where delivery_id in (
          select delivery_id from event_delivery
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
@@ -199,7 +206,9 @@ export class PgDeliveryStore implements DeliveryStore {
          for update skip locked
        )
        returning ${DEL_SELECT_COLUMNS}`,
-      [iso(now), limit, String(leaseMs)],
+      // One token for the batch; see `PgOutbox.claimDue` for why per-row would
+      // cost one statement per row and refuse nothing extra.
+      [iso(now), limit, String(leaseMs), newClaimToken()],
     );
     return result.rows.map(toDelivery);
   }
@@ -219,6 +228,9 @@ export class PgDeliveryStore implements DeliveryStore {
       `update event_delivery
           set reclaims = reclaims + 1,
               claimed_at = null,
+              -- The token dies with the claim, which is what makes a late
+              -- acknowledgement from the previous holder refusable (B-26).
+              claim_token = null,
               status = case when reclaims + 1 > $3 then 'dead' else status end,
               next_attempt_at = case when reclaims + 1 > $3 then next_attempt_at else $1 end,
               last_error = case when reclaims + 1 > $3
@@ -238,41 +250,58 @@ export class PgDeliveryStore implements DeliveryStore {
     return { reclaimed: result.rows.length - dead, dead };
   }
 
-  async markDelivered(deliveryId: string, status: number): Promise<void> {
-    await this.pool.query(
+  /**
+   * Fenced on `claim_token` (B-26). `$2::text is null` is the `UNFENCED` case, kept
+   * for symmetry with the other two queues; no CORE caller passes it here, because
+   * every acknowledgement of a delivery comes from the worker that claimed it.
+   */
+  async markDelivered(deliveryId: string, fence: Fence, status: number): Promise<boolean> {
+    const result = await this.pool.query(
       `update event_delivery
        set status = 'delivered', attempts = attempts + 1, last_error = null,
-           last_status = $2, delivered_at = $3, claimed_at = null
-       where delivery_id = $1`,
-      [deliveryId, status, this.clock.now().toISOString()],
+           last_status = $3, delivered_at = $4, claimed_at = null, claim_token = null
+       where delivery_id = $1 and ($2::text is null or claim_token = $2)
+       returning delivery_id`,
+      [deliveryId, fence, status, this.clock.now().toISOString()],
     );
+    return result.rows.length === 1;
   }
 
   async markFailed(
     deliveryId: string,
+    fence: Fence,
     error: string,
     status: number | null,
     nextAttemptAt: Date,
-  ): Promise<void> {
-    await this.pool.query(
+  ): Promise<boolean> {
+    const result = await this.pool.query(
       `update event_delivery
        -- Clearing the claim is what puts next_attempt_at back to meaning a retry
        -- schedule; leaving it set would make the retry look like a lease.
-       set attempts = attempts + 1, last_error = $2, last_status = $3, next_attempt_at = $4,
-           claimed_at = null
-       where delivery_id = $1`,
-      [deliveryId, error, status, iso(nextAttemptAt)],
+       set attempts = attempts + 1, last_error = $3, last_status = $4, next_attempt_at = $5,
+           claimed_at = null, claim_token = null
+       where delivery_id = $1 and ($2::text is null or claim_token = $2)
+       returning delivery_id`,
+      [deliveryId, fence, error, status, iso(nextAttemptAt)],
     );
+    return result.rows.length === 1;
   }
 
-  async markDead(deliveryId: string, error: string, status: number | null): Promise<void> {
-    await this.pool.query(
+  async markDead(
+    deliveryId: string,
+    fence: Fence,
+    error: string,
+    status: number | null,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
       `update event_delivery
-       set status = 'dead', attempts = attempts + 1, last_error = $2, last_status = $3,
-           claimed_at = null
-       where delivery_id = $1`,
-      [deliveryId, error, status],
+       set status = 'dead', attempts = attempts + 1, last_error = $3, last_status = $4,
+           claimed_at = null, claim_token = null
+       where delivery_id = $1 and ($2::text is null or claim_token = $2)
+       returning delivery_id`,
+      [deliveryId, fence, error, status],
     );
+    return result.rows.length === 1;
   }
 
   async counts(): Promise<Record<string, number>> {

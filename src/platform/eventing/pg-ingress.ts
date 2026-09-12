@@ -2,6 +2,7 @@ import type { Clock } from "../clock.js";
 import { iso, isoRequired, runner, type Queryable } from "../persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { newClaimToken, type Fence } from "./fencing.js";
 import type {
   InboundEventStore,
   InboundRecord,
@@ -29,6 +30,7 @@ interface InboundRow {
   received_at: Date;
   claimed_at: Date | null;
   reclaims: number;
+  claim_token: string | null;
 }
 
 function toRecord(row: InboundRow): InboundRecord {
@@ -53,6 +55,7 @@ function toRecord(row: InboundRow): InboundRecord {
     received_at: isoRequired(row.received_at),
     claimed_at: iso(row.claimed_at),
     reclaims: row.reclaims,
+    claim_token: row.claim_token,
   };
 }
 
@@ -62,8 +65,11 @@ const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlati
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at,
   received_at`;
 
-/** Everything a read returns, including the claim (B-24) and its budget (B-25). */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims`;
+/**
+ * Everything a read returns, including the claim (B-24), its budget (B-25) and the
+ * token that fences it (B-26).
+ */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims, claim_token`;
 
 /**
  * Durable ingress store on Postgres.
@@ -136,7 +142,8 @@ export class PgInboundEventStore implements InboundEventStore {
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
       `update inbound_event set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                                claimed_at = $1
+                                claimed_at = $1,
+                                claim_token = $4
        where event_id in (
          select event_id from inbound_event
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
@@ -145,7 +152,9 @@ export class PgInboundEventStore implements InboundEventStore {
          for update skip locked
        )
        returning ${SELECT_COLUMNS}`,
-      [iso(now), limit, String(leaseMs)],
+      // One token for the batch; see `PgOutbox.claimDue` for why per-row would
+      // cost one statement per row and refuse nothing extra.
+      [iso(now), limit, String(leaseMs), newClaimToken()],
     );
     return result.rows.map(toRecord);
   }
@@ -162,6 +171,9 @@ export class PgInboundEventStore implements InboundEventStore {
       `update inbound_event
           set reclaims = reclaims + 1,
               claimed_at = null,
+              -- The token dies with the claim, which is what makes a late
+              -- acknowledgement from the previous holder refusable (B-26).
+              claim_token = null,
               status = case when reclaims + 1 > $3 then 'dead' else status end,
               next_attempt_at = case when reclaims + 1 > $3 then next_attempt_at else $1 end,
               last_error = case when reclaims + 1 > $3
@@ -181,33 +193,54 @@ export class PgInboundEventStore implements InboundEventStore {
     return { reclaimed: result.rows.length - dead, dead };
   }
 
-  async markProcessed(eventId: string): Promise<void> {
-    await this.pool.query(
+  /**
+   * Fenced on `claim_token` (B-26). `$2::text is null` is the `UNFENCED` case: the
+   * replay service advances a row it never claimed, and is the only caller in CORE
+   * that may. Everything else passes the token `claimDue` handed it, so a
+   * dispatcher that lost its claim cannot mark an event processed that its own
+   * attempt never finished.
+   */
+  async markProcessed(eventId: string, fence: Fence): Promise<boolean> {
+    const result = await this.pool.query(
       `update inbound_event
-       set status = 'processed', last_error = null, processed_at = $2, claimed_at = null
-       where event_id = $1`,
-      [eventId, this.clock.now().toISOString()],
+       set status = 'processed', last_error = null, processed_at = $3, claimed_at = null,
+           claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence, this.clock.now().toISOString()],
     );
+    return result.rows.length === 1;
   }
 
-  async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
-    await this.pool.query(
+  async markFailed(
+    eventId: string,
+    fence: Fence,
+    error: string,
+    nextAttemptAt: Date,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
       `update inbound_event
        -- Clearing the claim is what puts next_attempt_at back to meaning a retry
        -- schedule; leaving it set would make the retry look like a lease.
-       set attempts = attempts + 1, last_error = $2, next_attempt_at = $3, claimed_at = null
-       where event_id = $1`,
-      [eventId, error, iso(nextAttemptAt)],
+       set attempts = attempts + 1, last_error = $3, next_attempt_at = $4, claimed_at = null,
+           claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence, error, iso(nextAttemptAt)],
     );
+    return result.rows.length === 1;
   }
 
-  async markDead(eventId: string, error: string): Promise<void> {
-    await this.pool.query(
+  async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
+    const result = await this.pool.query(
       `update inbound_event
-       set status = 'dead', attempts = attempts + 1, last_error = $2, claimed_at = null
-       where event_id = $1`,
-      [eventId, error],
+       set status = 'dead', attempts = attempts + 1, last_error = $3, claimed_at = null,
+           claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence, error],
     );
+    return result.rows.length === 1;
   }
 
   async counts(): Promise<Record<string, number>> {

@@ -2,6 +2,7 @@ import type { Clock } from "../clock.js";
 import { iso, isoRequired, runner, type Queryable } from "../persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { newClaimToken, type Fence } from "./fencing.js";
 import type { OutboxRecord, OutboxStatus, OutboxStore } from "./outbox.js";
 import { tallyRows, type CountRow } from "./queue-counts.js";
 import type { ReclaimOutcome } from "./reclaim.js";
@@ -23,6 +24,7 @@ interface OutboxRow {
   next_attempt_at: Date;
   claimed_at: Date | null;
   reclaims: number;
+  claim_token: string | null;
 }
 
 function toRecord(row: OutboxRow): OutboxRecord {
@@ -46,6 +48,7 @@ function toRecord(row: OutboxRow): OutboxRecord {
     next_attempt_at: isoRequired(row.next_attempt_at),
     claimed_at: iso(row.claimed_at),
     reclaims: row.reclaims,
+    claim_token: row.claim_token,
   };
 }
 
@@ -54,8 +57,11 @@ function toRecord(row: OutboxRow): OutboxRecord {
 const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlation_id,
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at`;
 
-/** Everything a read returns, including the claim (B-24) and its budget (B-25). */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims`;
+/**
+ * Everything a read returns, including the claim (B-24), its budget (B-25) and
+ * the token that fences it (B-26).
+ */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims, claim_token`;
 
 /**
  * Durable outbox (ADR 0009).
@@ -133,7 +139,8 @@ export class PgOutbox implements OutboxStore {
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
       `update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                         claimed_at = $1
+                         claimed_at = $1,
+                         claim_token = $4
        where event_id in (
          select event_id from outbox
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
@@ -142,7 +149,14 @@ export class PgOutbox implements OutboxStore {
          for update skip locked
        )
        returning ${SELECT_COLUMNS}`,
-      [iso(now), limit, String(leaseMs)],
+      // One token for this whole statement rather than per row. Two workers
+      // still cannot share a claim — `for update skip locked` and `claimed_at is
+      // null` see to that — and the fence only ever compares a row against the
+      // holder of that row, so a token shared across one worker's own batch
+      // refuses exactly the same acknowledgements a per-row token would. A
+      // per-row token would need one statement per row, which is the round trip
+      // this claim exists to avoid.
+      [iso(now), limit, String(leaseMs), newClaimToken()],
     );
     return result.rows.map(toRecord);
   }
@@ -165,6 +179,9 @@ export class PgOutbox implements OutboxStore {
       `update outbox
           set reclaims = reclaims + 1,
               claimed_at = null,
+              -- Taking the claim away invalidates its token, which is what makes
+              -- the stalled worker's later acknowledgement refusable (B-26).
+              claim_token = null,
               status = case when reclaims + 1 > $3 then 'dead' else status end,
               -- Due immediately on the recovered branch; untouched once dead, the
               -- same as markDead leaves it, because nothing is going to happen at
@@ -187,33 +204,59 @@ export class PgOutbox implements OutboxStore {
     return { reclaimed: result.rows.length - dead, dead };
   }
 
-  /** Takes a scope: it commits with the outbound delivery rows it fans out to. */
-  async markPublished(eventId: string, scope: TransactionScope = NO_SCOPE): Promise<void> {
-    await runner(this.pool, scope).query(
-      `update outbox set status = 'published', last_error = null, claimed_at = null
-       where event_id = $1`,
-      [eventId],
+  /**
+   * Takes a scope: it commits with the outbound delivery rows it fans out to.
+   *
+   * Fenced on `claim_token` (B-26). The predicate is written as `$2::text is null
+   * or claim_token = $2` so that one statement serves both a worker presenting a
+   * token and the one legitimate caller that holds no claim (`UNFENCED`); the
+   * alternative was building the SQL string conditionally, which is harder to read
+   * and impossible to grep for. `returning event_id` rather than `rowCount`,
+   * because the row itself saying it was updated is the same evidence on both
+   * backends.
+   */
+  async markPublished(
+    eventId: string,
+    fence: Fence,
+    scope: TransactionScope = NO_SCOPE,
+  ): Promise<boolean> {
+    const result = await runner(this.pool, scope).query(
+      `update outbox set status = 'published', last_error = null, claimed_at = null,
+                         claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence],
     );
+    return result.rows.length === 1;
   }
 
-  async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
-    await this.pool.query(
+  async markFailed(
+    eventId: string,
+    fence: Fence,
+    error: string,
+    nextAttemptAt: Date,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
       // Clearing the claim is what puts `next_attempt_at` back to meaning a
       // retry schedule; leaving it set would make the retry look like a lease.
-      `update outbox set attempts = attempts + 1, last_error = $2, next_attempt_at = $3,
-                         claimed_at = null
-       where event_id = $1`,
-      [eventId, error, iso(nextAttemptAt)],
+      `update outbox set attempts = attempts + 1, last_error = $3, next_attempt_at = $4,
+                         claimed_at = null, claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence, error, iso(nextAttemptAt)],
     );
+    return result.rows.length === 1;
   }
 
-  async markDead(eventId: string, error: string): Promise<void> {
-    await this.pool.query(
-      `update outbox set attempts = attempts + 1, status = 'dead', last_error = $2,
-                         claimed_at = null
-       where event_id = $1`,
-      [eventId, error],
+  async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `update outbox set attempts = attempts + 1, status = 'dead', last_error = $3,
+                         claimed_at = null, claim_token = null
+       where event_id = $1 and ($2::text is null or claim_token = $2)
+       returning event_id`,
+      [eventId, fence, error],
     );
+    return result.rows.length === 1;
   }
 
   async all(): Promise<OutboxRecord[]> {

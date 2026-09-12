@@ -1,6 +1,7 @@
 import type { Clock } from "../clock.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { isFenced, newClaimToken, type Fence } from "./fencing.js";
 import { tallyByStatus } from "./queue-counts.js";
 import {
   reclaimedError,
@@ -40,6 +41,15 @@ export interface OutboxRecord {
    * the budget is for the lifetime of the row.
    */
   reclaims: number;
+  /**
+   * The token identifying the claim currently held on this row (B-26).
+   *
+   * Stamped by `claimDue`, cleared by every acknowledgement and by recovery, and
+   * carried back by the worker on each acknowledgement so a call from a worker
+   * whose claim was taken away can be refused rather than applied. Null means
+   * nobody holds the row, in which case any token presented for it is stale.
+   */
+  claim_token: string | null;
 }
 
 /**
@@ -72,9 +82,19 @@ export interface OutboxStore {
   reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
   /** One record by id. Outbound delivery needs the envelope long after it was published. */
   get(eventId: string): Promise<OutboxRecord | undefined>;
-  markPublished(eventId: string, scope?: TransactionScope): Promise<void>;
-  markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
-  markDead(eventId: string, error: string): Promise<void>;
+  /**
+   * The three acknowledgements are token-fenced (B-26) and return false when the
+   * call was refused: the row is held by a different claim, or by none. The
+   * caller passes the `claim_token` it was given by `claimDue`, or `UNFENCED` if
+   * it never claimed the row.
+   *
+   * A refusal and a missing row are both false. They are the same fact from the
+   * caller's point of view — nothing was applied — and these tables are never
+   * deleted from, so a row a worker claimed cannot vanish underneath it.
+   */
+  markPublished(eventId: string, fence: Fence, scope?: TransactionScope): Promise<boolean>;
+  markFailed(eventId: string, fence: Fence, error: string, nextAttemptAt: Date): Promise<boolean>;
+  markDead(eventId: string, fence: Fence, error: string): Promise<boolean>;
   all(): Promise<OutboxRecord[]>;
   byStatus(status: OutboxStatus): Promise<OutboxRecord[]>;
   /**
@@ -109,6 +129,7 @@ export class InMemoryOutbox implements OutboxStore {
       last_error: null,
       next_attempt_at: this.clock.now().toISOString(),
       claimed_at: null,
+      claim_token: null,
     });
   }
 
@@ -140,6 +161,13 @@ export class InMemoryOutbox implements OutboxStore {
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const due: OutboxRecord[] = [];
+    // One token per call, not per row, matching Postgres — where claiming a batch
+    // is one statement and stamping a different token on each row would mean one
+    // statement per row. The fence only ever compares a row against whoever holds
+    // that row, so a token shared across one claim refuses exactly the same
+    // acknowledgements a per-row token would. The two backends must agree on this,
+    // or a test that passes in memory certifies nothing (B-12).
+    const token = newClaimToken();
     for (const record of this.records.values()) {
       if (record.status !== "pending") continue;
       if (record.claimed_at !== null) continue;
@@ -150,6 +178,9 @@ export class InMemoryOutbox implements OutboxStore {
         ...record,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
         claimed_at: now.toISOString(),
+        // A fresh token per claim, never reused, so an acknowledgement from a
+        // previous holder of this row can be told apart from this one's (B-26).
+        claim_token: token,
       };
       this.records.set(record.event.event_id, claimed);
       // The claimed record, not the pre-claim one: Postgres returns the updated
@@ -181,6 +212,11 @@ export class InMemoryOutbox implements OutboxStore {
         reclaims,
         status: exhausted ? "dead" : record.status,
         claimed_at: null,
+        // Taking the claim away invalidates its token. This is the write that
+        // makes the stalled worker's later acknowledgement refusable (B-26):
+        // without it, the row would still recognise a holder that no longer
+        // holds it.
+        claim_token: null,
         // Due immediately. The row already waited out a whole lease for a worker
         // that never came back; making it wait again would turn one crash into
         // two delays. Left as-is on the dead branch too: nothing reads
@@ -206,16 +242,35 @@ export class InMemoryOutbox implements OutboxStore {
    * mutating the stored object would make the pre-image and the current value
    * the same object and roll back to nothing. Same bug `revokeSession` had.
    */
-  async markPublished(eventId: string, scope: TransactionScope = NO_SCOPE): Promise<void> {
+  async markPublished(
+    eventId: string,
+    fence: Fence,
+    scope: TransactionScope = NO_SCOPE,
+  ): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
+    // Read and fence-check with no await before the write, for the reason on the
+    // class: a yield point between the check and the write is a race Postgres
+    // does not have, and a permissive memory backend certifies bugs (B-12).
+    if (!record || isFenced(record.claim_token, fence)) return false;
     journalMapWrite(scope, this.records, eventId);
-    this.records.set(eventId, { ...record, status: "published", last_error: null, claimed_at: null });
+    this.records.set(eventId, {
+      ...record,
+      status: "published",
+      last_error: null,
+      claimed_at: null,
+      claim_token: null,
+    });
+    return true;
   }
 
-  async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
+  async markFailed(
+    eventId: string,
+    fence: Fence,
+    error: string,
+    nextAttemptAt: Date,
+  ): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
+    if (!record || isFenced(record.claim_token, fence)) return false;
     this.records.set(eventId, {
       ...record,
       attempts: record.attempts + 1,
@@ -224,19 +279,23 @@ export class InMemoryOutbox implements OutboxStore {
       // The claim is over. `next_attempt_at` goes back to meaning a retry
       // schedule, which it can only do once nobody holds the row.
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
-  async markDead(eventId: string, error: string): Promise<void> {
+  async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
+    if (!record || isFenced(record.claim_token, fence)) return false;
     this.records.set(eventId, {
       ...record,
       attempts: record.attempts + 1,
       status: "dead",
       last_error: error,
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
   async all(): Promise<OutboxRecord[]> {

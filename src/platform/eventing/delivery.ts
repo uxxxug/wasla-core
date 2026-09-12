@@ -4,6 +4,7 @@ import { invalid } from "../errors.js";
 import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { isFenced, newClaimToken, type Fence } from "./fencing.js";
 import { tallyByStatus } from "./queue-counts.js";
 import {
   DEFAULT_MAX_RECLAIMS,
@@ -63,6 +64,17 @@ export interface EventDelivery {
    * bounds a delivery whose payload kills the worker rather than the subscriber.
    */
   reclaims: number;
+  /**
+   * The token identifying the claim currently held on this delivery (B-26).
+   *
+   * Stamped by `claimDue`, cleared by every acknowledgement and by recovery. The
+   * damage it prevents is the most concrete of the three queues: a worker that
+   * stalls past its lease, is reclaimed, and then reports the response it
+   * eventually received would overwrite the newer attempt's `last_status` and
+   * `delivered_at` — the row would carry a response code from a request nobody is
+   * waiting on any more.
+   */
+  claim_token: string | null;
 }
 
 export interface DeliveryStore {
@@ -98,14 +110,25 @@ export interface DeliveryStore {
    * limit at all and is retried for ever.
    */
   reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
-  markDelivered(deliveryId: string, status: number): Promise<void>;
+  /**
+   * The three acknowledgements are token-fenced (B-26) and return false when the
+   * call was refused: the delivery is held by a different claim, or by none. The
+   * worker passes the `claim_token` it was given by `claimDue`.
+   */
+  markDelivered(deliveryId: string, fence: Fence, status: number): Promise<boolean>;
   markFailed(
     deliveryId: string,
+    fence: Fence,
     error: string,
     status: number | null,
     nextAttemptAt: Date,
-  ): Promise<void>;
-  markDead(deliveryId: string, error: string, status: number | null): Promise<void>;
+  ): Promise<boolean>;
+  markDead(
+    deliveryId: string,
+    fence: Fence,
+    error: string,
+    status: number | null,
+  ): Promise<boolean>;
   byStatus(status: DeliveryStatus): Promise<EventDelivery[]>;
   /**
    * Row counts by status, plus `retrying` (pending with an attempt already
@@ -232,11 +255,15 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
     const claimed: EventDelivery[] = [];
+    // One token per call, not per row, matching Postgres, where a batch claim is
+    // one statement. See `InMemoryOutbox.claimDue` for why that is equivalent.
+    const token = newClaimToken();
     for (const delivery of due) {
       const next: EventDelivery = {
         ...delivery,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
         claimed_at: now.toISOString(),
+        claim_token: token,
       };
       this.deliveries.set(delivery.delivery_id, next);
       claimed.push(next);
@@ -258,6 +285,8 @@ export class InMemoryDeliveryStore implements DeliveryStore {
         reclaims,
         status: exhausted ? "dead" : delivery.status,
         claimed_at: null,
+        // Taking the claim away invalidates its token (B-26).
+        claim_token: null,
         // Due immediately: it already waited out a whole lease for a worker that
         // never came back. Left where it is once dead, the same as `markDead`
         // leaves it.
@@ -272,9 +301,11 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     return outcome;
   }
 
-  async markDelivered(deliveryId: string, status: number): Promise<void> {
+  async markDelivered(deliveryId: string, fence: Fence, status: number): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
-    if (!existing) return;
+    // Checked and written with no await in between, so the two backends race the
+    // same way (B-12).
+    if (!existing || isFenced(existing.claim_token, fence)) return false;
     this.deliveries.set(deliveryId, {
       ...existing,
       status: "delivered",
@@ -288,17 +319,20 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       // Postgres always used its clock here (B-12).
       delivered_at: this.clock.now().toISOString(),
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
   async markFailed(
     deliveryId: string,
+    fence: Fence,
     error: string,
     status: number | null,
     nextAttemptAt: Date,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
-    if (!existing) return;
+    if (!existing || isFenced(existing.claim_token, fence)) return false;
     this.deliveries.set(deliveryId, {
       ...existing,
       attempts: existing.attempts + 1,
@@ -308,12 +342,19 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       // The claim is over. `next_attempt_at` goes back to meaning a retry
       // schedule, which it can only do once nobody holds the row.
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
-  async markDead(deliveryId: string, error: string, status: number | null): Promise<void> {
+  async markDead(
+    deliveryId: string,
+    fence: Fence,
+    error: string,
+    status: number | null,
+  ): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
-    if (!existing) return;
+    if (!existing || isFenced(existing.claim_token, fence)) return false;
     this.deliveries.set(deliveryId, {
       ...existing,
       status: "dead",
@@ -321,7 +362,9 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       last_error: error,
       last_status: status,
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
   async counts(): Promise<Record<string, number>> {
@@ -469,6 +512,7 @@ export class DeliveryFanOut {
           delivered_at: null,
           claimed_at: null,
           reclaims: 0,
+          claim_token: null,
         },
         scope,
       );
@@ -494,6 +538,14 @@ export interface DeliveryWorkerResult {
    * is a fact about the delivery itself — no response was ever received.
    */
   reclaim_exhausted: number;
+  /**
+   * Acknowledgements the store refused because this worker no longer held the
+   * claim (B-26). It stalled past its lease, recovery gave the delivery to
+   * somebody else, and its own result is now stale: recording it would overwrite a
+   * newer attempt's outcome. Non-zero here means leases are too short for how long
+   * this worker actually takes, not that a subscriber misbehaved.
+   */
+  fenced: number;
 }
 
 /**
@@ -533,6 +585,7 @@ export class DeliveryWorker {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
@@ -563,13 +616,18 @@ export class DeliveryWorker {
       if (!subscription || !event) {
         // Neither is recoverable by waiting: a delivery whose subscription or
         // event has gone cannot be built, let alone sent.
-        await this.store.markDead(
+        const applied = await this.store.markDead(
           delivery.delivery_id,
+          delivery.claim_token,
           subscription ? "event no longer in the outbox" : "subscription no longer exists",
           null,
         );
-        result.dead += 1;
-        this.metrics.outcome("failed_permanent");
+        if (applied) {
+          result.dead += 1;
+          this.metrics.outcome("failed_permanent");
+        } else {
+          this.countFenced(result);
+        }
         stop();
         continue;
       }
@@ -590,9 +648,20 @@ export class DeliveryWorker {
       });
 
       if (isSuccess(response.status)) {
-        await this.store.markDelivered(delivery.delivery_id, response.status as number);
-        result.delivered += 1;
-        this.metrics.outcome("completed");
+        const applied = await this.store.markDelivered(
+          delivery.delivery_id,
+          delivery.claim_token,
+          response.status as number,
+        );
+        // The subscriber did receive this. The refusal only discards our record of
+        // it, because the row now belongs to a later attempt that will send again —
+        // which is exactly why subscribers must dedupe on `event_id`.
+        if (applied) {
+          result.delivered += 1;
+          this.metrics.outcome("completed");
+        } else {
+          this.countFenced(result);
+        }
         stop();
         continue;
       }
@@ -602,26 +671,52 @@ export class DeliveryWorker {
       if (!isRetryable(response.status)) {
         // Rejected, not unwell. Repeating identical bytes cannot change the
         // answer, so stop and leave the row for an operator to see.
-        await this.store.markDead(delivery.delivery_id, reason, response.status);
-        result.dead += 1;
-        this.metrics.outcome("failed_permanent");
-      } else if (attempts >= this.maxAttempts) {
-        await this.store.markDead(delivery.delivery_id, reason, response.status);
-        result.dead += 1;
-        this.metrics.outcome("failed_permanent");
-      } else {
-        await this.store.markFailed(
+        const applied = await this.store.markDead(
           delivery.delivery_id,
+          delivery.claim_token,
+          reason,
+          response.status,
+        );
+        if (applied) {
+          result.dead += 1;
+          this.metrics.outcome("failed_permanent");
+        } else this.countFenced(result);
+      } else if (attempts >= this.maxAttempts) {
+        const applied = await this.store.markDead(
+          delivery.delivery_id,
+          delivery.claim_token,
+          reason,
+          response.status,
+        );
+        if (applied) {
+          result.dead += 1;
+          this.metrics.outcome("failed_permanent");
+        } else this.countFenced(result);
+      } else {
+        const applied = await this.store.markFailed(
+          delivery.delivery_id,
+          delivery.claim_token,
           reason,
           response.status,
           new Date(now.getTime() + this.baseBackoffMs * 2 ** delivery.attempts),
         );
-        result.failed += 1;
-        this.metrics.outcome("retried");
+        if (applied) {
+          result.failed += 1;
+          this.metrics.outcome("retried");
+        } else this.countFenced(result);
       }
       stop();
     }
     return result;
+  }
+
+  /**
+   * One place, so the count and the metric can never drift apart — five call
+   * sites in this loop each have to report the same refusal (B-26).
+   */
+  private countFenced(result: DeliveryWorkerResult): void {
+    result.fenced += 1;
+    this.metrics.outcome("fenced");
   }
 }
 

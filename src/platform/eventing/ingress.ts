@@ -7,6 +7,7 @@ import {
 } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import { isValidEnvelope } from "./envelope.js";
+import { isFenced, newClaimToken, type Fence } from "./fencing.js";
 import { normalizableEventTypes, normalizeOrThrow } from "./normalize.js";
 import { tallyByStatus } from "./queue-counts.js";
 import {
@@ -53,6 +54,16 @@ export interface InboundRecord {
    * dispatcher that reads it from being recovered for ever.
    */
   reclaims: number;
+  /**
+   * The token identifying the claim currently held on this row (B-26).
+   *
+   * Stamped by `claimDue`, cleared by every acknowledgement and by recovery. A
+   * dispatcher that stalled past its lease, was reclaimed, and then woke up and
+   * called `markProcessed` used to mark an event handled that its own attempt
+   * never finished — hiding a real failure behind a stale success. The token is
+   * what lets that call be refused.
+   */
+  claim_token: string | null;
 }
 
 /**
@@ -110,9 +121,16 @@ export interface InboundEventStore {
    * summons an operator, and the one replay selects by default — is never reached.
    */
   reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
-  markProcessed(eventId: string): Promise<void>;
-  markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
-  markDead(eventId: string, error: string): Promise<void>;
+  /**
+   * The three acknowledgements are token-fenced (B-26) and return false when the
+   * call was refused: the row is held by a different claim, or by none. A worker
+   * passes the `claim_token` it was given by `claimDue`; the replay service passes
+   * `UNFENCED`, because it advances a row it never claimed — the only caller in
+   * CORE entitled to do so.
+   */
+  markProcessed(eventId: string, fence: Fence): Promise<boolean>;
+  markFailed(eventId: string, fence: Fence, error: string, nextAttemptAt: Date): Promise<boolean>;
+  markDead(eventId: string, fence: Fence, error: string): Promise<boolean>;
   byStatus(status: InboundStatus): Promise<InboundRecord[]>;
   all(): Promise<InboundRecord[]>;
   /**
@@ -198,6 +216,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       next_attempt_at: now,
       received_at: now,
       claimed_at: null,
+      claim_token: null,
     });
     return true;
   }
@@ -236,11 +255,15 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
     const claimed: InboundRecord[] = [];
+    // One token per call, not per row, matching Postgres, where a batch claim is
+    // one statement. See `InMemoryOutbox.claimDue` for why that is equivalent.
+    const token = newClaimToken();
     for (const record of due) {
       const next: InboundRecord = {
         ...record,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
         claimed_at: now.toISOString(),
+        claim_token: token,
       };
       this.records.set(record.event.event_id, next);
       claimed.push(next);
@@ -262,6 +285,8 @@ export class InMemoryInboundEventStore implements InboundEventStore {
         reclaims,
         status: exhausted ? "dead" : record.status,
         claimed_at: null,
+        // Taking the claim away invalidates its token (B-26).
+        claim_token: null,
         // Due immediately: the row already waited out a whole lease for a
         // dispatcher that never came back. Left where it is once dead, the same
         // as `markDead` leaves it.
@@ -276,15 +301,29 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     return outcome;
   }
 
-  async markProcessed(eventId: string): Promise<void> {
+  async markProcessed(eventId: string, fence: Fence): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
-    this.records.set(eventId, { ...record, status: "processed", last_error: null, claimed_at: null });
+    // Checked and written with no await in between, so the two backends race the
+    // same way (B-12).
+    if (!record || isFenced(record.claim_token, fence)) return false;
+    this.records.set(eventId, {
+      ...record,
+      status: "processed",
+      last_error: null,
+      claimed_at: null,
+      claim_token: null,
+    });
+    return true;
   }
 
-  async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
+  async markFailed(
+    eventId: string,
+    fence: Fence,
+    error: string,
+    nextAttemptAt: Date,
+  ): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
+    if (!record || isFenced(record.claim_token, fence)) return false;
     this.records.set(eventId, {
       ...record,
       attempts: record.attempts + 1,
@@ -293,19 +332,23 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       // The claim is over. `next_attempt_at` goes back to meaning a retry
       // schedule, which it can only do once nobody holds the row.
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
-  async markDead(eventId: string, error: string): Promise<void> {
+  async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
     const record = this.records.get(eventId);
-    if (!record) return;
+    if (!record || isFenced(record.claim_token, fence)) return false;
     this.records.set(eventId, {
       ...record,
       status: "dead",
       attempts: record.attempts + 1,
       last_error: error,
       claimed_at: null,
+      claim_token: null,
     });
+    return true;
   }
 
   async byStatus(status: InboundStatus): Promise<InboundRecord[]> {
