@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/market.review.rated.v1.schema.json",
+  "title": "market.review.rated v1",
+  "description": "Consumed by CORE when MARKET collects a rating about a CORE identity or organization. Carries the rating only: the review text, title and any other content stay in MARKET, which owns them and is the only system that can moderate, redact or delete them. review_reference is MARKET's own identifier for the review and is the exactly-once key CORE records the signal under, so a redelivery is refused without CORE knowing what was written.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "review_reference",
+    "organization_id",
+    "subject_type",
+    "subject_id",
+    "rating",
+    "rated_at"
+  ],
+  "properties": {
+    "review_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MARKET's identifier for the review. Opaque to CORE; unique per producer within a tenant."
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The CORE tenant the signal belongs to."
+    },
+    "subject_type": {
+      "type": "string",
+      "enum": ["identity", "organization"],
+      "description": "The kind of CORE entity being rated. A rating about a MARKET or MOVE entity has no subject in CORE and is refused."
+    },
+    "subject_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The rated CORE identity or organization."
+    },
+    "rating": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5,
+      "description": "The reported rating. Bounds are part of the contract, so an out-of-range value is refused at the boundary rather than stored and averaged."
+    },
+    "rated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When MARKET recorded the rating. A producer claim; CORE stamps its own recorded_at and orders by that."
+    }
+  },
+  "examples": [
+    {
+      "review_reference": "review-8821",
+      "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070",
+      "subject_type": "identity",
+      "subject_id": "6b1f2c6e-2f8a-4a1d-9f0e-52ac9a2f3b41",
+      "rating": 5,
+      "rated_at": "2026-09-12T09:15:00.000Z"
+    }
+  ]
+}

@@ -24,6 +24,8 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.subscription.renewed` | 1 | implemented | subscription | MARKET | `contracts/events/core.subscription.renewed.v1.schema.json` |
 | `core.subscription.cancelled` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.cancelled.v1.schema.json` |
 | `core.subscription.expired` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.expired.v1.schema.json` |
+| `core.reputation.signal_recorded` | 1 | implemented | reputation signal | MARKET, MOVE | `contracts/events/core.reputation.signal_recorded.v1.schema.json` |
+| `core.reputation.signal_retracted` | 1 | implemented | reputation signal | MARKET, MOVE | `contracts/events/core.reputation.signal_retracted.v1.schema.json` |
 
 ## Consumed by CORE
 
@@ -33,9 +35,31 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `move.job.accepted` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-acceptance` |
 | `move.job.rejected` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-rejection` |
 | `move.job.completed` | 1 | MOVE | implemented in local bus | `core.fulfillment.move-completion` |
+| `market.review.rated` | 1 | MARKET | implemented in local bus, no producer yet | `core.reputation.market-review` |
+| `market.review.retracted` | 1 | MARKET | implemented in local bus, no producer yet | `core.reputation.market-review-retraction` |
 
 `implemented in local bus` means the schema, idempotent consumer and tests exist;
 production transport remains unproven until a broker or durable queue is selected.
+
+`no producer yet` is a stronger caveat and is stated separately for the two review
+events: MARKET does not publish them today. The schema, the normaliser, the
+exactly-once ingestion and the tests are CORE's side of a contract whose other
+side has not been written, so no reputation signal exists in any deployed system
+until MARKET starts publishing. Recorded as an external dependency in
+`ROADMAP.md` rather than presented as a working pipeline.
+
+### Reputation events carry facts, never standings
+
+The two `core.reputation.*` events state what was reported and what was
+withdrawn. Neither carries a count, an average or a score, and that is a
+decision rather than an omission. A total placed in an event is computed at
+publication time without any signal recorded concurrently with it, so two events
+about one subject could each carry a different total and a consumer would have no
+way to tell which is current — the same drift ADR 0013 refuses for entitlement
+and the settlement cycle refuses for money. A consumer that needs a standing
+either accumulates this stream, which it receives exactly-once, or reads
+`GET /v1/reputation/{subject_type}/{subject_id}`, where the answer is derived
+from the signals at the moment of the read. See `docs/reputation.md`.
 
 ## Lifecycle of a fulfillment as seen on the bus
 

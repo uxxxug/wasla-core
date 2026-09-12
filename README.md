@@ -39,10 +39,10 @@ package, no cross-database access.
 | Execution/money consistency: `settlement_state`, hold verification at intake, reconciliation read | implemented, covered by the fulfillment settlement tests |
 | Subscriptions: periods, collection, past-due, renewal sweep, cancellation, expiry | implemented |
 | Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
-| Reputation | **not implemented** |
+| Reputation: append-only signals, exactly-once ingestion, retraction marker, standing derived on every read | implemented; no producer publishes `market.review.*` yet, and weighting/decay/thresholds are undecided (B-31…B-34) |
 
-**326 tests** pass in the dependency-free default run, and the same gates run in
-CI on the working remote. With `DATABASE_URL` set that becomes **572**, because
+**385 tests** pass in the dependency-free default run, and the same gates run in
+CI on the working remote. With `DATABASE_URL` set that becomes **687**, because
 the database-backed files stop being skipped and the dual-backend suites run
 their Postgres half.
 

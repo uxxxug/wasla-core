@@ -30,6 +30,9 @@ import { InMemoryOrganizationRepository } from "../../modules/organization/servi
 import { InMemorySubscriptionRepository } from "../../modules/subscription/repository.js";
 import type { SubscriptionRepository } from "../../modules/subscription/repository.js";
 import { PgSubscriptionRepository } from "../../modules/subscription/pg-repository.js";
+import { InMemoryReputationRepository } from "../../modules/reputation/repository.js";
+import type { ReputationRepository } from "../../modules/reputation/repository.js";
+import { PgReputationRepository } from "../../modules/reputation/pg-repository.js";
 import type { OrganizationRepository } from "../../modules/organization/service.js";
 import { PgOrganizationRepository } from "../../modules/organization/pg-repository.js";
 import type { Queryable } from "./postgres.js";
@@ -88,6 +91,7 @@ export interface Persistence {
   geography: GeographyRepository;
   fulfillment: FulfillmentRepository;
   subscription: SubscriptionRepository;
+  reputation: ReputationRepository;
 }
 
 /** Reference backend. Keeps the tests and local runs dependency-free. */
@@ -116,6 +120,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     geography: new InMemoryGeographyRepository(),
     fulfillment: new InMemoryFulfillmentRepository(),
     subscription: new InMemorySubscriptionRepository((id) => money.authorizationSnapshot(id)),
+    reputation: new InMemoryReputationRepository(),
   };
 }
 
@@ -146,6 +151,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     geography: new PgGeographyRepository(pool),
     fulfillment: new PgFulfillmentRepository(pool),
     subscription: new PgSubscriptionRepository(pool as never),
+    reputation: new PgReputationRepository(pool as never),
   };
 }
 
