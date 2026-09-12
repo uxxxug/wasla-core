@@ -8,6 +8,7 @@ import type {
   InboundSelection,
   InboundStatus,
 } from "./ingress.js";
+import type { ReclaimOutcome } from "./reclaim.js";
 import { tallyRows, type CountRow } from "./queue-counts.js";
 
 interface InboundRow {
@@ -27,6 +28,7 @@ interface InboundRow {
   next_attempt_at: Date;
   received_at: Date;
   claimed_at: Date | null;
+  reclaims: number;
 }
 
 function toRecord(row: InboundRow): InboundRecord {
@@ -50,6 +52,7 @@ function toRecord(row: InboundRow): InboundRecord {
     next_attempt_at: isoRequired(row.next_attempt_at),
     received_at: isoRequired(row.received_at),
     claimed_at: iso(row.claimed_at),
+    reclaims: row.reclaims,
   };
 }
 
@@ -59,8 +62,8 @@ const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlati
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at,
   received_at`;
 
-/** Everything a read returns, including the claim (B-24). */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at`;
+/** Everything a read returns, including the claim (B-24) and its budget (B-25). */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims`;
 
 /**
  * Durable ingress store on Postgres.
@@ -147,23 +150,35 @@ export class PgInboundEventStore implements InboundEventStore {
     return result.rows.map(toRecord);
   }
 
-  /** See `InboundEventStore.reclaimExpired`. */
-  async reclaimExpired(now: Date, limit = 100): Promise<number> {
-    const result = await this.pool.query(
+  /**
+   * See `InboundEventStore.reclaimExpired`. One statement, two outcomes (B-25):
+   * every `reclaims` on the right-hand side reads the pre-update value, so the
+   * increment and the three CASEs that branch on it agree with each other, and the
+   * decision cannot be split across two statements where two dispatchers could
+   * both read the same remaining budget.
+   */
+  async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
+    const result = await this.pool.query<{ status: InboundStatus }>(
       `update inbound_event
-          set claimed_at = null,
-              next_attempt_at = $1,
-              last_error = 'abandoned claim reclaimed after attempt ' || attempts
+          set reclaims = reclaims + 1,
+              claimed_at = null,
+              status = case when reclaims + 1 > $3 then 'dead' else status end,
+              next_attempt_at = case when reclaims + 1 > $3 then next_attempt_at else $1 end,
+              last_error = case when reclaims + 1 > $3
+                then 'reclaim limit exceeded: abandoned ' || (reclaims + 1) || ' times after attempt ' || attempts
+                else 'abandoned claim ' || (reclaims + 1) || ' reclaimed after attempt ' || attempts end
        where event_id in (
          select event_id from inbound_event
          where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
          order by next_attempt_at
          limit $2
          for update skip locked
-       )`,
-      [iso(now), limit],
+       )
+       returning status`,
+      [iso(now), limit, maxReclaims],
     );
-    return result.rowCount ?? 0;
+    const dead = result.rows.filter((row) => row.status === "dead").length;
+    return { reclaimed: result.rows.length - dead, dead };
   }
 
   async markProcessed(eventId: string): Promise<void> {

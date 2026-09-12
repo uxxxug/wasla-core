@@ -4,6 +4,7 @@ import type { TransactionBoundary } from "../persistence/transaction.js";
 import type { EventBus } from "./bus.js";
 import type { EventEnvelope } from "./envelope.js";
 import type { OutboxStore } from "./outbox.js";
+import { DEFAULT_MAX_RECLAIMS } from "./reclaim.js";
 import type { TransactionScope } from "../persistence/transaction.js";
 
 /**
@@ -28,6 +29,17 @@ export interface PublisherResult {
   dead: number;
   /** Rows a previous process claimed and never acknowledged (B-24). */
   reclaimed: number;
+  /**
+   * Rows dead-lettered because they have now been abandoned more times than
+   * `maxReclaims` allows (B-25).
+   *
+   * Separate from `dead`, which counts rows whose publish was tried and failed
+   * `maxAttempts` times. Both are terminal, but they say opposite things about
+   * where the fault is: `dead` means the bus rejected this event, this means
+   * nothing survived long enough to find out. One number for both would report a
+   * bad payload and a worker that keeps dying as the same event.
+   */
+  reclaim_exhausted: number;
 }
 
 /**
@@ -55,6 +67,11 @@ export class OutboxPublisher {
      * observability. Records transitions only; it never queries or writes.
      */
     private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
+    /**
+     * How many abandonments one row is allowed before it is dead-lettered instead
+     * of recovered (B-25). Last, so no existing positional caller moves.
+     */
+    private readonly maxReclaims = DEFAULT_MAX_RECLAIMS,
   ) {
     this.fanOuts = fanOut === undefined ? [] : Array.isArray(fanOut) ? [...fanOut] : [fanOut as EventFanOut];
   }
@@ -63,15 +80,31 @@ export class OutboxPublisher {
 
   async drainOnce(limit = 100): Promise<PublisherResult> {
     const now = this.clock.now();
-    const result: PublisherResult = { published: 0, failed: 0, dead: 0, reclaimed: 0 };
+    const result: PublisherResult = {
+      published: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
     // lease is directly observable for this worker: the row was claimed by some
     // process that never acknowledged it (B-24). Before `claimed_at` existed the
     // row simply became due again and the death of a worker was indistinguishable
     // from an event politely asking to be retried.
-    result.reclaimed = await this.outbox.reclaimExpired(now, limit);
-    this.metrics.outcome("reclaimed", result.reclaimed);
+    //
+    // A recovery charges its own budget rather than `attempts` (B-25), and the row
+    // is dead-lettered once that budget runs out. `failed_permanent` is the right
+    // outcome for those: the row is terminal and no worker will pick it up again,
+    // which is exactly what that label means everywhere else. They are not
+    // reported as `reclaimed`, because nothing was reclaimed — the recovery is the
+    // thing that stopped happening.
+    const reclaim = await this.outbox.reclaimExpired(now, this.maxReclaims, limit);
+    result.reclaimed = reclaim.reclaimed;
+    result.reclaim_exhausted = reclaim.dead;
+    this.metrics.outcome("reclaimed", reclaim.reclaimed);
+    this.metrics.outcome("failed_permanent", reclaim.dead);
     const due = await this.outbox.claimDue(now, limit);
     this.metrics.claimed(due.length);
 

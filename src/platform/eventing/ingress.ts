@@ -9,6 +9,12 @@ import type { EventEnvelope } from "./envelope.js";
 import { isValidEnvelope } from "./envelope.js";
 import { normalizableEventTypes, normalizeOrThrow } from "./normalize.js";
 import { tallyByStatus } from "./queue-counts.js";
+import {
+  reclaimedError,
+  reclaimExhausted,
+  reclaimExhaustedError,
+  type ReclaimOutcome,
+} from "./reclaim.js";
 
 export type InboundStatus = "pending" | "processed" | "dead";
 
@@ -38,6 +44,15 @@ export interface InboundRecord {
    * stuck".
    */
   claimed_at: string | null;
+  /**
+   * How many times a dispatcher claimed this row and never came back (B-25).
+   *
+   * Its own budget, separate from `attempts`, because an abandonment is not an
+   * observed failure: `attempts` drives the retry backoff and `retrying`, and
+   * this drives only the limit that stops an event whose payload kills every
+   * dispatcher that reads it from being recovered for ever.
+   */
+  reclaims: number;
 }
 
 /**
@@ -87,8 +102,14 @@ export interface InboundEventStore {
    * because `claimDue` refuses claimed rows. Does not touch `attempts`: an
    * abandoned attempt was never observed to fail, and charging it against the
    * retry budget would let a rolling deploy dead-letter healthy events.
+   *
+   * It does charge `reclaims`, which is that budget's own counter, and
+   * dead-letters the row once `maxReclaims` recoveries have been used (B-25).
+   * Without the limit an event that kills whatever dispatcher reads it is
+   * recovered and re-claimed for ever, and a dead-letter — the one state that
+   * summons an operator, and the one replay selects by default — is never reached.
    */
-  reclaimExpired(now: Date, limit?: number): Promise<number>;
+  reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
   markProcessed(eventId: string): Promise<void>;
   markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
   markDead(eventId: string, error: string): Promise<void>;
@@ -172,6 +193,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       event,
       status: "pending",
       attempts: 0,
+      reclaims: 0,
       last_error: null,
       next_attempt_at: now,
       received_at: now,
@@ -227,23 +249,31 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   }
 
   /** See `InboundEventStore.reclaimExpired`. */
-  async reclaimExpired(now: Date, limit = 100): Promise<number> {
-    let reclaimed = 0;
+  async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
+    const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     for (const record of this.records.values()) {
-      if (reclaimed >= limit) break;
+      if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
+      const reclaims = record.reclaims + 1;
+      const exhausted = reclaimExhausted(record.reclaims, maxReclaims);
       this.records.set(record.event.event_id, {
         ...record,
+        reclaims,
+        status: exhausted ? "dead" : record.status,
         claimed_at: null,
         // Due immediately: the row already waited out a whole lease for a
-        // dispatcher that never came back.
-        next_attempt_at: now.toISOString(),
-        last_error: `abandoned claim reclaimed after attempt ${record.attempts}`,
+        // dispatcher that never came back. Left where it is once dead, the same
+        // as `markDead` leaves it.
+        next_attempt_at: exhausted ? record.next_attempt_at : now.toISOString(),
+        last_error: exhausted
+          ? reclaimExhaustedError(reclaims, record.attempts)
+          : reclaimedError(reclaims, record.attempts),
       });
-      reclaimed += 1;
+      if (exhausted) outcome.dead += 1;
+      else outcome.reclaimed += 1;
     }
-    return reclaimed;
+    return outcome;
   }
 
   async markProcessed(eventId: string): Promise<void> {

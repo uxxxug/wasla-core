@@ -4,6 +4,7 @@ import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import type { OutboxRecord, OutboxStatus, OutboxStore } from "./outbox.js";
 import { tallyRows, type CountRow } from "./queue-counts.js";
+import type { ReclaimOutcome } from "./reclaim.js";
 
 interface OutboxRow {
   event_id: string;
@@ -21,6 +22,7 @@ interface OutboxRow {
   last_error: string | null;
   next_attempt_at: Date;
   claimed_at: Date | null;
+  reclaims: number;
 }
 
 function toRecord(row: OutboxRow): OutboxRecord {
@@ -43,6 +45,7 @@ function toRecord(row: OutboxRow): OutboxRecord {
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
     claimed_at: iso(row.claimed_at),
+    reclaims: row.reclaims,
   };
 }
 
@@ -51,8 +54,8 @@ function toRecord(row: OutboxRow): OutboxRecord {
 const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlation_id,
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at`;
 
-/** Everything a read returns, including the claim (B-24). */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at`;
+/** Everything a read returns, including the claim (B-24) and its budget (B-25). */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims`;
 
 /**
  * Durable outbox (ADR 0009).
@@ -144,23 +147,44 @@ export class PgOutbox implements OutboxStore {
     return result.rows.map(toRecord);
   }
 
-  /** See `OutboxStore.reclaimExpired`. */
-  async reclaimExpired(now: Date, limit = 100): Promise<number> {
-    const result = await this.pool.query(
+  /**
+   * See `OutboxStore.reclaimExpired`. One statement, two outcomes (B-25).
+   *
+   * Recovering a row and giving up on it are decided from `reclaims`, which this
+   * same statement increments; every `reclaims`
+   * on the right-hand side reads the pre-update value, so the whole CASE agrees
+   * with itself. Splitting it into a select-then-update would reintroduce exactly
+   * the race `for update skip locked` is here to prevent: two workers reading the
+   * same budget and both deciding the row still has room.
+   *
+   * `returning status` is how the caller separates the two, rather than a second
+   * query or a count of a subset: the row itself says which branch it took.
+   */
+  async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
+    const result = await this.pool.query<{ status: OutboxStatus }>(
       `update outbox
-          set claimed_at = null,
-              next_attempt_at = $1,
-              last_error = 'abandoned claim reclaimed after attempt ' || attempts
+          set reclaims = reclaims + 1,
+              claimed_at = null,
+              status = case when reclaims + 1 > $3 then 'dead' else status end,
+              -- Due immediately on the recovered branch; untouched once dead, the
+              -- same as markDead leaves it, because nothing is going to happen at
+              -- that time any more.
+              next_attempt_at = case when reclaims + 1 > $3 then next_attempt_at else $1 end,
+              last_error = case when reclaims + 1 > $3
+                then 'reclaim limit exceeded: abandoned ' || (reclaims + 1) || ' times after attempt ' || attempts
+                else 'abandoned claim ' || (reclaims + 1) || ' reclaimed after attempt ' || attempts end
        where event_id in (
          select event_id from outbox
          where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
          order by next_attempt_at
          limit $2
          for update skip locked
-       )`,
-      [iso(now), limit],
+       )
+       returning status`,
+      [iso(now), limit, maxReclaims],
     );
-    return result.rowCount ?? 0;
+    const dead = result.rows.filter((row) => row.status === "dead").length;
+    return { reclaimed: result.rows.length - dead, dead };
   }
 
   /** Takes a scope: it commits with the outbound delivery rows it fans out to. */

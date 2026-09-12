@@ -2,6 +2,7 @@ import type { Clock } from "../clock.js";
 import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import type { EventBus } from "./bus.js";
 import type { InboundEventStore } from "./ingress.js";
+import { DEFAULT_MAX_RECLAIMS } from "./reclaim.js";
 
 export interface DispatcherResult {
   processed: number;
@@ -9,6 +10,13 @@ export interface DispatcherResult {
   dead: number;
   /** Rows a previous process claimed and never acknowledged (B-24). */
   reclaimed: number;
+  /**
+   * Rows dead-lettered because they have now been abandoned more times than
+   * `maxReclaims` allows (B-25). Separate from `dead`, which counts events a
+   * handler actually rejected `maxAttempts` times: one says the event is bad, this
+   * says nothing lived long enough to judge it.
+   */
+  reclaim_exhausted: number;
 }
 
 /**
@@ -35,19 +43,40 @@ export class InboundDispatcher {
     private readonly maxAttempts = 5,
     private readonly baseBackoffMs = 1000,
     private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
+    /**
+     * How many abandonments one row is allowed before it is dead-lettered instead
+     * of recovered (B-25). Last, so no existing positional caller moves.
+     */
+    private readonly maxReclaims = DEFAULT_MAX_RECLAIMS,
   ) {}
 
   async drainOnce(limit = 100): Promise<DispatcherResult> {
     const now = this.clock.now();
-    const result: DispatcherResult = { processed: 0, failed: 0, dead: 0, reclaimed: 0 };
+    const result: DispatcherResult = {
+      processed: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
     // lease is directly observable for this worker: the row was claimed by some
     // process that never acknowledged it (B-24). Before `claimed_at` existed the
     // row simply became due again and the death of a worker was indistinguishable
     // from an event politely asking to be retried.
-    result.reclaimed = await this.store.reclaimExpired(now, limit);
-    this.metrics.outcome("reclaimed", result.reclaimed);
+    //
+    // A recovery charges its own budget rather than `attempts` (B-25); once that
+    // budget runs out the row is dead-lettered, which is reported as
+    // `failed_permanent` because it is terminal, and not as `reclaimed`, because
+    // the recovery is precisely what did not happen. For this queue a dead row is
+    // also the one an operator can act on: `dead` is a default status of the replay
+    // selector, so the event is recoverable by hand rather than lost.
+    const reclaim = await this.store.reclaimExpired(now, this.maxReclaims, limit);
+    result.reclaimed = reclaim.reclaimed;
+    result.reclaim_exhausted = reclaim.dead;
+    this.metrics.outcome("reclaimed", reclaim.reclaimed);
+    this.metrics.outcome("failed_permanent", reclaim.dead);
     const due = await this.store.claimDue(now, limit);
     this.metrics.claimed(due.length);
 

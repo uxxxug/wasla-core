@@ -2,6 +2,12 @@ import type { Clock } from "../clock.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import { tallyByStatus } from "./queue-counts.js";
+import {
+  reclaimedError,
+  reclaimExhausted,
+  reclaimExhaustedError,
+  type ReclaimOutcome,
+} from "./reclaim.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
 
@@ -23,6 +29,17 @@ export interface OutboxRecord {
    * stuck".
    */
   claimed_at: string | null;
+  /**
+   * How many times a worker claimed this row and never came back (B-25).
+   *
+   * Separate from `attempts` because they count different things and are read by
+   * different code. `attempts` counts failures somebody observed and drives the
+   * retry backoff; this counts attempts nobody saw end, and drives only the limit
+   * that stops a payload which kills every worker that touches it from being
+   * recovered for ever. Incremented by the reclaim path alone, and never reset:
+   * the budget is for the lifetime of the row.
+   */
+  reclaims: number;
 }
 
 /**
@@ -41,13 +58,18 @@ export interface OutboxStore {
    * has since expired; this is the only thing that frees such a row, because
    * `claimDue` refuses claimed rows.
    *
-   * Deliberately does not touch `attempts`: an attempt that was abandoned was
-   * never observed to fail, and charging it against the retry budget would let a
-   * rolling deploy dead-letter healthy events. The consequence — a row whose
-   * worker dies every time is retried for ever — is recorded as its own blocker
-   * rather than fixed by a side effect here.
+   * Still does not touch `attempts`: an attempt that was abandoned was never
+   * observed to fail, and charging it against the retry budget would let a rolling
+   * deploy dead-letter healthy events at `maxAttempts = 5`. Instead a recovery
+   * charges `reclaims`, its own budget, and the row is dead-lettered when that
+   * budget runs out (B-25). Two failure modes, two counters: a restart cannot
+   * consume a healthy event's retries, and a payload that kills every worker that
+   * touches it can no longer be recovered for ever with nothing to stop it.
+   *
+   * `maxReclaims` recoveries are allowed; the abandonment after that sets
+   * `status = 'dead'` rather than returning the row to the pending pool.
    */
-  reclaimExpired(now: Date, limit?: number): Promise<number>;
+  reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
   /** One record by id. Outbound delivery needs the envelope long after it was published. */
   get(eventId: string): Promise<OutboxRecord | undefined>;
   markPublished(eventId: string, scope?: TransactionScope): Promise<void>;
@@ -83,6 +105,7 @@ export class InMemoryOutbox implements OutboxStore {
       event,
       status: "pending",
       attempts: 0,
+      reclaims: 0,
       last_error: null,
       next_attempt_at: this.clock.now().toISOString(),
       claimed_at: null,
@@ -140,24 +163,38 @@ export class InMemoryOutbox implements OutboxStore {
   }
 
   /** See `OutboxStore.reclaimExpired`. */
-  async reclaimExpired(now: Date, limit = 100): Promise<number> {
-    let reclaimed = 0;
+  async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
+    const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     for (const record of this.records.values()) {
-      if (reclaimed >= limit) break;
+      if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
+      const reclaims = record.reclaims + 1;
+      // The budget is spent either way, so the count on the row is the same on
+      // both branches: what changes is whether the row is allowed to be tried
+      // again. Recording it on the dead row too is what makes the dead-letter
+      // explain itself — without it, `status = 'dead'` on a row with
+      // `attempts = 0` looks like a bug rather than a payload nobody survived.
+      const exhausted = reclaimExhausted(record.reclaims, maxReclaims);
       this.records.set(record.event.event_id, {
         ...record,
+        reclaims,
+        status: exhausted ? "dead" : record.status,
         claimed_at: null,
         // Due immediately. The row already waited out a whole lease for a worker
         // that never came back; making it wait again would turn one crash into
-        // two delays.
-        next_attempt_at: now.toISOString(),
-        last_error: `abandoned claim reclaimed after attempt ${record.attempts}`,
+        // two delays. Left as-is on the dead branch too: nothing reads
+        // `next_attempt_at` on a terminal row, and rewriting it would suggest
+        // something is still going to happen.
+        next_attempt_at: exhausted ? record.next_attempt_at : now.toISOString(),
+        last_error: exhausted
+          ? reclaimExhaustedError(reclaims, record.attempts)
+          : reclaimedError(reclaims, record.attempts),
       });
-      reclaimed += 1;
+      if (exhausted) outcome.dead += 1;
+      else outcome.reclaimed += 1;
     }
-    return reclaimed;
+    return outcome;
   }
 
   /**

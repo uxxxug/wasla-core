@@ -5,6 +5,13 @@ import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-m
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import { tallyByStatus } from "./queue-counts.js";
+import {
+  DEFAULT_MAX_RECLAIMS,
+  reclaimedError,
+  reclaimExhausted,
+  reclaimExhaustedError,
+  type ReclaimOutcome,
+} from "./reclaim.js";
 
 export interface EventSubscription {
   subscription_id: string;
@@ -47,6 +54,15 @@ export interface EventDelivery {
    * deliveries are stuck".
    */
   claimed_at: string | null;
+  /**
+   * How many times a worker claimed this delivery and never came back (B-25).
+   *
+   * Its own budget, separate from `attempts`, because an abandonment is not an
+   * observed failure: `attempts` counts responses the subscriber actually gave and
+   * drives the retry backoff, and this counts attempts nobody saw end. It is what
+   * bounds a delivery whose payload kills the worker rather than the subscriber.
+   */
+  reclaims: number;
 }
 
 export interface DeliveryStore {
@@ -75,8 +91,13 @@ export interface DeliveryStore {
    * Nothing here re-sends. A delivery whose worker died mid-request may have
    * reached the subscriber, which is why every CORE webhook carries the event id
    * and subscribers are required to be idempotent (see `docs/outbound-delivery.md`).
+   *
+   * It does charge `reclaims`, and dead-letters the delivery once `maxReclaims`
+   * recoveries have been used (B-25). Without that limit a delivery whose payload
+   * kills the worker — rather than one the subscriber rejects — has no attempt
+   * limit at all and is retried for ever.
    */
-  reclaimExpired(now: Date, limit?: number): Promise<number>;
+  reclaimExpired(now: Date, maxReclaims: number, limit?: number): Promise<ReclaimOutcome>;
   markDelivered(deliveryId: string, status: number): Promise<void>;
   markFailed(
     deliveryId: string,
@@ -224,23 +245,31 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   }
 
   /** See `DeliveryStore.reclaimExpired`. */
-  async reclaimExpired(now: Date, limit = 100): Promise<number> {
-    let reclaimed = 0;
+  async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
+    const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     for (const delivery of this.deliveries.values()) {
-      if (reclaimed >= limit) break;
+      if (outcome.reclaimed + outcome.dead >= limit) break;
       if (delivery.status !== "pending" || delivery.claimed_at === null) continue;
       if (new Date(delivery.next_attempt_at).getTime() > now.getTime()) continue;
+      const reclaims = delivery.reclaims + 1;
+      const exhausted = reclaimExhausted(delivery.reclaims, maxReclaims);
       this.deliveries.set(delivery.delivery_id, {
         ...delivery,
+        reclaims,
+        status: exhausted ? "dead" : delivery.status,
         claimed_at: null,
         // Due immediately: it already waited out a whole lease for a worker that
-        // never came back.
-        next_attempt_at: now.toISOString(),
-        last_error: `abandoned claim reclaimed after attempt ${delivery.attempts}`,
+        // never came back. Left where it is once dead, the same as `markDead`
+        // leaves it.
+        next_attempt_at: exhausted ? delivery.next_attempt_at : now.toISOString(),
+        last_error: exhausted
+          ? reclaimExhaustedError(reclaims, delivery.attempts)
+          : reclaimedError(reclaims, delivery.attempts),
       });
-      reclaimed += 1;
+      if (exhausted) outcome.dead += 1;
+      else outcome.reclaimed += 1;
     }
-    return reclaimed;
+    return outcome;
   }
 
   async markDelivered(deliveryId: string, status: number): Promise<void> {
@@ -439,6 +468,7 @@ export class DeliveryFanOut {
           created_at: now,
           delivered_at: null,
           claimed_at: null,
+          reclaims: 0,
         },
         scope,
       );
@@ -457,6 +487,13 @@ export interface DeliveryWorkerResult {
   dead: number;
   /** Deliveries a previous process claimed and never acknowledged (B-24). */
   reclaimed: number;
+  /**
+   * Deliveries dead-lettered because they have now been abandoned more times than
+   * `maxReclaims` allows (B-25). Separate from `dead`, which counts deliveries the
+   * subscriber refused `maxAttempts` times: one is a fact about the subscriber, this
+   * is a fact about the delivery itself — no response was ever received.
+   */
+  reclaim_exhausted: number;
 }
 
 /**
@@ -481,19 +518,40 @@ export class DeliveryWorker {
     private readonly baseBackoffMs = 1000,
     private readonly timeoutMs = 5000,
     private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
+    /**
+     * How many abandonments one delivery is allowed before it is dead-lettered
+     * instead of recovered (B-25). Last, so no existing positional caller moves.
+     */
+    private readonly maxReclaims = DEFAULT_MAX_RECLAIMS,
   ) {}
 
   async drainOnce(limit = 100): Promise<DeliveryWorkerResult> {
     const now = this.clock.now();
-    const result: DeliveryWorkerResult = { delivered: 0, failed: 0, dead: 0, reclaimed: 0 };
+    const result: DeliveryWorkerResult = {
+      delivered: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+      reclaim_exhausted: 0,
+    };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
     // lease is directly observable for this worker: the delivery was claimed by
     // some process that never acknowledged it (B-24). Before `claimed_at` existed
     // the row simply became due again and the death of a worker mid-request was
     // indistinguishable from a subscriber that asked to be retried.
-    result.reclaimed = await this.store.reclaimExpired(now, limit);
-    this.metrics.outcome("reclaimed", result.reclaimed);
+    //
+    // A recovery charges its own budget rather than `attempts` (B-25); when that
+    // budget runs out the delivery is dead-lettered and reported as
+    // `failed_permanent`, not as `reclaimed`, because the recovery is what stopped.
+    // The subscriber may have received some of those abandoned attempts — nothing
+    // here knows, which is the whole reason CORE requires subscribers to be
+    // idempotent on `event_id`.
+    const reclaim = await this.store.reclaimExpired(now, this.maxReclaims, limit);
+    result.reclaimed = reclaim.reclaimed;
+    result.reclaim_exhausted = reclaim.dead;
+    this.metrics.outcome("reclaimed", reclaim.reclaimed);
+    this.metrics.outcome("failed_permanent", reclaim.dead);
     const due = await this.store.claimDue(now, limit);
     this.metrics.claimed(due.length);
 
