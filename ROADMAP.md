@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Milestone 8 — metrics export and rate limiting on the ingress edge. CORE can now be asked, from inside itself, how much arrived, how much was refused, how much is waiting, how much is retrying, what failed for good and how many financial decisions are queued — through one deterministic `GET /metrics` (Prometheus text exposition 0.0.4) that runs no query and changes no state. The HTTP edge refuses a caller that asks too often with 429, `retry-after` and `x-ratelimit-*`, keyed on the hashed credential rather than the address, counted by a single atomic upsert so the B-22 read-then-write shape cannot recur. Metrics are **system-level only**: no metric carries a tenant or an entity dimension, and the guard that enforces it is asserted, not intended. 488 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 488 passed / 31 files (run twice); `npm test` without a database 273 passed / 41 skipped; governance, contract, migration and roadmap gates passing. Migration 0013 applied, rolled back and re-applied on PostgreSQL 18.6. Instrumentation overhead measured, not asserted: ≈ +1 µs per request for the metrics, ≈ +5 µs for the in-process limiter, ≈ +200 µs (one statement) for the shared Postgres limiter.
+**Last milestone:** Milestone 6 — event normalisation and historical replay tooling. CORE can now read an envelope it accepted months ago under today's contract, refuse it loudly if it cannot be read safely, choose a narrow and reviewable set of stored events, rehearse the run on a connection that is **physically unable to write**, apply it through the ordinary event bus with no replay-specific privileges anywhere, stop at the first failure with a report that names the event and where to resume, and be asked afterwards what happened — from the existing audit trail, with no new table. Normalisation exposed and fixed two live defects: a consumer that accepted `move.job.rejected` payloads with no contract-required `rejected_at`, and a `move.job.completed` payload carrying a key the contract forbids. 548 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 548 passed / 33 files; `npm test` without a database 311 passed / 43 skipped; governance, contract, migration and roadmap gates passing. Financial safety, dry-run zero-mutation, cross-process concurrency and failure/resume are asserted on **real PostgreSQL 18.6**, including a falsifiable read-only proof (SQLSTATE 25006). **No migration in this cycle** — replay needed no schema change, and B-24 was deliberately left alone. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -72,6 +72,12 @@ orders, marketplace search, store pricing, or any product-specific UI.
       and an operator read surface. Fake adapters only, by choice.
 - [x] Every background worker claims work by writing a lease (B-22), so two
       workers polling together cannot receive the same row.
+- [x] One canonical normalisation layer owns event-version knowledge, so no
+      consumer interprets a version itself; an event that cannot be normalised
+      safely is refused by name rather than guessed at.
+- [x] Historical replay of stored inbound events: narrow reviewable scopes, a
+      dry-run that a read-only connection proves cannot write, no double
+      financial effect, no tenant inference, and a resumable failure report.
 
 ## In progress
 
@@ -98,7 +104,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Complete, except policy decisions that are not CORE's to make** | Migration 0010 adds `plan`, `plan_grant`, `subscription`, `subscription_period`, `usage_record` with RLS, an `EXCLUDE USING gist` constraint against overlapping periods, immutability triggers on an active plan's terms and grants, append-only triggers on usage, and a deferred constraint trigger reconciling a settled period against the hold that settled it. Module: `domain.ts` (entitlement derived, never stored), `repository.ts` + `pg-repository.ts`, `service.ts`, `http.ts`. Ten routes, `subscription.read` / `subscription.write` permissions, six event contracts. 23 tests × 2 backends. **No entitlement-check endpoint** — ADR 0008 requires a new ADR first (B-14). Proration, grace, trials, rollover and comped access are recorded as B-15…B-19 |
 | 4 | Channels and notifications; Telegram adapter | **Complete inside CORE, with a fake adapter rather than a live provider** | Migration 0012 adds `notification_recipient` and `notification` with RLS. Module: `domain.ts` (five templates, money wording derived from `settlement_state`), `ports.ts` (a four-outcome `ChannelResult`, never `void` or a boolean), `repository.ts` + `pg-repository.ts` (lease claim + `claim_token` fencing), `service.ts` (`NotificationFanOut` inside the relay transaction, `NotificationDispatcher` with backoff and fencing), `identity-directory.ts` (verified links only), `http.ts` (four routes). Published payload contract `contracts/notifications/notification-message.v1.schema.json`. 23 tests × 2 backends plus 5 claim-atomicity tests × 2 backends; `docs/notifications.md` states the guarantee. **No live provider is wired** — deliberately: the contract is adapter-shaped so a real Telegram/SMTP/SMS client is a new file and no domain change. `delivered` is unreachable until a provider confirmation callback exists (D-8) |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
-| 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
+| 6 | Event normalisation and historical replay tooling | **Complete inside CORE** | Two layers, deliberately separate. `src/platform/eventing/normalize.ts`: one registry that owns version knowledge, so a consumer receives a `CanonicalEvent` and never branches on `version` — required fields, `additionalProperties: false` enforced in code and not only in the schema, timestamps normalised to ISO UTC, absent-optional ≡ null, and four reported rejections (`envelope_malformed`, `unknown_event_type`, `unsupported_version`, `payload_malformed`) that name offending keys and never values. It is now called at the ingress edge too, so a malformed payload is a 400 to the producer instead of a consumer's problem later. `src/platform/replay/`: a scope that **must** narrow (`limit` 1…1000, no "replay everything"), ordering on `(received_at, event_id)` rather than the producer's `occurred_at`, `plan()` proved non-writing by a `ReadOnlyQueryable` that refuses writes with SQLSTATE 25006, two named modes (`pending_only` letting the inbox decide, `reapply` explicit and documented), per-event publication with no wrapping transaction so a run is resumable, `resume_after` pointing *before* the failing event, a session-scoped `pg_try_advisory_lock` refusing a concurrent run between processes, tenant refusal rather than inference, two audit entries and no new table, and a CLI (`npm run replay`) gated on a new `events.replay` permission held by `platform_admin` only. 17 + 43 tests. `docs/replay.md` states the guarantees and the trades. **No migration, no new index, no `claimed_at`** |
 | 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
 | 8 | Security hardening pass and observability export | **Observability export and ingress rate limiting complete; the hardening pass itself is bounded by B-5** | Deny-by-default RLS on every table (including the new `rate_limit_counter`), hardened `search_path`, token hashing, audit scrubbing, correlation ids — unchanged. Added in the 2026-09-12 (fifth) cycle: `src/platform/observability/` (a **declared** metric catalogue that refuses an undeclared name, a missing label, an extra label or an identifier-shaped label value; a deterministic Prometheus 0.0.4 renderer; per-worker counters and histograms; a `DepthSampler` on the operator's cadence, never on the scrape, with `core_sample_timestamp_seconds` and `core_sample_failures_total` so staleness is visible) and `src/platform/http/rate-limit.ts` + `pg-rate-limit.ts` + migration 0013 (fixed window, per hashed credential and route class, one atomic `insert … on conflict … do update … returning`, 429 with `retry-after`, workers unreachable from the limiter by construction). Scope decisions recorded in `docs/observability.md`: **system-level metrics only, never tenant-scoped**, and per-credential rather than per-organization keying because resolving a token to a tenant would put a database read in front of the limiter. 48 new tests × both backends where applicable, including a real-Postgres concurrency test falsified against a deliberately racy store. Still open: no tracing/span export (nothing consumes it; `correlation_id` already threads the audit trail), `/metrics` is unauthenticated and therefore depends on network placement (B-5), and lease expiry is not countable for three of the four workers (**B-24**) |
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
@@ -2381,3 +2387,275 @@ candidate after milestone 6); a live channel adapter (no provider credential, an
 the port keeps it a one-file change); B-23's payload widening and D-6/D-7/D-8,
 which are contract or external decisions; milestone 9, which is blocked on B-5
 and B-6.
+
+## Cycle 2026-09-12 (sixth) — Milestone 6, event normalisation and historical replay (CORE-only agent)
+
+### What the milestone actually meant, after reading the code
+
+The audit came before the abstraction, and it changed the shape of the work
+twice.
+
+First finding: `inbound_event` has kept every accepted envelope since migration
+0007, and the only thing that could ever act on one was `InboundDispatcher`,
+which looks exclusively at rows that are `pending` and due. A row that went
+`dead` after exhausting its attempts, or that was accepted while a consumer had a
+defect, was **durable and unreachable at the same time**. The data was being kept
+for a recovery that had no mechanism. That is the gap replay closes — and it is a
+much smaller gap than "build a replay engine".
+
+Second finding, and the more serious one: each of the four fulfillment consumers
+validated its own payload, in its own way, at the moment it ran. Unifying that
+into one layer immediately exposed two defects that were live in the repository:
+
+- the `move.job.rejected` consumer accepted payloads with **no `rejected_at`**,
+  a field the published contract marks required;
+- a `move.job.completed` fixture carried a `reason` key the contract forbids
+  (`additionalProperties: false`), and the consumer took it.
+
+Neither was caught because nothing was responsible for deciding what an event
+*is*. So normalisation was not scaffolding for replay; it was the defect fix, and
+replay is what made it necessary to look.
+
+No event bus was built, no inbox or outbox was redesigned, and no published
+contract was changed.
+
+### Four stages, kept distinct
+
+raw inbound → validated envelope (`assertEnvelope`) → **canonical event**
+(`normalize()`) → consumer effect (`service.ts`). A consumer now receives a
+`CanonicalEvent` and asks for its payload by expected type; it does not see
+`version` and does not branch on it. The reason for the layer is exactly that: if
+every consumer interprets versions itself, "what does this event mean" has as many
+answers as there are consumers, and they drift in silence.
+
+`CanonicalEvent` carries `event_id`, `event_type`, `version`, `producer`,
+`occurred_at`, `received_at`, `correlation_id`, `causation_id`,
+`entity_type`/`entity_id`, `organization_id` (`string | null`, where null means
+*the envelope does not say*), the canonical `payload`, and the original
+`envelope` verbatim — retained because replay republishes the original bytes
+rather than a reconstruction, and a reconstruction would be a new event with a new
+identity that the inbox has never seen.
+
+`normalize()` is total and pure: `{ ok: true, event }` or
+`{ ok: false, rejection, detail }`, never a throw. It runs at the ingress edge
+(rejection → 400 to the producer) and inside replay (rejection → reported
+outcome). Four rejections: `envelope_malformed`, `unknown_event_type`,
+`unsupported_version`, `payload_malformed`. The detail names offending **keys,
+never values**, so a report is safe to paste into a ticket.
+
+An unnormalisable row is left **exactly** as it was — not its status, not its
+attempt count. A refusal costs an operator an investigation; a guessed
+`organization_id` settles money against the wrong party.
+
+**Stated honestly:** only version 1 exists for all four inbound types, so the
+multi-version dispatch path is exercised only by the `unsupported_version`
+refusal. The real backwards-compatibility case handled is the additive optional
+`payment_authorization_id` (absent ≡ null). This cycle did **not** prove a
+version-1-to-version-2 migration, because there is no version 2.
+
+### Replay scope, and the refusal to mean "everything"
+
+`assertNarrow` rejects a scope unless at least one filter narrows it, and `limit`
+is mandatory and bounded to 1…1000. Filters: `event_ids`, `event_types`,
+`producer`, `statuses`, `received_from`/`to`, `occurred_from`/`to`,
+`organization_id`, `after` (cursor), `limit`. `statuses` defaults to
+`["pending", "dead"]` — the rows replay exists to rescue; asking for `processed`
+rows is allowed but must be explicit. The reason for compulsory narrowing is
+reviewability: an operator, and later an auditor, must be able to read the command
+and know what it touches before it runs.
+
+### Ordering
+
+`(received_at, event_id)` — CORE's own receipt time, tie-broken deterministically
+so a cursor can be exact. `occurred_at` is deliberately **not** the key: it is
+the producer's claim, and ordering by it would let a producer with a skewed clock
+reorder CORE's history retroactively. Paging uses a row-value cursor
+`(received_at, event_id) > (:at, :id)` matching the sort exactly, so no event is
+visited twice or skipped.
+
+There is no sequence column, so the order is deterministic rather than
+semantically total. Where ordering genuinely matters it is the **domain** that
+enforces it, not the replay: a stale acceptance arriving after a cancellation
+records what it can and does not reopen closed work, because the consumers use
+conditional transitions on the current status.
+
+### Dry-run, proved rather than promised
+
+`plan()` returns the same report shape as a real run and writes nothing. That is
+not asserted by reading the code: `ReadOnlyQueryable` wraps a pool so every
+statement runs inside `begin transaction read only`, and the test runs the
+identical service on it — `plan()` succeeds, `run()` on the same scope fails with
+PostgreSQL **SQLSTATE 25006**, and afterwards `fulfillment`, `inbound_event`,
+`inbox`, `outbox`, `notification`, the ledger and `audit_entry` are unchanged.
+The falsification is the point: the guarantee is "the database refuses the
+write", not "the code does not call the handler" (W-8).
+
+**A dry-run writes no audit entry either.** A deliberate trade: journaling a
+rehearsal would mean the rehearsal writes, which destroys the only property that
+makes a rehearsal worth having.
+
+### Redelivery is not replay
+
+Redelivery is a producer resending an `event_id`, handled at ingress and
+unchanged. Replay is CORE offering a stored event to consumers again, and the
+inbox is per `(consumer, event_id)`.
+
+Two modes, only one of which can cause a second execution. `pending_only`
+(default) publishes and lets the inbox decide, so it is safe against any scope.
+`reapply` clears this event's inbox entries for its consumers first — **explicit,
+named and documented, never a hidden side effect** — for a consumer whose handler
+was wrong and has been fixed. It is not a way around idempotency: the handlers
+still enforce their own invariants, so a re-executed capture is refused by the
+ledger rather than permitted by the replay.
+
+Replay never rewrites an `event_id` or re-wraps an envelope. That is the cheapest
+possible way to cause a double effect, which is precisely why the stored envelope
+is republished byte for byte; a test submits a deliberately re-wrapped duplicate
+to show the order-reference uniqueness still holds even then.
+
+### Financial safety
+
+There is **no replay-specific branch anywhere in the money path**. The guarantee
+is not that replay is careful, it is that replay has no privileges. On real
+PostgreSQL, over wallet → credit → authorize → `market.order.created` with a hold
+→ `move.job.accepted` → `move.job.completed`: first replay captures
+(`settlement_state = captured`, held 0, available 6 000); the same two events
+replayed again, dragged back into scope on purpose so the inbox is the only thing
+in the way, report `skipped_duplicate` × 2 and leave the balance, the
+authorization row and the settlement state byte-identical. A replayed
+`move.job.rejected` releases once; `reapply` of it does not credit twice. No
+second capture, release, ledger entry or settlement.
+
+### Failure semantics
+
+No wrapping transaction. Thousands of events in one transaction would make
+resumption impossible and hold locks for the length of the run, so each event is
+published on its own and the report is the record.
+
+`stopOnError` defaults to true, because later facts must not land on top of an
+earlier one that never did. The report names the failing event and the reason,
+shows what preceded it as applied and what followed as not started, and
+`resume_after` points **before** the failing event so a resume retries it rather
+than stepping over the one event that did not work. The failing row keeps the
+dispatcher's own schedule — `attempts`, `next_attempt_at` and `status` untouched
+— so a failed replay cannot spend the live queue's retry budget.
+`--continue-on-error` answers the different question "how bad is it", opt-in.
+
+### Concurrency
+
+One run at a time, **refused rather than queued**: a replay waiting behind
+another would run against a state the operator never inspected. In memory,
+`InProcessReplayLock`, documented as single-process only. On PostgreSQL, a
+session-scoped `pg_try_advisory_lock` on a dedicated client, tested from a
+genuinely separate pool — which is what a second CORE instance is, and which an
+in-process lock would let through. The lock is released in a `finally`, tested by
+making the first store call throw, so one unexpected error cannot lock replay out
+until a restart.
+
+### Tenant isolation, and where B-23 bites
+
+Scope by organization has three outcomes: match, `skipped_tenant_mismatch`, or
+`skipped_tenant_unknown` when the envelope carries no tenant scope. CORE *could*
+resolve a `move.*` closure to a tenant by looking up the fulfillment and
+deliberately does not — the envelope is the evidence, and resolving tenancy by
+inference is how one organization's history is replayed under another's scope.
+The underlying cause is **B-23**: the three closure contracts carry no
+`organization_id`. Widening them is a versioned change to contracts MOVE and
+MARKET consume, so it stays a recorded dependency, cited in the refusal reason
+rather than worked around.
+
+### Auditability, without a second source of truth
+
+**No new table.** Two entries on entity `event_replay` keyed by `replay_id`:
+`event_replay.started` (actor, time, mode, full scope) and
+`event_replay.finished` (counts per outcome, plus up to 20 `failed_event_ids`).
+Counts and identifiers only, never a payload — an event can describe a real
+person's order, and the audit trail is read by more people than the database is.
+
+A counters table was considered and rejected: audit already carries the truth, and
+a table describing what replay did would become a competing account of what the
+domain state is. Replay records its own activity and nothing about the domain.
+
+### Operating surface: CLI, and no endpoint
+
+`npm run replay -- --event-types … --limit 100`, dry-run by default, `--execute`
+required to write — the dangerous form is the longer one to type. There is
+deliberately **no replay endpoint on the ingress**: ingress is reachable by MARKET
+and MOVE with service credentials, and a route there would let a producer replay
+CORE's history. B-5 also means an HTTP surface has nowhere safe to be placed yet.
+`REPLAY_TOKEN` comes from the environment, never argv, so it does not reach shell
+history or a process list; it is authenticated and then checked for a new
+`events.replay` permission granted to `platform_admin` **only** — asserted in a
+test, because every service credential holds `events.submit` and reusing it would
+have let MARKET and MOVE replay everything. Rate control is the lock plus the
+bounded limit. Exit code 1 on any failure or early stop.
+
+### Tests (60 new)
+
+`tests/event-normalisation.test.ts` — 17. `tests/replay.test.ts` — 21 in memory,
+43 with a database. On **real PostgreSQL**: the dry-run zero-mutation snapshot and
+the read-only 25006 proof, the financial lifecycle with no double effect, the
+cross-pool advisory lock, and failure/resume. Also covered: scope refusal and
+limit bounds, replaying a `dead` row without erasing its attempt history, the
+re-wrapped duplicate, unnormalisable and unsupported-version rows left untouched,
+tenant unknown and tenant mismatch, receipt-order versus a skewed producer clock,
+no lifecycle regression from a stale event, cursor paging with no repeats,
+`continue-on-error` surveying every failure, lock release on an unexpected error,
+the audit journal's contents and its absence of payloads, and the authorisation
+boundary.
+
+### Regression
+
+`tsc --noEmit` clean. `DATABASE_URL=… npm test` **548 passed / 33 files**
+(baseline 488). Without a database **311 passed / 43 skipped** (baseline
+273 / 41). Results agree between backends everywhere both run. One pre-existing
+flake persists and is **not** new: `tests/migration-0011-lifecycle.test.ts` times
+out in its teardown hook under full-suite contention and passes in isolation; its
+assertions pass in both cases.
+
+### Fixed on the way, because normalisation made them visible
+
+- The `move.job.rejected` consumer accepted payloads missing `rejected_at`, which
+  the published contract requires. Now refused at the edge.
+- A `move.job.completed` payload in the notification tests carried a `reason` key
+  the contract forbids. Removed; the contract is now enforced in code, so the
+  fixture could not have kept it.
+- `payment_authorization_id` had two spellings for one meaning (absent, and
+  explicitly null). Normalised to one, so no consumer has to know both.
+
+### External dependencies — none new, none solved
+
+**B-24** untouched: no `claimed_at`, no `processing` status, no schema column, no
+migration. Replay needed none of them, and adding one here would have pre-empted
+a decision that needs its own cycle. **B-23** unchanged, and now cited by name at
+the point where it costs something. **D-6**, **D-7**, **D-8** unchanged and not
+circumvented from inside replay. No new blocker was found: the milestone needed
+nothing CORE does not own, which is why it was chosen.
+
+### Next task, and why it is this one
+
+**B-24 — make a claim countable and an abandoned lease recoverable.** No
+unblocked *milestone* remains: 1, 3, 4, 6 and 8 are CORE-complete, 2 and 5 wait on
+MARKET, 7 waits on B-2/B-3, 9 waits on B-5/B-6. So the next task is the largest
+CORE-only correctness gap, and after this cycle it is clearly B-24.
+
+The argument is not that it is interesting; it is that this milestone made the
+cost of it concrete. Replay exists to reach events the dispatcher cannot, and the
+one category it still cannot see is work whose lease was abandoned mid-flight: the
+outbox relay, the inbound dispatcher and the delivery worker all ride their lease
+on `next_attempt_at`, which is also the retry-schedule field, so a row being
+processed by a dead process is indistinguishable from a row waiting to be retried.
+That is why lease expiry is uncountable in the metrics added last cycle, and it is
+also why an operator cannot ask "what is stuck" — the question replay is most
+often run to answer. Fixing it needs a `processing` status or a `claimed_at`
+column on three eventing tables, a rollback path, and a decision about rows that
+exist when the migration runs. It is a schema cycle with no external dependency,
+it removes an invisibility rather than adding a feature, and it is what stands
+between CORE and a staging rehearsal it could trust.
+
+Not chosen: **B-14…B-19** and the multi-hold work need answers CORE does not own;
+**B-23** is a versioned widening of three published contracts and belongs in a
+contract cycle with MOVE and MARKET; a live channel adapter has no provider
+credential and the port keeps it a one-file change; **milestone 9** is blocked on
+B-5 and B-6. Contract expansion was also deliberately not chosen: adding event
+types would widen the surface before the existing one is operationally trustworthy.
