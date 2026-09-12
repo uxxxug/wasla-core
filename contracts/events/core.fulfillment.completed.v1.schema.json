@@ -36,7 +36,7 @@
         "string",
         "null"
       ],
-      "description": "Closure reason when the outcome is failed. Values produced by CORE include move_execution_failed, payment_settlement_failed:*, payment_hold_not_found, payment_hold_already_captured, payment_hold_not_authorized and payment_hold_expired."
+      "description": "Closure reason when the outcome is failed. Values produced by CORE include move_execution_failed, payment_settlement_failed:*, payment_hold_not_found, payment_hold_already_captured, payment_hold_not_authorized, payment_hold_partially_captured and payment_hold_expired."
     },
     "settlement_state": {
       "type": "string",
@@ -49,6 +49,15 @@
         "unsettled"
       ],
       "description": "State of the CORE money hold at closure. A completed outcome is captured, partially_captured or none; a failed outcome is released, partially_captured, none or unsettled. `released` means no money moved at all, `partially_captured` means part of the consented amount moved and the remainder was released, and `unsettled` means CORE could not bring the hold to a terminal state. Optional and additive; consumers may ignore it, and a consumer that reads it must treat an unrecognised value as \"do not assume\" rather than as `released`."
+    },
+    "captured_minor": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The amount of the hold, in minor units, that CORE observed as already moved at closure. Present only when CORE was given the figure by its money module; omitted when it was not observed, which is deliberately different from zero. Never treat an absent value as zero."
+    },
+    "financial_decision_required": {
+      "type": "boolean",
+      "description": "True when money had already moved for work that did not complete, and CORE has not been told what should happen to it. It is a statement about CORE's knowledge, not a policy: whether that amount is refunded, retained against work performed, or charged as a cancellation fee is undecided outside CORE (blocker B-20). While it is true a consumer MUST NOT tell the payer they were refunded, MUST NOT invoice the amount as earned, and MUST NOT treat the operation as financially settled. Absent or false means no such amount is pending."
     }
   },
   "examples": [
@@ -57,7 +66,18 @@
       "order_reference": "order-2",
       "outcome": "completed",
       "completed_at": "2026-09-11T03:45:00.000Z",
-      "settlement_state": "captured"
+      "settlement_state": "captured",
+      "financial_decision_required": false
+    },
+    {
+      "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "order_reference": "order-3",
+      "outcome": "failed",
+      "completed_at": "2026-09-11T03:45:00.000Z",
+      "reason": "payment_settlement_failed:authorization already partially captured",
+      "settlement_state": "partially_captured",
+      "captured_minor": 2500,
+      "financial_decision_required": true
     }
   ]
 }

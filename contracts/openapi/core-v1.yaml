@@ -672,6 +672,13 @@ paths:
         `unsettled`), or a failed or cancelled fulfillment whose hold had already
         moved part of the payer's money (`partially_captured`). An empty list is
         the invariant CORE is expected to hold.
+
+
+        Each item also carries a derived `financial_disposition`
+        (no_money, awaiting_execution, settled, decision_required,
+        inconsistent), which says whether the case needs an engineer
+        (`inconsistent`) or a business decision (`decision_required`). It is
+        computed on read and never stored.
       parameters:
         - name: organization_id
           in: query
@@ -679,6 +686,31 @@ paths:
           schema: { type: string }
       responses:
         "200": { description: Count and list of inconsistent fulfillments }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /v1/fulfillments/reconciliation/pending-financial-decision:
+    get:
+      summary: List fulfillments where money moved for work that did not complete
+      description: >-
+        Reconciliation read for the cases waiting on a decision rather than on a
+        fix: execution closed as failed or cancelled while part of the payer's
+        money had already moved (`settlement_state` `partially_captured`,
+        `financial_disposition` `decision_required`).
+
+
+        A non-empty list is not a CORE defect. CORE has recorded the money truth
+        and stopped: it does not refund the amount, does not retain it as a
+        cancellation fee, and does not mark the operation settled, because
+        whether any of those is correct is undecided outside CORE (blocker
+        B-20). The list exists so those cases are counted and visible instead of
+        being mixed with bookkeeping defects.
+      parameters:
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Count and list of fulfillments awaiting a financial decision }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}:
@@ -691,6 +723,13 @@ paths:
         unsettled). `released` asserts that no money moved; `partially_captured`
         asserts that part of the consented amount moved and the remainder was
         released.
+
+
+        The response also carries a derived `financial_disposition`: no_money,
+        awaiting_execution, settled, decision_required or inconsistent.
+        `decision_required` means money moved for work that did not complete and
+        CORE has not been told what to do with it — do not present the operation
+        as refunded or as settled while it says so.
       parameters:
         - name: fulfillment_id
           in: path
