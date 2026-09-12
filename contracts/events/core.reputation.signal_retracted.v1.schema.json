@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.reputation.signal_retracted.v1.schema.json",
+  "title": "core.reputation.signal_retracted v1",
+  "description": "Published by CORE when a recorded signal is withdrawn on its producer's instruction. Published once: the withdrawal is single-valued, so a redelivered retraction changes nothing and announces nothing. Like the recorded event it carries the fact and nothing derived, and it names the kind and subject so a consumer accumulating the stream can undo exactly what the recorded event added.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reputation_signal_id",
+    "organization_id",
+    "subject_type",
+    "subject_id",
+    "signal_kind",
+    "source_system",
+    "source_reference",
+    "retracted_at"
+  ],
+  "properties": {
+    "reputation_signal_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The signal that was withdrawn. The same identifier the recorded event carried."
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The tenant the signal belongs to."
+    },
+    "subject_type": {
+      "type": "string",
+      "enum": ["identity", "organization"],
+      "description": "The kind of CORE entity the signal was about."
+    },
+    "subject_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The identity or organization the signal was about."
+    },
+    "signal_kind": {
+      "type": "string",
+      "enum": [
+        "service_rating",
+        "completion",
+        "cancellation",
+        "dispute",
+        "compliment",
+        "complaint"
+      ],
+      "description": "The kind of the withdrawn signal, restated so a consumer need not have kept the recorded event."
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The producer that reported, and then withdrew, the signal."
+    },
+    "source_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The producer's reference for the report."
+    },
+    "retracted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the withdrawal took effect, as instructed by the producer."
+    }
+  },
+  "examples": [
+    {
+      "reputation_signal_id": "9f2c1a4e-52f3-4c1b-8a90-1d7c2b3e4f55",
+      "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070",
+      "subject_type": "identity",
+      "subject_id": "6b1f2c6e-2f8a-4a1d-9f0e-52ac9a2f3b41",
+      "signal_kind": "service_rating",
+      "source_system": "wasla-market",
+      "source_reference": "review-8821",
+      "retracted_at": "2026-09-12T11:00:00.000Z"
+    }
+  ]
+}

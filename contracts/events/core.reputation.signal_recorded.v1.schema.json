@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla/events/core.reputation.signal_recorded.v1.schema.json",
+  "title": "core.reputation.signal_recorded v1",
+  "description": "Published by CORE when a reputation signal is recorded for a subject, exactly once per producer reference. Carries the reported fact and nothing derived: no running average, count or score. A total computed at publication time would be computed without any signal recorded concurrently with it, so two events about one subject could each carry a different total with no way to order them; a consumer that needs a standing accumulates this stream, which it receives exactly-once, or asks CORE for the derived standing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "reputation_signal_id",
+    "organization_id",
+    "subject_type",
+    "subject_id",
+    "signal_kind",
+    "rating_value",
+    "source_system",
+    "source_reference",
+    "occurred_at",
+    "recorded_at"
+  ],
+  "properties": {
+    "reputation_signal_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "CORE's identifier for the recorded signal."
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The tenant the signal belongs to. Stated on every reputation event, so a consumer never has to query CORE to scope one."
+    },
+    "subject_type": {
+      "type": "string",
+      "enum": ["identity", "organization"],
+      "description": "The kind of CORE entity the signal is about."
+    },
+    "subject_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The identity or organization the signal is about."
+    },
+    "signal_kind": {
+      "type": "string",
+      "enum": [
+        "service_rating",
+        "completion",
+        "cancellation",
+        "dispute",
+        "compliment",
+        "complaint"
+      ],
+      "description": "The declared kind of signal. A closed vocabulary: an unknown kind counts towards nothing and is refused rather than stored."
+    },
+    "rating_value": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "maximum": 5,
+      "description": "The reported rating, present only for a service_rating and null for every other kind."
+    },
+    "source_system": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The producer that reported the signal."
+    },
+    "source_reference": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The producer's own reference for the report. Unique per tenant and producer; this is what makes ingestion exactly-once."
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the producer says the fact happened."
+    },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When CORE recorded it, on CORE's clock. Ordering uses this, so one producer's skew cannot reorder another's facts."
+    }
+  },
+  "examples": [
+    {
+      "reputation_signal_id": "9f2c1a4e-52f3-4c1b-8a90-1d7c2b3e4f55",
+      "organization_id": "e83f50cc-5808-4873-b58a-722cc3f58070",
+      "subject_type": "identity",
+      "subject_id": "6b1f2c6e-2f8a-4a1d-9f0e-52ac9a2f3b41",
+      "signal_kind": "service_rating",
+      "rating_value": 5,
+      "source_system": "wasla-market",
+      "source_reference": "review-8821",
+      "occurred_at": "2026-09-12T09:15:00.000Z",
+      "recorded_at": "2026-09-12T09:15:02.318Z"
+    }
+  ]
+}

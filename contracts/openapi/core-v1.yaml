@@ -1170,6 +1170,76 @@ paths:
             text/plain:
               schema: { type: string }
 
+  /v1/reputation/{subject_type}/{subject_id}:
+    get:
+      summary: Read the derived standing of an identity or organization
+      description: >
+        Every number in the response is derived from the recorded signals at the
+        moment of the read; no standing, score or average is stored anywhere in
+        CORE. average_rating_milli is thousandths of a rating point and is null
+        when the subject has no standing rating, which is not the same as a zero.
+        Retracted signals are counted as retracted and count towards nothing
+        else. CORE does not weight kinds, age signals or decide what standing is
+        good enough for anything: those are product policy and are recorded as
+        blockers in ROADMAP.md rather than invented here. There is no route that
+        writes a signal - signals arrive only as events from the systems that
+        observed them (ADR 0008, ADR 0015).
+      parameters:
+        - name: subject_type
+          in: path
+          required: true
+          schema: { type: string, enum: [identity, organization] }
+        - name: subject_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: organization_id
+          in: query
+          required: true
+          description: >
+            The tenant of the read, stated rather than inferred from the
+            caller's memberships: a principal can belong to several
+            organizations, and inferring would mean CORE choosing which tenant an
+            ambiguous read meant.
+          schema: { type: string, format: uuid }
+      responses:
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "200": { description: The derived standing, with per-kind counts and the standing rating average. }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/reputation/{subject_type}/{subject_id}/signals:
+    get:
+      summary: List the signals a standing is derived from
+      description: >
+        Newest first by CORE's own recorded_at, so one producer's clock skew
+        cannot reorder another's facts. Bounded by limit, because an unbounded
+        listing of a long history is a request whose cost nobody chose. Exists so
+        a support agent can see what a number is made of instead of having to
+        believe it; no review text ever reaches CORE, so none appears here.
+      parameters:
+        - name: subject_type
+          in: path
+          required: true
+          schema: { type: string, enum: [identity, organization] }
+        - name: subject_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "200": { description: The recorded signals, newest first, each stating whether and when it was retracted. }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth:

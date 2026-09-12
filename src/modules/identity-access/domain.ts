@@ -109,7 +109,13 @@ export type Permission =
   // CORE's own capabilities, not product features — a plan's `feature_key` is
   // opaque data and never becomes a permission (ADR 0018).
   | "subscription.read"
-  | "subscription.write";
+  | "subscription.write"
+  // Reading a subject's standing and the signals behind it (ADR 0015). One
+  // permission, not two: there is no route that writes a signal, because
+  // signals arrive as events from the systems that observed them, so a
+  // `reputation.write` permission would guard nothing and would advertise a
+  // capability CORE does not have.
+  | "reputation.read";
 
 /**
  * Role → permission mapping is data, not branching logic scattered in handlers
@@ -130,6 +136,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "events.revive",
     "subscription.read",
     "subscription.write",
+    "reputation.read",
   ],
   org_admin: [
     "identity.read",
@@ -138,7 +145,11 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "fulfillment.request",
     "fulfillment.read",
     "subscription.read",
+    "reputation.read",
   ],
+  // Deliberately not granted to `org_member`: a standing is about a person or a
+  // company, and reading everyone's is an administrative act, not an ordinary
+  // member's.
   org_member: ["organization.read", "fulfillment.read"],
   // A support agent has to be able to see why a subscription was refused —
   // that is the whole reason an entitlement decision carries a reason rather
@@ -149,6 +160,10 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "fulfillment.read",
     "support.act",
     "subscription.read",
+    // A support agent handling a complaint has to be able to see what a
+    // standing is made of; that is the whole reason the signals are listable
+    // rather than only summarised.
+    "reputation.read",
   ],
   // A service caller exists to feed CORE events; submitting them is the point.
   service: ["fulfillment.request", "fulfillment.read", "identity.read", "events.submit"],
