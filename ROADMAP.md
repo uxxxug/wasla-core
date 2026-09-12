@@ -81,29 +81,11 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved scope — the database half of the suite must run in CI (measurement
-honesty), branch `ci-database-gate`.** This repository has no reservation
-mechanism other than this section, so the reservation is this entry, committed
-and pushed before any implementation file was touched. Nobody else may open
-`.github/workflows/ci.yml`, the `test` scripts in `package.json`, or
-`tests/migration-0011-lifecycle.test.ts` while it stands.
-
-Chosen because it is the largest remaining gap between what this repository
-verifies and what it *claims* to verify, and it depends on nobody: CI sets no
-`DATABASE_URL`, so every Postgres adapter, every trigger, every check
-constraint and every live-schema assertion is **skipped in the only place that
-gates a merge**. The gap is measured, not estimated — 385 tests pass in the run
-CI performs and 687 pass with a database, so roughly 300 assertions have never
-once been enforced automatically. Every cycle that wrote "verified locally" was
-resting on a developer's own machine.
-
-Prerequisite inside the same scope: `tests/migration-0011-lifecycle.test.ts`
-times out in teardown under full-suite contention and passes in isolation. It
-has been carried as a known flake for several cycles, which was tolerable while
-no gate depended on it. Turning the database on in CI without fixing it would
-buy automatic enforcement at the price of a gate that fails at random — and a
-gate that cries wolf is disabled by the first person in a hurry, which is worse
-than no gate.
+Nothing is reserved. The CI database-gate scope reserved earlier in this cycle is
+closed: CI now runs the suite against a real PostgreSQL server, each Vitest
+worker owns its own database, and the migration-lifecycle files run in their own
+pass. The flake this repository carried for several cycles is explained and gone,
+and a second, worse defect was found while measuring it — see the cycle entry.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -132,6 +114,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
 | 8 | Security hardening pass and observability export | **Observability export and ingress rate limiting complete; the hardening pass itself is bounded by B-5** | Deny-by-default RLS on every table (including the new `rate_limit_counter`), hardened `search_path`, token hashing, audit scrubbing, correlation ids — unchanged. Added in the 2026-09-12 (fifth) cycle: `src/platform/observability/` (a **declared** metric catalogue that refuses an undeclared name, a missing label, an extra label or an identifier-shaped label value; a deterministic Prometheus 0.0.4 renderer; per-worker counters and histograms; a `DepthSampler` on the operator's cadence, never on the scrape, with `core_sample_timestamp_seconds` and `core_sample_failures_total` so staleness is visible) and `src/platform/http/rate-limit.ts` + `pg-rate-limit.ts` + migration 0013 (fixed window, per hashed credential and route class, one atomic `insert … on conflict … do update … returning`, 429 with `retry-after`, workers unreachable from the limiter by construction). Scope decisions recorded in `docs/observability.md`: **system-level metrics only, never tenant-scoped**, and per-credential rather than per-organization keying because resolving a token to a tenant would put a database read in front of the limiter. 48 new tests × both backends where applicable, including a real-Postgres concurrency test falsified against a deliberately racy store. Still open: no tracing/span export (nothing consumes it; `correlation_id` already threads the audit trail), `/metrics` is unauthenticated and therefore depends on network placement (B-5), and lease expiry was not countable for three of the four workers (**B-24**, resolved in the 2026-09-12 worker-lease cycle by migration 0014) |
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
+| 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) arrive with the open reputation PR; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 
 ### What was claimed complete and actually is
 
@@ -3732,3 +3715,109 @@ remains blocked on B-5/B-6. Operators deploying this should know that reports lo
 before it can be recovered: revive the `inbound_event` rows whose `last_error`
 carries `fulfillment was cancelled` (B-27, `npm run revive`) and the new path records
 them properly. No MOVE or MARKET code was read or written in this cycle.
+
+## Cycle 2026-09-13 (fifteenth) — the gate was not measuring the thing it gated
+
+Scope: make CI run the half of the suite it had never run. No feature was added
+and no capability changed; what changed is whether this repository's claims are
+enforced by anything other than the person making them.
+
+### The gap, measured before anything was touched
+
+`npm test` with `DATABASE_URL` set passes 657 assertions. The CI workflow set no
+`DATABASE_URL`, so it passed 368 and skipped the rest — every Postgres adapter,
+every append-only trigger, every check constraint, every live-schema assertion
+and the Postgres half of every dual-backend suite. Roughly **290 assertions had
+never once been enforced automatically**, including the two constraints corrected
+in the previous cycle, whose entire point was that only the database can refuse a
+hand-written `UPDATE`.
+
+Every cycle in this document that says "verified locally against Postgres" was
+therefore resting on a developer's own machine and a developer's own discipline.
+That is not a small qualifier: this repository's own rule is that local green is
+not a CI verdict, and the rule was being satisfied by a CI verdict that could not
+see the tests in question.
+
+### Two defects found while fixing it, both worse than the gap
+
+**1. The suite's verdict depended on scheduling.** Every database-backed file
+resets state with `truncate <every table> restart identity cascade` in
+`beforeEach`. That is correct within one file and wrong across several, because
+Vitest runs files in parallel worker processes that all read one `DATABASE_URL`.
+Reproduced, not theorised: while timing something else,
+`financial decision boundary on 'postgres' > keeps the pending-decision queue
+separate from the defect queue` failed with `insert or update on table
+"fulfillment" violates foreign key constraint "fulfillment_organization_id_fkey"`
+— nothing was wrong with that test, and the file scheduled beside it had
+truncated the organization out from under it. Which files land beside each other
+depends on worker count, machine speed and file order, so the suite has been
+capable of failing, and of passing, for reasons unrelated to the code. Turning
+this on in CI unchanged would have produced random red and taught everybody to
+re-run the job.
+
+Fixed by isolation rather than coordination. A lock around the truncation would
+serialise the whole suite through one critical section and still leave every file
+able to see every other file's rows. `tests/support/worker-database.ts` gives each
+worker its own database, created and migrated on first use, and rewrites
+`DATABASE_URL` before any test module is imported — so the twenty-odd files that
+read it at module scope need no change and cannot opt out. Within a worker Vitest
+runs files one at a time, so a truncation there interrupts nobody.
+
+Unplanned consequence, worth recording because it points at how much contention
+there was: the suite went from **~130s to ~35s**. Those files had been fighting
+each other for the same rows, not just corrupting each other.
+
+**2. The "known flake" was contention, and it was measurable all along.**
+`tests/migration-0011-lifecycle.test.ts` has been carried for several cycles as a
+file that times out in teardown under full-suite load and passes in isolation.
+Nobody had timed it. One `create database` + `drop database` pair on this machine:
+**0.3s** on an idle server, **51s** while the rest of the suite worked the same
+server — against a 60s hook timeout. A scratch database isolates the schema;
+those two statements are cluster-wide and isolate nothing.
+
+Fixed in three parts, and the timeout is the least of them. `npm test` now runs
+the lifecycle files in their own pass (`test:suite` then `test:cluster`), so
+nothing competes with them — the cause, removed. The scratch database is created
+from `template0`, which no session ever connects to, so the create cannot wait on
+an unrelated connection to `template1`. The drop is `with (force)`, so one
+not-yet-closed connection from the file's own migration subprocesses cannot fail
+the teardown and leave a database behind. And the per-hook 60s numbers are gone in
+favour of `vitest.config.ts`, so the timeout for a cluster-wide operation is
+decided in one place. Raising a timeout alone would have kept the contention and
+hidden it better.
+
+### What CI does now
+
+Two jobs, and the split is deliberate:
+
+| Job | What it proves |
+|---|---|
+| `Verify without a database` | A fresh clone can run `npm test`. This is the only thing that keeps the in-memory backend genuinely self-sufficient, so it was kept rather than folded into the other job |
+| `Verify against PostgreSQL` | `postgres:16` service; applies every migration, prints status, runs the whole suite with `DATABASE_URL` set, then **rolls the newest migration back and re-applies it** against a real schema |
+
+That last step closes a smaller version of the same gap:
+`scripts/check-migrations.mjs` only ever proved that a `.down.sql` file exists. A
+rollback nobody has executed is a plan, not a rollback, and this repository asks
+operators to rely on them.
+
+`postgres:16` is pinned rather than `latest`, so a server upgrade is a commit
+somebody reviews instead of the day the gate quietly changed meaning.
+
+### Verification
+
+- `npm test` with `DATABASE_URL`: **657 pass** (37 files + 1 cluster file), run
+  three times consecutively with no failure and no flake.
+- `npm test` without it: **368 pass, 47 skipped**, plus the cluster file skipped.
+- Typecheck, governance, contracts (22 schemas, 15 emitted types) and migrations
+  (17 forward, all with rollbacks) pass.
+- The contention measurement is reproducible: run the suite and time a
+  `create database` + `drop database` pair against the same server.
+
+### What this does not claim
+
+CI now runs the database half against `postgres:16`. It does not run it against
+the managed 17.6 instance, and no deployed database is touched by any of this —
+the migrations CI applies are applied to a throwaway container. A green database
+job means the schema and the adapters agree with the tests on a supported major
+version; it is not a deployment rehearsal, which is still Milestone 9 and still
+blocked on B-5/B-6.

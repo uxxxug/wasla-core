@@ -41,10 +41,17 @@ package, no cross-database access.
 | Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
 | Reputation | **not implemented** |
 
-**326 tests** pass in the dependency-free default run, and the same gates run in
-CI on the working remote. With `DATABASE_URL` set that becomes **572**, because
-the database-backed files stop being skipped and the dual-backend suites run
-their Postgres half.
+**368 tests** pass in the dependency-free default run and **657** with
+`DATABASE_URL` set, because the database-backed files stop being skipped and the
+dual-backend suites run their Postgres half.
+
+**Both numbers are now produced by CI, on every push.** They were not until the
+CI database cycle: the workflow set no `DATABASE_URL`, so roughly 290 assertions
+— every Postgres adapter, every trigger, every check constraint, every
+live-schema check — were skipped in the only place that gates a merge, and each
+cycle's "verified against Postgres" meant verified on somebody's laptop. There
+are two jobs, and the dependency-free one is kept rather than folded in: it is
+the only thing that proves a fresh clone can run `npm test` at all.
 
 Per-area test counts used to be listed in the table above and were wrong within
 two cycles of being written, so they are no longer kept there — the suite is the
@@ -66,8 +73,10 @@ Two test files are worth knowing about:
   real database — so foreign keys, check constraints and the deferred ledger
   balance trigger all get a chance to refuse what a `Map` would have accepted.
 
-All **13** migrations are applied and verified on real instances (managed 17.6 and
-local 18.4) with the full rollback chain exercised.
+All **17** migrations are applied on every CI run against PostgreSQL 16, and the
+newest one is rolled back and re-applied there — `scripts/check-migrations.mjs`
+only proves a `.down.sql` exists, and a rollback nobody has executed is a plan.
+They have also been exercised on managed 17.6 and local 18.6.
 
 ### Working against a database
 
@@ -75,8 +84,27 @@ local 18.4) with the full rollback chain exercised.
 export DATABASE_URL=postgres://user:pass@host:5432/db   # never committed
 npm run db:status
 npm run db:up
-npx vitest run              # every skipped file now runs
+npm test                    # every skipped file now runs
 ```
+
+`npm test` is two passes, and the split is a fix rather than a preference:
+
+- `npm run test:suite` — everything except the migration lifecycle files.
+- `npm run test:cluster` — those files alone, because they `create database` and
+  `drop database`, which are cluster-wide operations. Measured on one machine:
+  0.3s idle, **51s** while the rest of the suite was working the same server,
+  against a 60s hook timeout. That was the "known flake" this repository carried
+  for several cycles.
+
+Each Vitest worker also gets **its own database**, created and migrated on first
+use (`tests/support/worker-database.ts`), named after yours with a `_w<n>`
+suffix. Every database-backed file truncates the whole schema in `beforeEach`,
+which is correct inside one file and a defect across parallel files: one file
+truncated the organization another was mid-test on, and the second failed on a
+foreign key its own code never violated. The suite's verdict depended on
+scheduling. Isolation removes the shared mutable state instead of coordinating
+access to it — and the suite got about three times faster, because those files
+had also been contending for the same rows.
 
 `pg` is a devDependency and stays one: `src/` imports only its *types*. The
 composition root receives a pool from the caller, so the application has no

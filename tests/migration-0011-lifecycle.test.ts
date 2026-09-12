@@ -16,6 +16,22 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  * Everything runs in a throwaway database created and dropped by this suite. It
  * applies and rolls back real DDL, so sharing the development database with the
  * rest of the suite would make the two interfere.
+ *
+ * That isolation was documented here and not enforced anywhere, and it cost this
+ * file several cycles as a "known flake": it timed out in teardown under
+ * full-suite load and passed in isolation. The cause was measured rather than
+ * guessed. A scratch database isolates the *schema*; `create database` and
+ * `drop database` are cluster-wide operations that do not. Timing one
+ * create-and-drop pair on this machine: **0.3s** on an idle server and **51s**
+ * while the rest of the suite was working the same server, against a 60s hook
+ * timeout. So the flake was contention, and the file was right about needing
+ * isolation and wrong to expect a comment to provide it.
+ *
+ * Two things changed, and both were needed. `npm test` now runs the lifecycle
+ * files in their own pass, so nothing competes with these two statements — the
+ * cause is removed rather than tolerated. And the hook timeouts here no longer
+ * carry their own number: they inherit `vitest.config.ts`, so the timeout for a
+ * cluster-wide operation is decided in one place instead of drifting per file.
  */
 
 const url = process.env.DATABASE_URL;
@@ -99,12 +115,21 @@ describe.skipIf(!url)("migration 0011 lifecycle", () => {
     adminUrl = url!;
     parsed.pathname = `/${scratch}`;
     scratchUrl = parsed.toString();
-    await admin(`create database ${scratch}`);
-  }, 60_000);
+    // `template0` rather than the default `template1`: creating from a template
+    // requires that nobody else is connected to it, and template1 is what every
+    // other `create database` on the server also copies. template0 is never
+    // connected to by anything, so this cannot wait on an unrelated session.
+    await admin(`create database ${scratch} template template0`);
+  });
 
   afterAll(async () => {
-    if (scratch) await admin(`drop database if exists ${scratch}`);
-  }, 60_000);
+    // `with (force)` terminates whatever is still attached instead of refusing.
+    // Without it, one connection this file's own migration subprocesses had not
+    // finished closing is enough to fail the drop and leave a database behind on
+    // every run — and the failure would be reported as a teardown error about
+    // something that is not the property under test.
+    if (scratch) await admin(`drop database if exists ${scratch} with (force)`);
+  });
 
   it("applies cleanly to an empty database, then over existing data, and rolls back and forward again", async () => {
     // 1. apply clean
