@@ -60,6 +60,19 @@ export class InProcessReplayLock implements ReplayLock {
 const REPLAY_LOCK_KEY = 8_147_321;
 
 /**
+ * A second key, so a queue revival (B-27) and a replay do not exclude each other.
+ *
+ * They touch different tables and cause different effects: a replay publishes
+ * inbound events to consumers, a revival returns dead `outbox` and
+ * `event_delivery` rows to `pending` for the workers to pick up. Sharing one key
+ * would mean an operator reviving a dead delivery is refused because somebody is
+ * replaying yesterday's inbound events, which is exclusion bought for nothing.
+ * Two revivals still exclude each other, for the reason above the replay key:
+ * interleaved runs produce a journal nobody can read.
+ */
+export const REVIVAL_LOCK_KEY = 8_147_322;
+
+/**
  * Cluster-wide lock via `pg_try_advisory_lock`.
  *
  * Session-scoped, so it is taken on a dedicated client held for the whole run

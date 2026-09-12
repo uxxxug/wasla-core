@@ -33,7 +33,12 @@ import { PgSubscriptionRepository } from "../../modules/subscription/pg-reposito
 import type { OrganizationRepository } from "../../modules/organization/service.js";
 import { PgOrganizationRepository } from "../../modules/organization/pg-repository.js";
 import type { Queryable } from "./postgres.js";
-import { InProcessReplayLock, PgAdvisoryReplayLock, type ReplayLock } from "../replay/lock.js";
+import {
+  InProcessReplayLock,
+  PgAdvisoryReplayLock,
+  REVIVAL_LOCK_KEY,
+  type ReplayLock,
+} from "../replay/lock.js";
 import { PgTransactionBoundary } from "./postgres.js";
 import { InMemoryTransactionBoundary, type TransactionBoundary } from "./transaction.js";
 
@@ -63,6 +68,13 @@ export interface Persistence {
    * and only the database can arbitrate between them.
    */
   replayLock: ReplayLock;
+  /**
+   * Mutual exclusion for queue revival runs (B-27). Its own lock rather than the
+   * replay one: the two operations touch different tables, so making an operator
+   * reviving a dead delivery wait for somebody replaying inbound events would be
+   * exclusion that protects nothing.
+   */
+  revivalLock: ReplayLock;
   /**
    * Ingress rate-limit windows. Part of the bundle so that choosing Postgres and
    * choosing the shared, cross-instance limiter is one decision rather than two:
@@ -96,6 +108,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     notification: new InMemoryNotificationStore(),
     boundary: new InMemoryTransactionBoundary(),
     replayLock: new InProcessReplayLock(),
+    revivalLock: new InProcessReplayLock(),
     rateLimit: new InMemoryRateLimitWindowStore(),
     identity: new InMemoryIdentityRepository(),
     organization: new InMemoryOrganizationRepository(),
@@ -125,6 +138,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     notification: new PgNotificationStore(pool),
     boundary: new PgTransactionBoundary(pool as never),
     replayLock: new PgAdvisoryReplayLock(pool),
+    revivalLock: new PgAdvisoryReplayLock(pool, REVIVAL_LOCK_KEY),
     rateLimit: new PgRateLimitWindowStore(pool),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),

@@ -96,6 +96,13 @@ export type Permission =
   // caller, so reusing it would have handed MARKET and MOVE the ability to
   // replay CORE's history. It is granted to `platform_admin` alone.
   | "events.replay"
+  // Reviving a dead `outbox` or `event_delivery` row (B-27). Its own permission
+  // rather than a reuse of `events.replay`, because the two reach different
+  // systems: a replay re-drives CORE's own consumers, while a revival causes a
+  // signed POST to leave the building for a partner's webhook. Also
+  // `platform_admin` only, so neither MARKET nor MOVE can decide on CORE's behalf
+  // that a dead-lettered event should be sent after all.
+  | "events.revive"
   // Plans and their prices are operator territory; reading a subscription is
   // not. Split into two so a tenant can see what it is paying for without
   // also being able to publish a plan or collect a charge. The names are
@@ -120,6 +127,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "support.act",
     "events.submit",
     "events.replay",
+    "events.revive",
     "subscription.read",
     "subscription.write",
   ],

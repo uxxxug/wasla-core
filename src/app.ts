@@ -6,6 +6,7 @@ import { memoryPersistence, type Persistence } from "./platform/persistence/back
 import { type TransactionBoundary } from "./platform/persistence/transaction.js";
 import { OutboxPublisher } from "./platform/eventing/publisher.js";
 import { EventIngress } from "./platform/eventing/ingress.js";
+import { QueueRevivalService } from "./platform/replay/revive.js";
 import { ReplayService } from "./platform/replay/service.js";
 import { registerIngressRoutes } from "./platform/eventing/ingress-http.js";
 import { InboundDispatcher } from "./platform/eventing/dispatcher.js";
@@ -67,6 +68,15 @@ export interface CoreApp {
    * there is only one.
    */
   replay: ReplayService;
+  /**
+   * Revival of dead `outbox` and `event_delivery` rows (B-27). On the bundle for
+   * the same reason as `replay`: it must be the same stores, with the same
+   * workers reading them, that an operator drives and a test asserts on. It
+   * publishes nothing itself — it returns rows to `pending` and the existing
+   * relay and delivery worker do the rest, which is why it is not a second
+   * delivery path.
+   */
+  revival: QueueRevivalService;
   subscriptions: SubscriptionRegistry;
   deliveries: DeliveryWorker;
   /**
@@ -209,6 +219,13 @@ export function createCoreApp(
     clock,
     store.replayLock,
   );
+  const revival = new QueueRevivalService(
+    store.outbox,
+    store.delivery,
+    audit,
+    clock,
+    store.revivalLock,
+  );
   const dispatcher = new InboundDispatcher(
     store.inbound,
     bus,
@@ -330,6 +347,7 @@ export function createCoreApp(
     ingress,
     dispatcher,
     replay,
+    revival,
     subscriptions,
     deliveries,
     notificationRecipients,
