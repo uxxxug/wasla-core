@@ -60,6 +60,27 @@ export function registerFulfillmentRoutes(
     };
   });
 
+  // Reconciliation read: open work whose hold can no longer settle it. The
+  // contradiction lives across two modules, so no read of the fulfillment table
+  // alone can find it. Reporting only — what happens to work whose funding is
+  // gone is a decision CORE has not been given.
+  router.get("/v1/fulfillments/reconciliation/stale-holds", async (ctx) => {
+    const organizationId = ctx.query.get("organization_id") ?? "";
+    if (!organizationId) throw invalid("organization_id is required");
+    await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
+    const items = await fulfillment.listStaleHolds(organizationId);
+    return {
+      status: 200,
+      body: {
+        count: items.length,
+        items: items.map((item) => ({
+          ...item,
+          fulfillment: withDisposition(fulfillment, item.fulfillment),
+        })),
+      },
+    };
+  });
+
   router.get("/v1/fulfillments/:fulfillment_id", async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);

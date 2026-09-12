@@ -248,6 +248,25 @@ interface SettlementOutcome {
 }
 
 /**
+ * An open fulfillment whose money hold can no longer settle it.
+ *
+ * A projection assembled at read time from two modules. It is deliberately not a
+ * fulfillment status: the execution is genuinely still open, and inventing a
+ * status for "open but unfunded" would put a second, staler copy of the money
+ * state inside the fulfillment row — the same mistake `financial_disposition`
+ * avoids by being derived.
+ */
+export interface StaleHold {
+  fulfillment: Fulfillment;
+  /** Why the hold cannot settle this work, in the vocabulary intake already uses. */
+  reason: string;
+  /** How much of it has already moved, or null when CORE could not read it. */
+  hold_captured_minor: number | null;
+  /** The settlement state this fulfillment would take if it closed right now. */
+  settlement_state_if_closed: SettlementState;
+}
+
+/**
  * Thrown by a staged transition whose conditional write found the row already
  * moved, to abort the transaction it is part of.
  *
@@ -732,6 +751,53 @@ export class FulfillmentService {
     return (await this.repo.all())
       .filter((item) => !organizationId || item.organization_id === organizationId)
       .filter((item) => requiresFinancialDecision(item));
+  }
+
+  /**
+   * Reconciliation read: open work whose hold can no longer settle it.
+   *
+   * This is the one contradiction neither read above can see, because it does
+   * not live in the fulfillment row. The row says `dispatched` / `held` and is
+   * internally consistent; the hold it names has meanwhile expired, been voided
+   * or been captured out of band. Only comparing the two modules reveals it, and
+   * nothing had gone wrong at the moment the row was written — which is why it is
+   * a liveness problem, not a false record.
+   *
+   * No state is added to detect it: the condition is computed from the money
+   * module's current answer through the same `inspectHold` that guards intake, so
+   * the read cannot drift from the rule the write path uses. Nothing is mutated,
+   * on purpose — what should happen to work whose funding is gone is a decision
+   * (re-authorise, abandon, charge nothing), and CORE has not been given it.
+   *
+   * It reads one authorization per open funded fulfillment. That is acceptable
+   * for a reconciliation sweep and would not be for a hot path; if the volume of
+   * open work makes it expensive, the fix is a set-based query, not a stored
+   * duplicate of the money state.
+   */
+  async listStaleHolds(organizationId?: string): Promise<readonly StaleHold[]> {
+    const open = (await this.repo.all()).filter(
+      (item) =>
+        !isClosed(item.status) &&
+        item.payment_authorization_id !== null &&
+        (!organizationId || item.organization_id === organizationId),
+    );
+    const stale: StaleHold[] = [];
+    for (const item of open) {
+      const hold = await this.inspectHold(item.payment_authorization_id);
+      // `usable` is exactly the predicate intake applies: a hold that could not
+      // guard a new execution cannot guard this one either.
+      if (hold.usable) continue;
+      stale.push({
+        fulfillment: item,
+        reason: hold.reason ?? "payment_hold_unusable",
+        hold_captured_minor: hold.captured_minor,
+        // What the settlement state WOULD become if this fulfillment closed now.
+        // Reported so an operator can see which of these cases will need a B-20
+        // decision the moment they are closed, without CORE closing anything.
+        settlement_state_if_closed: hold.settlement,
+      });
+    }
+    return stale;
   }
 
   /** What CORE can say about the money behind one fulfillment. Derived, never stored. */
