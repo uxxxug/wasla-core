@@ -1,9 +1,8 @@
 # WASLA CORE — Roadmap
 
-**Last updated:** 2026-09-11
-**Last milestone:** Every port has a Postgres adapter and the whole coordination flow — MARKET → CORE → MOVE → CORE → MARKET, including the money capture — now runs against a real database. 155 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `vitest run` green; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
-
+**Last updated:** 2026-09-12
+**Last milestone:** Milestone 4 — notifications to people. A CORE state change now reaches a person through the same outbox it already used to reach a system: transactional outbox → leased claim → channel adapter → accepted / retryable / permanent, with a stable idempotency key, restart recovery and fencing. Building it exposed **B-22**: three of the four background workers claimed work by *reading* (`select … for update skip locked` as a single autocommit statement), so two workers received the same rows — measured at 100% overlap on a real database. All six claim implementations now claim by writing a lease. 440 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 440 passed / 29 files; `npm test` without a database 246 passed / 39 skipped; governance, contract, migration and roadmap gates passing. Measured on the actual working tree, not assumed from the previous cycle.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -67,6 +66,12 @@ orders, marketplace search, store pricing, or any product-specific UI.
       the published contract.
 - [x] Migration 0003 with its rollback for geography reference tables and the
       authorization lifecycle columns.
+- [x] Notifications to people: recipient registry bound to verified identity
+      links, five event templates rendered against a published payload
+      contract, a four-outcome channel port, a leased and fenced dispatcher,
+      and an operator read surface. Fake adapters only, by choice.
+- [x] Every background worker claims work by writing a lease (B-22), so two
+      workers polling together cannot receive the same row.
 
 ## In progress
 
@@ -91,7 +96,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
 | 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete on both the money and the fulfillment side; multi-hold blocked — external dependency** | Migration 0011 finishes what 0009 started: `fulfillment.settlement_state` gained `partially_captured`, so a hold that moved part of the payer's money is no longer recorded as `released` — a value documented to mean no money moved. `FulfillmentPaymentPort.voidWithin` publishes `{ status, captured_minor }` instead of `unknown`, `release()` derives the state from it, `inspectHold()` has a `partially_captured` case, and the reconciliation read now surfaces money moved against work that did not complete (B-20). 18 tests × 2 backends. Earlier: migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. The 2026-09-12 (second) cycle then made the consequence explicit rather than implicit: a derived `financial_disposition`, `financial_decision_required` + `captured_minor` on both closure events, a separate pending-decision reconciliation read, the full terminal-path table in `docs/settlement.md`, and 14 + 1 tests. Multi-hold needs a MARKET contract decision — see "External dependencies" |
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Complete, except policy decisions that are not CORE's to make** | Migration 0010 adds `plan`, `plan_grant`, `subscription`, `subscription_period`, `usage_record` with RLS, an `EXCLUDE USING gist` constraint against overlapping periods, immutability triggers on an active plan's terms and grants, append-only triggers on usage, and a deferred constraint trigger reconciling a settled period against the hold that settled it. Module: `domain.ts` (entitlement derived, never stored), `repository.ts` + `pg-repository.ts`, `service.ts`, `http.ts`. Ten routes, `subscription.read` / `subscription.write` permissions, six event contracts. 23 tests × 2 backends. **No entitlement-check endpoint** — ADR 0008 requires a new ADR first (B-14). Proration, grace, trials, rollover and comped access are recorded as B-15…B-19 |
-| 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
+| 4 | Channels and notifications; Telegram adapter | **Complete inside CORE, with a fake adapter rather than a live provider** | Migration 0012 adds `notification_recipient` and `notification` with RLS. Module: `domain.ts` (five templates, money wording derived from `settlement_state`), `ports.ts` (a four-outcome `ChannelResult`, never `void` or a boolean), `repository.ts` + `pg-repository.ts` (lease claim + `claim_token` fencing), `service.ts` (`NotificationFanOut` inside the relay transaction, `NotificationDispatcher` with backoff and fencing), `identity-directory.ts` (verified links only), `http.ts` (four routes). Published payload contract `contracts/notifications/notification-message.v1.schema.json`. 23 tests × 2 backends plus 5 claim-atomicity tests × 2 backends; `docs/notifications.md` states the guarantee. **No live provider is wired** — deliberately: the contract is adapter-shaped so a real Telegram/SMTP/SMS client is a new file and no domain change. `delivered` is unreachable until a provider confirmation callback exists (D-8) |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
 | 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
 | 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
@@ -149,7 +154,9 @@ Nothing.
 | B-18 | Quota rollover versus reset undecided | Quota resets each period, because usage is counted per period. Unused allowance does not carry forward | An owner decision on whether unused allowance accumulates |
 | B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
 | B-20 | What is owed when work fails after part of the hold was already captured | CORE records the truth and stops. A `failed`/`cancelled` fulfillment holding `settlement_state = 'partially_captured'` derives `financial_disposition = 'decision_required'`, both closure events carry `financial_decision_required: true` with the observed `captured_minor`, and `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly these cases apart from CORE defects. CORE does **not** refund, retain, split, or mark the operation settled. `MoneyService.refund` is exactly-once, so whichever answer is chosen is executable the day it exists | Five separate owner decisions, listed under "B-20 as a contract gap" in the 2026-09-12 (second) cycle: who states the executed amount, who decides whether partial work earns partial settlement, who authorises a refund, whether a cancellation fee exists, and which system sends the final disposition |
-| B-21 | A closure delivered twice concurrently publishes the closure event twice | Money is single-valued: the capture is keyed in the ledger and a void of an already-closed hold returns unchanged, so no double capture and no double release — measured, not assumed. Event emission has no such key, and two genuinely overlapping `cancel` or completion calls both commit, so MARKET can receive the same closure twice under two `event_id`s. Every copy is identical and true, so this is a delivery defect, not a money defect. Pinned as it behaves in `tests/fulfillment-financial-decision.test.ts` | None — **this is CORE's own next milestone**, not an external dependency. Making the closure update conditional on the row still being open turns the losing transaction into a rollback, which drops its outbox row with it |
+| B-21 | **Resolved.** Two overlapping closures both committed, because the closing `update` named the row and not its version, so the loser overwrote the winner's terminal row and published a second closure event. `updateIfStatusIn` / `insertIfAbsent` return `applied` \| `stale` and the service treats `stale` as "somebody else closed it", so one closure produces one closure event. Money was never wrong; only the events were multi-valued | resolved | — |
+| B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
+| B-23 | Closure event payloads carry no `organization_id`, so a tenant-scoped recipient for them is unmatchable | Of the notifiable events only `core.subscription.*` (owner_type/owner_id) and `core.fulfillment.created` carry a tenant. `core.fulfillment.dispatched`, `.completed` and `.cancelled` do not, so a recipient registered for one *scoped to an organization* could never match and would silently notify nobody. Rather than change a published event contract inside a notification milestone, `NotificationRecipientRegistry.register` **refuses** a non-null `organization_id` for those types (HTTP 400) — a loud refusal instead of a quiet silence. Consequence: closure notifications can only be registered platform-wide today | Widening the three closure payloads with `organization_id`, which is a versioned contract change MOVE and MARKET consume, so it belongs in a contract cycle and not in this one |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -1872,3 +1879,266 @@ it was never worth building on top of a closure that could be published twice.
 
 Not chosen: B-14…B-19 and B-20 need answers CORE does not own, and inventing one
 to make progress would be the one thing this repository is not allowed to do.
+
+## Cycle 2026-09-12 (fourth) — Milestone 4, notifications to people (CORE-only agent)
+
+### What Milestone 4 actually meant, read from the code
+
+The roadmap line said "channels and notifications; Telegram adapter" and the
+evidence column said "Telegram exists only as an identity channel type. No
+delivery path". Checking that against the code rather than the sentence:
+
+- Events already reach **systems**: `event_subscription` + `event_delivery`
+  (migration 0008), signed bodies, failure classification, a dead-letter state.
+- `identity_link.channel_type` already included `telegram`, but as an **inbound**
+  identity only (ADR 0016) — a way to recognise who is talking to CORE. Nothing
+  turned an event into something a person reads, and no message contract existed.
+
+So the milestone is the missing person-facing half of an existing mechanism, not a
+new mechanism. It was built on the same outbox, the same claim discipline and the
+same clock, and no general notification framework was introduced: five templates,
+one dispatcher, three channel types, four routes.
+
+### The path, and the two properties that fall out of it
+
+```
+domain state change + outbox append ── one transaction ──→ commit
+        │
+        ▼ relay claims the outbox row
+   fan-out inside the relay's markPublished transaction
+        ├─→ event_delivery  (systems, pre-existing)
+        └─→ notification    (people, this milestone)
+                │
+                ▼ dispatcher claims with a lease + a fencing token
+          channel adapter → accepted │ delivered │ retryable │ permanent
+```
+
+- **No notification without committed state.** The notification row is derived
+  from the outbox row, which commits with the state change. A rolled back
+  transaction leaves neither; tested by rolling back a dispatch and draining.
+- **No notification lost after committed state.** The fan-out runs inside the
+  transaction that marks the event published, so there is no window in which an
+  event is published and its notification rows do not exist.
+
+Nothing external is called inside a domain transaction, so no provider can roll
+back CORE state. The outbox stays the commit point.
+
+### The channel contract, and why it is not a boolean
+
+`ChannelResult` is a four-way union — `accepted`, `delivered`, `retryable(reason,
+retry_after_ms?)`, `permanent(reason)` — each carrying an optional
+`provider_message_id`. A boolean or `void` would erase the only distinctions that
+matter operationally: whether to try again, whether to stop forever, and whether
+anyone can be asked about the message later.
+
+`accepted` (a provider took it) and `delivered` (a provider confirmed receipt) are
+kept apart even though **no adapter can produce `delivered` today**. Every real
+transport confirms acceptance synchronously and receipt, if at all, out of band.
+Collapsing them would be a claim CORE cannot support; leaving `delivered`
+modelled-but-unreachable costs one enum value and records the gap as **D-8**.
+
+A thrown adapter error and a missing adapter for a channel are both treated as
+`retryable`, not `permanent`: a deployment without that adapter is a configuration
+fact somebody may fix, and burning the message would turn an operational gap into
+lost information.
+
+### Idempotency, in three places rather than one
+
+1. **Fan-out** — `idempotency_key = ${event_id}:${recipient_id}` is unique in the
+   database, so a duplicated outbox delivery of the same event inserts nothing the
+   second time.
+2. **Claim** — one statement sets `processing`, increments `attempts`, moves
+   `next_attempt_at` out by the lease and stamps a fresh `claim_token`. A second
+   dispatcher polling at the same instant matches nothing.
+3. **Acknowledgement** — every mark is fenced on the token it was claimed with and
+   returns whether it applied, so a worker that stalled past its lease cannot
+   overwrite the attempt that replaced it. The dispatcher counts those as `fenced`.
+
+`attempts` is spent at claim time, not at acknowledgement, so a message that kills
+its worker every time cannot loop forever.
+
+The honest statement of the guarantee, which is what `docs/notifications.md` says
+and what the tests assert: **at most one attempt in flight** and **at least once**
+are CORE's to guarantee and are guaranteed; **exactly once end to end** is not,
+and is not claimed; **effectively once** holds with a provider that honours the
+idempotency key, which is why the key is stable across retries, restarts and
+races, and is passed to the adapter on every send.
+
+### Retry and failure semantics
+
+Six attempts, exponential backoff from 1s, provider-supplied `retry_after_ms`
+overriding the computed delay, `permanent` never retried, exhaustion terminal and
+visible at `GET /v1/notifications?status=failed`. `retrying` is **derived**
+(`pending` with `attempts > 0`) and never stored: one row cannot be both, and a
+stored copy of a derivable fact drifts.
+
+### What is sent, decided rather than assumed
+
+Five templates, mapped explicitly: `core.fulfillment.dispatched` → assigned;
+`core.fulfillment.completed` with `outcome: completed` → done; the same event with
+`outcome: failed` → could not be completed (there is no `core.fulfillment.failed`
+event — failure rides on the completion, which the roadmap did not say and the code
+does); `core.fulfillment.cancelled` → cancelled; `core.subscription.past_due` →
+unpaid period. Everything else emits nothing: `core.payment.*` is settlement
+mechanics rather than news, `core.identity.verified` is the recipient's own action,
+`core.fulfillment.created` has nothing to report yet.
+
+Bodies are rendered against a published contract, not serialised from a domain
+object, so no internal field becomes an external interface by accident.
+
+**Money wording is derived from `settlement_state` and says nothing otherwise:**
+`decision_required` → "a payment amount is held pending review; no refund or
+charge has been decided yet"; `released` → "no payment was taken"; `captured` /
+`partially_captured` → "the authorised payment was charged"; anything else →
+silence. A test asserts the absence of "has been refunded", "will be refunded",
+"settled", "reimburs" and "credited back" from the undecided case. This is D-6
+held open in the product vocabulary: `decision_required ≠ settled`, and no message
+may read as a refund or a final settlement before the decision exists.
+
+### Who may be told
+
+`notification_recipient` binds `(event_type, identity_id, channel)`, optionally
+scoped to an organization, operator-only. Registration refuses more than it
+accepts: only `telegram` / `email` / `phone` (channels a person can receive on),
+only against a **verified** `identity_link` (an unverified address is somebody's
+claim, and messaging it is how an account takeover becomes a notification), and
+only a tenant scope the event payload can actually carry (B-23).
+
+An unroutable recipient at fan-out time produces a row born `failed` with a null
+address rather than no row: the fact that somebody should have been told and could
+not be is exactly the fact worth keeping.
+
+### B-22 — the finding that had to be fixed first
+
+Recorded in full in the blockers table. In short: the "atomic claim semantics
+proven in PostgreSQL" that this milestone was meant to build on **did not exist**.
+Three claim implementations marked nothing, and two workers polling together
+received identical rows — measured at five out of five before the fix. The
+notification dispatcher could not have been correct on top of that, and neither
+were the outbox relay, the inbound dispatcher or the outbound delivery worker.
+
+`for update skip locked` was not wrong, it was incomplete: it needed the write.
+
+### Backend parity, and the one documented difference
+
+`InMemoryNotificationStore` writes the lease and the token synchronously so it
+fails the same tests as Postgres; a memory double more permissive than the
+database certifies a bug (B-12, twice learned). The single difference: the memory
+claim is synchronous, so two in-process dispatchers serialise rather than race,
+while on Postgres disjointness is enforced by `for update skip locked` plus the
+claiming write. Both are asserted, and the Postgres case is the one that proves
+the property.
+
+### Migration 0012
+
+`notification_recipient` and `notification`, both with RLS, forward and down
+scripts, applied and rolled back against a real database. Two authoring mistakes
+worth recording because the schema tests caught them and a reviewer would not:
+the tenant and identity columns had to be `uuid` to match the foreign keys from
+0001, and an explicitly named check constraint collided with the name PostgreSQL
+auto-assigns to an inline column check (`notification_address_check`), so it was
+renamed rather than the column check removed.
+
+### API and observability — four routes, no new concepts
+
+`POST` / `GET /v1/notification-recipients`, `POST
+/v1/notification-recipients/{id}/deactivate`, `GET /v1/notifications` with
+`organization_id`, `status` and `limit` plus a `summary` of counts including the
+derived `retrying`. There is deliberately no `/pending`, `/failed` or `/retrying`
+path: same question, different filter, and a path per status is how one concept
+acquires five sources of truth. Nothing folds into
+`/v1/event-deliveries/undelivered`, which answers whether a *system* received an
+event — this answers whether a *person* was told.
+
+Channel errors are recorded with `sanitiseChannelError`: bearer tokens, api keys,
+secrets, passwords and the recipient's own address are redacted and the reason is
+truncated, so a provider's error text cannot smuggle a credential or a phone
+number into `last_error`, the audit trail or the logs. Deactivating a recipient
+stops future notifications and leaves queued ones queued — they describe something
+that already happened.
+
+### Tests
+
+`tests/notifications.test.ts` — 23 × 2 backends: one event produces exactly one
+notification; a duplicated outbox delivery does not double it; two concurrent
+dispatchers never send the same row; retryable retries on the policy; permanent is
+never retried; attempts exhaust into a visible terminal failure; a worker killed
+between sending and acknowledging is recovered after its lease and repeats with
+the same key; an adapter that fails after the provider took the message repeats
+rather than loses it; a cooperating provider collapses the repeat; a stalled
+worker's late acknowledgement is fenced out; a rolled back transaction produces no
+notification; restart resumes from the database; an unverified channel cannot be
+registered; a tenant scope the event cannot carry is refused; a deactivated
+recipient stops receiving; the existing vertical slice is unaffected; provider
+errors leak neither secrets nor addresses; and the undecided financial case never
+reads as a refund.
+
+`tests/worker-claim-atomicity.test.ts` — 5 × 2 backends over the outbox, the
+inbound store, the outbound delivery store and the notification store: two
+claimants issued concurrently receive disjoint sets, a third poll inside the lease
+receives nothing, and an abandoned claim returns when the lease expires. Verified
+to fail against the pre-fix claim, not merely to pass against the fixed one.
+
+### Regression
+
+- `npx tsc --noEmit` clean; governance, contracts (21 event schemas + 1 published
+  message contract, 14 emitted event types covered) and migrations (12 forward,
+  all with rollbacks) green.
+- `DATABASE_URL=… npm test`: **440 passed / 29 files** (384 / 27 before this
+  cycle; +46 notifications, +10 claim atomicity, both counted across backends).
+- `npm test` without a database: 246 passed, 39 skipped.
+- One existing test was edited and only to remove an assumption, not an
+  assertion: `tests/migration-0011-lifecycle.test.ts` assumed 0011 was the newest
+  migration, so it now peels newer ones first.
+
+### External dependencies — two new, none solved
+
+D-1…D-5 stand exactly as recorded. **D-6 was not touched**, which is the point of
+the money wording above.
+
+- **D-7 — who the end customer is.** CORE holds an opaque `order_reference` from
+  MARKET, not a customer identity, so CORE cannot notify the person who placed an
+  order. Per-customer routing belongs to MARKET, either by MARKET notifying its
+  own customers from the events it already receives, or by a contract that passes
+  a CORE identity on the order. Until then recipients are operators and tenant
+  staff, which is what CORE actually knows.
+- **D-8 — delivery confirmation from a provider.** Without an inbound callback,
+  `accepted` is the strongest truth CORE has and `delivered` is unreachable. When
+  a provider offers a status webhook, the state and the `provider_message_id` to
+  correlate it are already there; nothing in the domain changes.
+
+### Roadmap triage after this cycle
+
+**Complete inside CORE:** everything from the previous cycle, plus notifications
+to people end to end with fake adapters, and a claim discipline that actually
+holds under concurrency across all four workers.
+
+**Blocked on a decision outside CORE:** B-20 (D-1…D-5); the stale-hold policy
+(D-6); per-customer notification routing (D-7); delivery confirmation (D-8);
+multi-hold per fulfillment (MARKET); the entitlement-check endpoint (B-14, needs
+an ADR); proration, grace, trials, rollover, overrides (B-15…B-19); contract
+adoption in MARKET and MOVE (B-2…B-6); staging and cutover.
+
+**Actionable inside CORE right now, needing no external answer:**
+
+1. **Milestone 8 — observability export and ingress rate limiting.** Metrics and
+   traces for the four workers, and a limit on the public ingress edge.
+2. **Milestone 6 — replay tooling.** `inbound_event` keeps the envelopes, so
+   replay is now possible and has no consumer-side blocker.
+3. A live channel adapter, whenever a provider credential exists. It is a new
+   file behind the existing port, and B-23's payload widening is the only thing
+   that would make it more than that.
+
+### Next task, and why it is this one
+
+**Milestone 8 — observability export and rate limiting on the ingress edge.** It
+is next because CORE now has four background workers with retry, backoff, leases
+and terminal states, and the only way to see any of them is to query a table. The
+notification cycle needed a measurement harness to find B-22 at all; exporting
+those numbers turns a one-off measurement into something continuously visible, and
+it needs no answer from MARKET, MOVE or a commercial owner.
+
+Not chosen: a real Telegram adapter (no credential, and the port makes it a later
+one-file change); B-23's payload widening (a versioned contract change that MOVE
+and MARKET consume, so it belongs in a contract cycle); D-6 and D-7, which are not
+CORE's to decide and were not started.
