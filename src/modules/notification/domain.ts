@@ -233,22 +233,29 @@ export function notifiableTemplate(
 /**
  * Event types whose payload actually names a tenant.
  *
- * Short, and short for a reason worth stating rather than hiding: of the events
- * a person can be notified about, only `core.subscription.*` carries its owner.
- * `core.fulfillment.dispatched`, `.completed` and `.cancelled` carry the
- * fulfillment, the order reference and the settlement facts — no organization.
- * Only `core.fulfillment.created` does.
+ * Every notifiable event now does. This list used to exclude the three
+ * fulfillment lifecycle events, and the exclusion was not a preference: their
+ * payloads carried the fulfillment, the order reference and the settlement
+ * facts and no organization, so a recipient scoped to one tenant could never
+ * match a dispatch or a closure. `NotificationRecipientRegistry` refused such a
+ * registration rather than accept it and quietly notify nobody — a loud refusal
+ * standing in for the missing field.
  *
- * The consequence is real: a recipient scoped to one tenant can never match a
- * fulfillment closure, because CORE cannot tell from the event which tenant it
- * belonged to. Rather than accept such a configuration and quietly notify
- * nobody, `NotificationRecipientRegistry` refuses it. Widening the closure
- * payloads to carry `organization_id` is the actual fix and is recorded as
- * blocker B-23; it is a contract change to four published event schemas and
- * does not belong inside a notification feature.
+ * The field now exists. `core.fulfillment.dispatched`, `.completed` and
+ * `.cancelled` state `organization_id`, published in their v1 schemas, so the
+ * refusal has nothing left to protect against and closure notifications can be
+ * scoped to a tenant like every other kind (blocker B-23, resolved).
+ *
+ * The list is still an explicit list rather than "assume every event has one".
+ * A future event type that omits the field would then be silently mis-scoped,
+ * which is exactly the failure this list was created to make impossible; being
+ * added here is a decision somebody makes once, per event type.
  */
 export const TENANT_SCOPED_EVENT_TYPES: readonly string[] = [
   "core.fulfillment.created",
+  "core.fulfillment.dispatched",
+  "core.fulfillment.completed",
+  "core.fulfillment.cancelled",
   "core.subscription.created",
   "core.subscription.renewed",
   "core.subscription.past_due",

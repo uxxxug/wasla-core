@@ -807,15 +807,22 @@ describe.each(backends)("notifications on $name", (backend) => {
       });
       expect(created.status).toBe(201);
 
-      // A tenant scope on an event that does not name its tenant is refused
-      // rather than stored as a recipient that matches nothing (B-23).
+      // A tenant scope on an event that does not name its tenant is still
+      // refused rather than stored as a recipient that matches nothing.
+      //
+      // The example used to be `core.fulfillment.dispatched`, which now carries
+      // `organization_id` and is therefore legitimately scopable (B-23,
+      // resolved). The guard itself is unchanged and still matters: any `core.*`
+      // event may be registered for, and `core.payment.captured` names an
+      // authorization and a wallet but no organization, so scoping a recipient
+      // to a tenant on it would match nothing for ever with no error anywhere.
       const impossible = await core.router.handle({
         method: "POST",
         url: "/v1/notification-recipients",
         headers: auth,
         body: {
           organization_id: organizationId,
-          event_type: "core.fulfillment.dispatched",
+          event_type: "core.payment.captured",
           identity_id: identity.identity_id,
           channel: "telegram",
           correlation_id: "corr-api",
@@ -845,6 +852,74 @@ describe.each(backends)("notifications on $name", (backend) => {
       });
       expect(recipients.status).toBe(200);
       expect((recipients.body as { count: number }).count).toBe(1);
+    } finally {
+      await close();
+    }
+  });
+
+  it("delivers a tenant-scoped fulfillment notification to that tenant and to nobody else", async () => {
+    // The payoff of naming the tenant on the lifecycle events (B-23). The
+    // matching machinery here never changed: `organizationScope` has always read
+    // `organization_id` off the payload and `recipientsFor` has always narrowed
+    // by it. What changed is that fulfillment events now carry the field, so a
+    // tenant-scoped recipient is a thing that can match — which is why the
+    // registry no longer has to refuse one.
+    //
+    // Two tenants both watching the same event type, one dispatch. If the field
+    // were missing the scope would read as null, both tenant-scoped recipients
+    // would match nothing, and the operator of the wrong organization would be
+    // messaged about an order that is none of their business.
+    const channel = new RecordingChannel();
+    const { core, close, organizationId } = await harness(backend, [channel]);
+    try {
+      const other = await core.organization.create({
+        name: `org-other-${randomUUID().slice(0, 8)}`,
+        country_code: "SA",
+        correlation_id: "corr-tenant-scope",
+      });
+
+      const watcherAddress = `tg-watcher-${randomUUID()}`;
+      const strangerAddress = `tg-stranger-${randomUUID()}`;
+      const watcher = await core.identity.registerIdentity({
+        channel_type: "telegram",
+        external_id: watcherAddress,
+        correlation_id: "corr-tenant-scope",
+      });
+      const stranger = await core.identity.registerIdentity({
+        channel_type: "telegram",
+        external_id: strangerAddress,
+        correlation_id: "corr-tenant-scope",
+      });
+
+      const mine = await core.notificationRecipients.register({
+        organization_id: organizationId,
+        event_type: "core.fulfillment.dispatched",
+        identity_id: watcher.identity.identity_id,
+        channel: "telegram",
+        correlation_id: "corr-tenant-scope",
+      });
+      await core.notificationRecipients.register({
+        organization_id: other.organization_id,
+        event_type: "core.fulfillment.dispatched",
+        identity_id: stranger.identity.identity_id,
+        channel: "telegram",
+        correlation_id: "corr-tenant-scope",
+      });
+
+      const { event } = await dispatchAndRelay(core, organizationId, `order-${randomUUID()}`);
+      expect(event.payload).toMatchObject({ organization_id: organizationId });
+
+      const queued = await core.notifications.forEvent(event.event_id);
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject({
+        recipient_id: mine.recipient_id,
+        organization_id: organizationId,
+      });
+
+      await core.notificationDispatcher.drainOnce();
+      expect(channel.sent).toHaveLength(1);
+      expect(channel.sent[0]!.message.address).toBe(watcherAddress);
+      expect(channel.sent[0]!.message.address).not.toBe(strangerAddress);
     } finally {
       await close();
     }

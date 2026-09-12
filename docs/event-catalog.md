@@ -54,6 +54,39 @@ market.order.created            (MARKET -> CORE)
 Every transition of the fulfillment lifecycle is published. A consumer that
 replays the CORE stream can reconstruct the exact state without querying CORE.
 
+### Every fulfillment event names its tenant (B-23, resolved 2026-09-12)
+
+All four — `created`, `dispatched`, `completed`, `cancelled` — carry a **required**
+`organization_id`. CORE owns tenancy and is the only system that can state it, so
+an event that omitted it forced every consumer to call CORE back before it could
+route, authorize or filter. That is now unnecessary: a closure is routable on its
+own contents.
+
+Two things follow for consumers:
+
+- A consumer validating these payloads with `additionalProperties: false`
+  against a copy of the schema taken **before** this change will now reject them.
+  Refresh the schema. This is an additive field, but strict validators do not
+  treat additions as compatible.
+- Events **persisted before** this change have no `organization_id`. Replay and
+  history readers must treat its absence as unknown rather than as an error or as
+  a tenantless event.
+
+### The amount that moved, on both closure paths
+
+`core.fulfillment.completed` and `.cancelled` both carry an optional
+`captured_minor`. Two rules govern reading it:
+
+- It is the authorization's **running total**, never the last capture leg. A hold
+  part-captured out of band and then closed by CORE reports the sum of both.
+- **Absent means CORE observed no amount**, not zero. An order that carried no
+  payment hold closes without the field; reading a missing value as `0` would
+  turn "nothing to say" into a positive claim that nothing moved.
+
+Until 2026-09-12 the success path published no figure at all while the failure
+paths did. It now reports one, so `settlement_state: "captured"` and a stated
+amount arrive together.
+
 ## Lifecycle of a subscription as seen on the bus
 
 ```

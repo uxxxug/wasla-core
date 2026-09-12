@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "fulfillment_id",
+    "organization_id",
     "order_reference",
     "outcome",
     "completed_at"
@@ -15,6 +16,11 @@
     "fulfillment_id": {
       "type": "string",
       "format": "uuid"
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The CORE organization (tenant) this fulfillment belongs to. CORE owns tenancy and is the only system that can state it, so it is stated here rather than left for a consumer to ask back for. Added in the 2026-09-12 tenant-scope cycle to resolve blocker B-23: without it a consumer could not route a closure by tenant, and a tenant-scoped notification recipient for this event type matched nothing, for ever, with no error anywhere. Every event CORE publishes from that cycle onward carries it; events stored before it do not, so a consumer replaying history must treat an absent value as unknown rather than as a tenant."
     },
     "order_reference": {
       "type": "string",
@@ -63,14 +69,17 @@
   "examples": [
     {
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
       "order_reference": "order-2",
       "outcome": "completed",
       "completed_at": "2026-09-11T03:45:00.000Z",
       "settlement_state": "captured",
-      "financial_decision_required": false
+      "financial_decision_required": false,
+      "captured_minor": 5000
     },
     {
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
       "order_reference": "order-3",
       "outcome": "failed",
       "completed_at": "2026-09-11T03:45:00.000Z",

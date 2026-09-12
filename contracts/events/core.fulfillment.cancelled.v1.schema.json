@@ -5,21 +5,51 @@
   "description": "Published by CORE when a fulfillment is cancelled before execution closes. MARKET closes the commercial order; MOVE stops any operational job it created.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["fulfillment_id", "order_reference", "reason", "cancelled_at"],
+  "required": [
+    "fulfillment_id",
+    "organization_id",
+    "order_reference",
+    "reason",
+    "cancelled_at"
+  ],
   "properties": {
-    "fulfillment_id": { "type": "string", "format": "uuid" },
-    "order_reference": { "type": "string", "minLength": 1 },
-    "reason": { "type": "string", "minLength": 1 },
-    "cancelled_at": { "type": "string", "format": "date-time" },
+    "fulfillment_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "organization_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "The CORE organization (tenant) this fulfillment belongs to. CORE owns tenancy and is the only system that can state it, so it is stated here rather than left for a consumer to ask back for. Added in the 2026-09-12 tenant-scope cycle to resolve blocker B-23: without it a consumer could not route a closure by tenant, and a tenant-scoped notification recipient for this event type matched nothing, for ever, with no error anywhere. Every event CORE publishes from that cycle onward carries it; events stored before it do not, so a consumer replaying history must treat an absent value as unknown rather than as a tenant."
+    },
+    "order_reference": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cancelled_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "settlement_state": {
       "type": "string",
-      "enum": ["none", "held", "captured", "partially_captured", "released", "unsettled"],
+      "enum": [
+        "none",
+        "held",
+        "captured",
+        "partially_captured",
+        "released",
+        "unsettled"
+      ],
       "description": "State of the CORE money hold at closure. `released` means the hold was returned and no money moved; `partially_captured` means part of the consented amount had already moved and only the remainder was returned, so the payer has paid for work that was cancelled; `unsettled` means CORE could not bring the hold to a terminal state. The last two need reconciliation. Optional and additive; consumers may ignore it, and a consumer that reads it must treat an unrecognised value as \"do not assume\" rather than as `released`."
     },
     "captured_minor": {
       "type": "integer",
       "minimum": 0,
-      "description": "The amount of the hold, in minor units, that CORE observed as already moved at cancellation. Present only when CORE was given the figure by its money module; omitted when it was not observed, which is deliberately different from zero. Never treat an absent value as zero."
+      "description": "The running total of the hold, in minor units, that CORE had observed as moved at closure. Present whenever CORE was given the figure by its money module, which since the 2026-09-12 tenant-scope cycle includes the success path: a completed execution captures the hold and states the total it captured, so the amount a delivered order actually cost is readable from the event. It is the hold's total and never the amount of the last capture leg. Absent means CORE did not observe an amount — no hold guarded the fulfillment, or the settlement itself failed and left the hold `unsettled`. Absent is deliberately different from zero and must never be read as zero."
     },
     "financial_decision_required": {
       "type": "boolean",
@@ -29,6 +59,7 @@
   "examples": [
     {
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
       "order_reference": "order-1",
       "reason": "customer_cancelled",
       "cancelled_at": "2026-09-11T03:42:00.000Z",
@@ -37,6 +68,7 @@
     },
     {
       "fulfillment_id": "e53bd31b-06e4-4609-a109-fcfe6848376d",
+      "organization_id": "3f2b1c7a-8d4e-4f21-9a55-6b0c1d2e3f44",
       "order_reference": "order-1",
       "reason": "customer_cancelled",
       "cancelled_at": "2026-09-11T03:42:00.000Z",

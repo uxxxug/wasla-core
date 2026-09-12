@@ -548,6 +548,12 @@ export class FulfillmentService {
           entity_id: updated.fulfillment_id,
           payload: {
             fulfillment_id: updated.fulfillment_id,
+            // CORE owns tenancy, so CORE is the only system that can state which
+            // organization a fulfillment belongs to. Omitting it here forced
+            // every consumer to ask CORE back for a fact CORE already had, and
+            // made a tenant-scoped notification recipient for this event type
+            // unmatchable by construction (B-23).
+            organization_id: updated.organization_id,
             order_reference: updated.market_order_reference,
             job_reference: payload.job_id,
             dispatched_at: payload.accepted_at,
@@ -853,6 +859,10 @@ export class FulfillmentService {
     capturedMinor: number | null,
   ) {
     const cancelled = fulfillment.status === "cancelled";
+    // Present on both closure shapes rather than on one: a consumer routing by
+    // tenant must be able to do it for every terminal outcome, and a field that
+    // appears on completion but not cancellation is a field nobody can rely on.
+    const tenant = { organization_id: fulfillment.organization_id };
     const money = {
       settlement_state: fulfillment.settlement_state,
       financial_decision_required: requiresFinancialDecision(fulfillment),
@@ -870,6 +880,7 @@ export class FulfillmentService {
       payload: cancelled
         ? {
             fulfillment_id: fulfillment.fulfillment_id,
+            ...tenant,
             order_reference: fulfillment.market_order_reference,
             reason: fulfillment.closure_reason ?? "cancelled",
             cancelled_at: fulfillment.completed_at,
@@ -877,6 +888,7 @@ export class FulfillmentService {
           }
         : {
             fulfillment_id: fulfillment.fulfillment_id,
+            ...tenant,
             order_reference: fulfillment.market_order_reference,
             outcome: fulfillment.status,
             completed_at: fulfillment.completed_at,

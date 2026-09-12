@@ -52,8 +52,13 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
     const events = await dispatched(core);
     expect(events).toHaveLength(1);
     expect(events[0]!.event.causation_id).toBe(accepted.event_id);
+    // `toEqual`, not `toMatchObject`: the published payload is the whole
+    // contract and an extra key nobody declared is a contract change.
     expect(events[0]!.event.payload).toEqual({
       fulfillment_id: created.fulfillment_id,
+      // CORE states the tenant. It is the only system that can, and a consumer
+      // routing a dispatch by organization has no other source for it (B-23).
+      organization_id: testId("org-1"),
       order_reference: "order-d1",
       job_reference: "job-1",
       dispatched_at: core.clock.now().toISOString(),

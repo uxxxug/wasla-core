@@ -225,13 +225,35 @@ that schedules retries. `attempts` is deliberately **not** incremented for the
 three pre-existing workers, which would have changed their backoff behaviour
 under the guise of a concurrency fix.
 
+## Tenant scoping (B-23, resolved 2026-09-12)
+
+`core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry
+`organization_id`, so `organizationScope()` reads a real tenant off them and
+`recipientsFor(type, organizationId)` can narrow. A tenant-scoped recipient for a
+fulfillment event is therefore a recipient that matches something, and
+registration no longer refuses one.
+
+The refusal itself is unchanged and still guards the case it was written for: any
+`core.*` event type may be registered for, and one whose payload names no
+organization — `core.payment.captured`, `core.identity.verified` — still gets
+HTTP 400 rather than a stored recipient that matches nothing for ever. The
+permitted list in `TENANT_SCOPED_EVENT_TYPES` stays explicit rather than derived,
+because the thing being asserted is a property of each published payload and a
+derivation would quietly start permitting a scope the moment an unrelated event
+grew an `organization_id` field for its own reasons.
+
+Two consequences worth knowing:
+
+- Events **stored before this change** have no `organization_id`. On replay their
+  scope reads as null, so they fan out to platform-wide recipients only. Absence
+  is "not stated", not "no tenant".
+- A platform-wide recipient (`organization_id: null`) and a tenant-scoped one for
+  the same event type are two recipients, and both match. That is intended — an
+  operator watching everything and a tenant watching itself are different people
+  — but it means the same closure produces two notifications.
+
 ## Recorded, not solved
 
-- **B-23** — `core.fulfillment.dispatched/completed/cancelled` payloads carry no
-  `organization_id`, so a tenant-scoped recipient for them can never match.
-  Rather than change a published event contract inside this milestone,
-  registration refuses a tenant scope for those types (HTTP 400). Widening the
-  closure payloads is the real fix.
 - **D-7** — per-customer routing is owned by MARKET.
 - **D-8** — a provider delivery-confirmation callback; without it `delivered` is
   unreachable and `accepted` is the best truth CORE has.
