@@ -2,6 +2,8 @@ import { InMemoryAuditLog, type AuditLog } from "../audit/audit.js";
 import { PgAuditLog } from "../audit/pg-audit.js";
 import type { Clock } from "../clock.js";
 import { InMemoryInbox, type InboxStore } from "../eventing/inbox.js";
+import { InMemoryRateLimitWindowStore, type RateLimitWindowStore } from "../http/rate-limit.js";
+import { PgRateLimitWindowStore } from "../http/pg-rate-limit.js";
 import { InMemoryInboundEventStore, type InboundEventStore } from "../eventing/ingress.js";
 import { InMemoryDeliveryStore, type DeliveryStore } from "../eventing/delivery.js";
 import { PgDeliveryStore } from "../eventing/pg-delivery.js";
@@ -53,6 +55,13 @@ export interface Persistence {
   /** Notifications to people, as opposed to `delivery`, which is to systems. */
   notification: NotificationStore;
   boundary: TransactionBoundary;
+  /**
+   * Ingress rate-limit windows. Part of the bundle so that choosing Postgres and
+   * choosing the shared, cross-instance limiter is one decision rather than two:
+   * wiring the durable backend next to an in-process limiter would silently
+   * multiply every limit by the number of instances running.
+   */
+  rateLimit: RateLimitWindowStore;
   identity: IdentityRepository;
   organization: OrganizationRepository;
   money: MoneyRepository;
@@ -78,6 +87,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     delivery: new InMemoryDeliveryStore(),
     notification: new InMemoryNotificationStore(),
     boundary: new InMemoryTransactionBoundary(),
+    rateLimit: new InMemoryRateLimitWindowStore(),
     identity: new InMemoryIdentityRepository(),
     organization: new InMemoryOrganizationRepository(),
     money,
@@ -105,6 +115,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     delivery: new PgDeliveryStore(pool, clock),
     notification: new PgNotificationStore(pool),
     boundary: new PgTransactionBoundary(pool as never),
+    rateLimit: new PgRateLimitWindowStore(pool),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),
     money: new PgMoneyRepository(pool),

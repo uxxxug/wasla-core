@@ -1,4 +1,5 @@
 import type { Clock } from "../clock.js";
+import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import type { EventBus } from "./bus.js";
 import type { InboundEventStore } from "./ingress.js";
 
@@ -31,18 +32,22 @@ export class InboundDispatcher {
     private readonly clock: Clock,
     private readonly maxAttempts = 5,
     private readonly baseBackoffMs = 1000,
+    private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
   ) {}
 
   async drainOnce(limit = 100): Promise<DispatcherResult> {
     const now = this.clock.now();
     const due = await this.store.claimDue(now, limit);
     const result: DispatcherResult = { processed: 0, failed: 0, dead: 0 };
+    this.metrics.claimed(due.length);
 
     for (const record of due) {
+      const stop = this.metrics.startItem();
       try {
         await this.bus.publish(record.event);
         await this.store.markProcessed(record.event.event_id);
         result.processed += 1;
+        this.metrics.outcome("completed");
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (record.attempts + 1 >= this.maxAttempts) {
@@ -52,6 +57,7 @@ export class InboundDispatcher {
           // the cause is fixed.
           await this.store.markDead(record.event.event_id, message);
           result.dead += 1;
+          this.metrics.outcome("failed_permanent");
         } else {
           const delay = this.baseBackoffMs * 2 ** record.attempts;
           await this.store.markFailed(
@@ -60,7 +66,10 @@ export class InboundDispatcher {
             new Date(now.getTime() + delay),
           );
           result.failed += 1;
+          this.metrics.outcome("retried");
         }
+      } finally {
+        stop();
       }
     }
     return result;

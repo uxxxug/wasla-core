@@ -1,4 +1,5 @@
 import type { Clock } from "../clock.js";
+import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import type { TransactionBoundary } from "../persistence/transaction.js";
 import type { EventBus } from "./bus.js";
 import type { EventEnvelope } from "./envelope.js";
@@ -47,6 +48,11 @@ export class OutboxPublisher {
      */
     fanOut?: EventFanOut | readonly EventFanOut[],
     private readonly boundary?: TransactionBoundary,
+    /**
+     * Optional so the eventing tests can run the relay with no notion of
+     * observability. Records transitions only; it never queries or writes.
+     */
+    private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
   ) {
     this.fanOuts = fanOut === undefined ? [] : Array.isArray(fanOut) ? [...fanOut] : [fanOut as EventFanOut];
   }
@@ -57,8 +63,10 @@ export class OutboxPublisher {
     const now = this.clock.now();
     const due = await this.outbox.claimDue(now, limit);
     const result: PublisherResult = { published: 0, failed: 0, dead: 0 };
+    this.metrics.claimed(due.length);
 
     for (const record of due) {
+      const stop = this.metrics.startItem();
       try {
         await this.bus.publish(record.event);
         // Marking the row published and queueing its external deliveries are
@@ -77,11 +85,13 @@ export class OutboxPublisher {
           await this.outbox.markPublished(record.event.event_id);
         }
         result.published += 1;
+        this.metrics.outcome("completed");
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (record.attempts + 1 >= this.maxAttempts) {
           await this.outbox.markDead(record.event.event_id, message);
           result.dead += 1;
+          this.metrics.outcome("failed_permanent");
         } else {
           const delay = this.baseBackoffMs * 2 ** record.attempts;
           await this.outbox.markFailed(
@@ -90,7 +100,10 @@ export class OutboxPublisher {
             new Date(now.getTime() + delay),
           );
           result.failed += 1;
+          this.metrics.outcome("retried");
         }
+      } finally {
+        stop();
       }
     }
     return result;

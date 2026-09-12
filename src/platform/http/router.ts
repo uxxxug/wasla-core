@@ -1,6 +1,14 @@
 import { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError } from "../errors.js";
 import { newId } from "../ids.js";
+import type { MetricsRegistry } from "../observability/metrics.js";
+import {
+  rateClassFor,
+  rateLimited,
+  rateLimitHeaders,
+  subjectFor,
+  type RateLimiter,
+} from "./rate-limit.js";
 
 export interface RequestContext {
   method: string;
@@ -23,8 +31,26 @@ export type Handler = (ctx: RequestContext) => Promise<HandlerResult> | HandlerR
 
 interface Route {
   method: string;
+  /**
+   * The registered path, parameters included (`/v1/fulfillments/:fulfillment_id`).
+   * Kept because it is the only low-cardinality name for a route: the concrete
+   * path contains identifiers, so using it as a metric label would be one time
+   * series per fulfillment and would publish entity ids to anyone who can scrape.
+   */
+  template: string;
   segments: string[];
   handler: Handler;
+}
+
+/**
+ * What the router needs in order to be observable and defensible. Both optional:
+ * most tests construct a bare router and must not have to know that metrics or
+ * rate limiting exist, and a bare router behaves exactly as it did before
+ * milestone 8.
+ */
+export interface RouterOptions {
+  metrics?: MetricsRegistry;
+  rateLimiter?: RateLimiter;
 }
 
 export interface LogRecord {
@@ -38,12 +64,25 @@ export interface LogRecord {
   error_code?: string;
 }
 
+/**
+ * How many request logs are kept in memory.
+ *
+ * There was no bound before: `logs` grew for the lifetime of the process, so a
+ * long-running deployment leaked memory in proportion to traffic — the opposite
+ * of what an observability surface should do. Bounded to the most recent
+ * records, which is what a human reading them ever wants; the durable record of
+ * what happened is the audit trail, not this array.
+ */
+const MAX_RETAINED_LOGS = 1000;
+
 export class Router {
   private routes: Route[] = [];
   readonly logs: LogRecord[] = [];
 
+  constructor(private readonly options: RouterOptions = {}) {}
+
   add(method: string, path: string, handler: Handler): void {
-    this.routes.push({ method, segments: path.split("/").filter(Boolean), handler });
+    this.routes.push({ method, template: path, segments: path.split("/").filter(Boolean), handler });
   }
 
   get(path: string, handler: Handler) {
@@ -74,6 +113,26 @@ export class Router {
     return null;
   }
 
+  private record(record: LogRecord, route: string, durationMs: number): void {
+    this.logs.push(record);
+    if (this.logs.length > MAX_RETAINED_LOGS) this.logs.splice(0, this.logs.length - MAX_RETAINED_LOGS);
+    const metrics = this.options.metrics;
+    if (!metrics) return;
+    // Two increments and one observation, all in-process maps. No query, no
+    // transaction, no lock: instrumentation that costs a round trip per request
+    // is a second load on the system it claims to be measuring.
+    metrics.increment("core_http_requests_total", {
+      route,
+      method: record.method.toLowerCase(),
+      status: String(record.status),
+    });
+    metrics.observe(
+      "core_http_request_duration_seconds",
+      { route, method: record.method.toLowerCase() },
+      durationMs / 1000,
+    );
+  }
+
   /** Transport-independent handling — used directly by tests and by the http server. */
   async handle(input: {
     method: string;
@@ -90,6 +149,51 @@ export class Router {
     const requestId = newId();
 
     const matched = this.match(input.method, url.pathname);
+    // `unmatched` rather than the path itself: an unknown path is attacker-
+    // controlled text, and putting it in a label would let anyone create
+    // unlimited time series by typing unlimited URLs.
+    const routeLabel = matched ? matched.route.template : "unmatched";
+
+    // The limit is checked here — after the route is known, so the class is
+    // known, and before the handler runs, so a refused request has touched no
+    // fulfillment, no ledger, no outbox, no inbox, no notification and no audit
+    // entry. Nothing below this point in the milestone-8 design is allowed to
+    // move the check into a handler.
+    const rateClass = rateClassFor(input.method, matched ? matched.route.template : null);
+    let rateHeaders: Record<string, string> = {};
+    if (this.options.rateLimiter && rateClass !== null) {
+      const subject = subjectFor(headers);
+      const decision = await this.options.rateLimiter.check(subject, rateClass);
+      rateHeaders = rateLimitHeaders(decision);
+      if (!decision.allowed) {
+        const error = rateLimited(decision);
+        const duration = Date.now() - started;
+        this.record(
+          {
+            level: "error",
+            request_id: requestId,
+            correlation_id: correlationId,
+            method: input.method,
+            path: url.pathname,
+            status: error.status,
+            duration_ms: duration,
+            error_code: error.code,
+          },
+          routeLabel,
+          duration,
+        );
+        this.options.metrics?.increment("core_http_rate_limited_total", {
+          rate_class: rateClass,
+          subject_kind: subject.kind,
+        });
+        return {
+          status: error.status,
+          body: error.toBody(correlationId),
+          headers: { ...rateHeaders, "x-correlation-id": correlationId },
+        };
+      }
+    }
+
     if (!matched) {
       const result = {
         status: 404,
@@ -101,16 +205,21 @@ export class Router {
           correlation_id: correlationId,
         },
       };
-      this.logs.push({
-        level: "error",
-        request_id: requestId,
-        correlation_id: correlationId,
-        method: input.method,
-        path: url.pathname,
-        status: 404,
-        duration_ms: Date.now() - started,
-        error_code: "not_found",
-      });
+      const duration = Date.now() - started;
+      this.record(
+        {
+          level: "error",
+          request_id: requestId,
+          correlation_id: correlationId,
+          method: input.method,
+          path: url.pathname,
+          status: 404,
+          duration_ms: duration,
+          error_code: "not_found",
+        },
+        routeLabel,
+        duration,
+      );
       return result;
     }
 
@@ -127,38 +236,48 @@ export class Router {
 
     try {
       const result = await matched.route.handler(ctx);
-      this.logs.push({
-        level: "info",
-        request_id: requestId,
-        correlation_id: correlationId,
-        method: input.method,
-        path: url.pathname,
-        status: result.status,
-        duration_ms: Date.now() - started,
-      });
+      const duration = Date.now() - started;
+      this.record(
+        {
+          level: "info",
+          request_id: requestId,
+          correlation_id: correlationId,
+          method: input.method,
+          path: url.pathname,
+          status: result.status,
+          duration_ms: duration,
+        },
+        routeLabel,
+        duration,
+      );
       return {
         ...result,
-        headers: { ...(result.headers ?? {}), "x-correlation-id": correlationId },
+        headers: { ...rateHeaders, ...(result.headers ?? {}), "x-correlation-id": correlationId },
       };
     } catch (err) {
       const coreError =
         err instanceof CoreError
           ? err
           : new CoreError("internal", "unexpected error"); // never leak internals
-      this.logs.push({
-        level: "error",
-        request_id: requestId,
-        correlation_id: correlationId,
-        method: input.method,
-        path: url.pathname,
-        status: coreError.status,
-        duration_ms: Date.now() - started,
-        error_code: coreError.code,
-      });
+      const duration = Date.now() - started;
+      this.record(
+        {
+          level: "error",
+          request_id: requestId,
+          correlation_id: correlationId,
+          method: input.method,
+          path: url.pathname,
+          status: coreError.status,
+          duration_ms: duration,
+          error_code: coreError.code,
+        },
+        routeLabel,
+        duration,
+      );
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: { "x-correlation-id": correlationId },
+        headers: { ...rateHeaders, "x-correlation-id": correlationId },
       };
     }
   }
@@ -185,8 +304,15 @@ export class Router {
         body,
         headers: req.headers,
       });
-      res.writeHead(result.status, { "content-type": "application/json", ...(result.headers ?? {}) });
-      res.end(JSON.stringify(result.body));
+      // A string body is written as-is: the metrics exposition is text, not
+      // JSON, and wrapping it in quotes would make it unparseable by every
+      // scraper. Everything else is serialised as before.
+      const isText = typeof result.body === "string";
+      res.writeHead(result.status, {
+        "content-type": isText ? "text/plain; version=0.0.4; charset=utf-8" : "application/json",
+        ...(result.headers ?? {}),
+      });
+      res.end(isText ? (result.body as string) : JSON.stringify(result.body));
     };
   }
 }

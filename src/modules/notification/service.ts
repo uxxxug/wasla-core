@@ -3,6 +3,10 @@ import type { AuditLog } from "../../platform/audit/audit.js";
 import type { EventEnvelope } from "../../platform/eventing/envelope.js";
 import { invalid, notFound } from "../../platform/errors.js";
 import { assertId } from "../../platform/ids.js";
+import {
+  NO_WORKER_METRICS,
+  type WorkerMetrics,
+} from "../../platform/observability/worker-metrics.js";
 import { NO_SCOPE, type TransactionScope } from "../../platform/persistence/transaction.js";
 import {
   carriesTenantScope,
@@ -18,7 +22,7 @@ import {
   type NotificationView,
 } from "./domain.js";
 import type { ChannelDirectory, NotificationChannel } from "./ports.js";
-import type { NotificationStore } from "./repository.js";
+import type { ClaimedNotification, NotificationStore } from "./repository.js";
 
 // ───────────────────────────── recipient configuration ─────────────────────────────
 
@@ -315,6 +319,7 @@ export class NotificationDispatcher {
      * provider will have its row reclaimed and the message sent twice.
      */
     private readonly leaseMs = 30_000,
+    private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
   ) {
     for (const channel of channels) this.channels.set(channel.channel, channel);
   }
@@ -333,96 +338,134 @@ export class NotificationDispatcher {
     // before it starts adding work of its own.
     result.reclaimed = await this.store.reclaimExpired(now, this.maxAttempts, limit);
     const claimed = await this.store.claimDue(now, limit, this.leaseMs);
+    // A reclaim is the only place in CORE where an expired lease is directly
+    // observable: the row was claimed by some process that never acknowledged
+    // it. Counting it here is counting a fact the store established, not a
+    // state inferred from a second copy of the truth.
+    this.metrics.outcome("reclaimed", result.reclaimed);
+    this.metrics.claimed(claimed.length);
 
     for (const notification of claimed) {
-      const token = notification.claim_token;
-      const channel = this.channels.get(notification.channel);
-      if (!channel) {
-        // Treated as retryable, not permanent: a missing adapter is a
-        // deployment state, and the next deploy can fix it. Attempt exhaustion
-        // still ends it, so it cannot retry forever.
-        await this.retry(notification, token, "channel_adapter_not_configured", null, now, result);
-        continue;
-      }
-      if (notification.address === null) {
-        // Should be unreachable: a row without an address is created `failed`
-        // and never becomes claimable. Handled rather than asserted, because a
-        // dispatcher that throws here would stop draining every other message.
-        if (await this.store.markFailed(notification.notification_id, token, "no address on notification", now, null)) {
-          result.failed += 1;
-        } else result.fenced += 1;
-        continue;
-      }
-
-      const message: NotificationMessage = {
-        notification_id: notification.notification_id,
-        channel: notification.channel,
-        address: notification.address,
-        template: notification.template,
-        subject: notification.subject,
-        body: notification.body,
-        data: notification.data,
-        idempotency_key: notification.idempotency_key,
-        // `attempts` was already incremented by the claim, so this is the
-        // number of this attempt.
-        attempt: notification.attempts,
-      };
-
-      let outcome;
+      // Timed per item rather than per drain: a drain of one hundred messages
+      // that took ten seconds says nothing about whether one provider is slow.
+      const stop = this.metrics.startItem();
       try {
-        outcome = await channel.send(message);
-      } catch (err) {
-        // An adapter that throws has told us nothing about the message. Unknown
-        // is not the same as refused, so it is retryable.
-        const reason = sanitiseChannelError(
-          err instanceof Error ? err.message : String(err),
-          notification.address,
-        );
-        await this.retry(notification, token, `channel_threw: ${reason}`, null, now, result);
-        continue;
-      }
-
-      const providerId = outcome.provider_message_id ?? null;
-      switch (outcome.outcome) {
-        case "delivered":
-          if (await this.store.markDelivered(notification.notification_id, token, providerId, now)) {
-            result.delivered += 1;
-          } else result.fenced += 1;
-          break;
-        case "accepted":
-          if (await this.store.markAccepted(notification.notification_id, token, providerId, now)) {
-            result.accepted += 1;
-          } else result.fenced += 1;
-          break;
-        case "retryable":
-          await this.retry(
-            notification,
-            token,
-            sanitiseChannelError(outcome.reason, notification.address),
-            outcome.retry_after_ms ?? null,
-            now,
-            result,
-            providerId,
-          );
-          break;
-        case "permanent":
-          // Understood and refused. Repeating identical bytes cannot change the
-          // answer, so it stops here and stays visible to an operator.
-          if (
-            await this.store.markFailed(
-              notification.notification_id,
-              token,
-              `permanent: ${sanitiseChannelError(outcome.reason, notification.address)}`,
-              now,
-              providerId,
-            )
-          ) {
-            result.failed += 1;
-          } else result.fenced += 1;
-          break;
+        await this.processClaimed(notification, now, result);
+      } finally {
+        stop();
       }
     }
+
+    // Outcomes are recorded once, from the assembled result, rather than at each
+    // branch inside the switch. The result already is the count of transitions
+    // this drain performed, so there is exactly one place to keep correct, and
+    // `accepted` and `delivered` both count as completed work here because the
+    // difference between them is a provider's promise versus its confirmation —
+    // a distinction the notification API exposes and a queue-health metric does
+    // not need.
+    this.metrics.outcome("completed", result.accepted + result.delivered);
+    this.metrics.outcome("retried", result.retrying);
+    this.metrics.outcome("failed_permanent", result.failed);
+    this.metrics.outcome("fenced", result.fenced);
     return result;
+  }
+
+  /**
+   * One claimed message: pick the adapter, send, and record the outcome under
+   * the fence of the claim token. Extracted from the drain loop so the loop can
+   * time each item without the timing having to be repeated at every exit.
+   */
+  private async processClaimed(
+    notification: ClaimedNotification,
+    now: Date,
+    result: DispatchResult,
+  ): Promise<void> {
+    const token = notification.claim_token;
+    const channel = this.channels.get(notification.channel);
+    if (!channel) {
+      // Treated as retryable, not permanent: a missing adapter is a
+      // deployment state, and the next deploy can fix it. Attempt exhaustion
+      // still ends it, so it cannot retry forever.
+      await this.retry(notification, token, "channel_adapter_not_configured", null, now, result);
+      return;
+    }
+    if (notification.address === null) {
+      // Should be unreachable: a row without an address is created `failed`
+      // and never becomes claimable. Handled rather than asserted, because a
+      // dispatcher that throws here would stop draining every other message.
+      if (await this.store.markFailed(notification.notification_id, token, "no address on notification", now, null)) {
+        result.failed += 1;
+      } else result.fenced += 1;
+      return;
+    }
+
+    const message: NotificationMessage = {
+      notification_id: notification.notification_id,
+      channel: notification.channel,
+      address: notification.address,
+      template: notification.template,
+      subject: notification.subject,
+      body: notification.body,
+      data: notification.data,
+      idempotency_key: notification.idempotency_key,
+      // `attempts` was already incremented by the claim, so this is the
+      // number of this attempt.
+      attempt: notification.attempts,
+    };
+
+    let outcome;
+    try {
+      outcome = await channel.send(message);
+    } catch (err) {
+      // An adapter that throws has told us nothing about the message. Unknown
+      // is not the same as refused, so it is retryable.
+      const reason = sanitiseChannelError(
+        err instanceof Error ? err.message : String(err),
+        notification.address,
+      );
+      await this.retry(notification, token, `channel_threw: ${reason}`, null, now, result);
+      return;
+    }
+
+    const providerId = outcome.provider_message_id ?? null;
+    switch (outcome.outcome) {
+      case "delivered":
+        if (await this.store.markDelivered(notification.notification_id, token, providerId, now)) {
+          result.delivered += 1;
+        } else result.fenced += 1;
+        break;
+      case "accepted":
+        if (await this.store.markAccepted(notification.notification_id, token, providerId, now)) {
+          result.accepted += 1;
+        } else result.fenced += 1;
+        break;
+      case "retryable":
+        await this.retry(
+          notification,
+          token,
+          sanitiseChannelError(outcome.reason, notification.address),
+          outcome.retry_after_ms ?? null,
+          now,
+          result,
+          providerId,
+        );
+        break;
+      case "permanent":
+        // Understood and refused. Repeating identical bytes cannot change the
+        // answer, so it stops here and stays visible to an operator.
+        if (
+          await this.store.markFailed(
+            notification.notification_id,
+            token,
+            `permanent: ${sanitiseChannelError(outcome.reason, notification.address)}`,
+            now,
+            providerId,
+          )
+        ) {
+          result.failed += 1;
+        } else result.fenced += 1;
+        break;
+    }
   }
 
   /**

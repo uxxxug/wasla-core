@@ -18,6 +18,16 @@ import { FetchTransport } from "./platform/eventing/fetch-transport.js";
 import { registerDeliveryRoutes } from "./platform/eventing/delivery-http.js";
 import { newId } from "./platform/ids.js";
 import { Router } from "./platform/http/router.js";
+import {
+  DEFAULT_RATE_LIMIT_POLICY,
+  RateLimiter,
+  type RateLimitPolicy,
+  type RateLimitWindowStore,
+} from "./platform/http/rate-limit.js";
+import { MetricsRegistry } from "./platform/observability/metrics.js";
+import { registerMetricsRoutes } from "./platform/observability/http.js";
+import { DepthSampler } from "./platform/observability/sampler.js";
+import { workerMetrics } from "./platform/observability/worker-metrics.js";
 import { IdentityService } from "./modules/identity-access/service.js";
 import { OrganizationService } from "./modules/organization/service.js";
 import { registerIdentityRoutes } from "./modules/identity-access/http.js";
@@ -78,6 +88,18 @@ export interface CoreApp {
   fulfillment: FulfillmentService;
   geography: GeographyService;
   clock: Clock;
+  /**
+   * Counters, gauges and histograms for the whole process. Exposed on the bundle
+   * so a test can read a value without parsing the exposition, and so the
+   * operator loop can be written outside CORE.
+   */
+  metrics: MetricsRegistry;
+  /**
+   * Refreshes the queue-depth gauges. Not called by the metrics endpoint — see
+   * `DepthSampler` for why the scrape must not do database work — so whoever
+   * runs CORE calls this on an interval, next to the worker drains.
+   */
+  depthSampler: DepthSampler;
   /** Which backend is actually wired. Reported by /ready so it cannot be guessed. */
   persistence: Persistence["kind"];
 }
@@ -98,9 +120,26 @@ export function createCoreApp(
      * as `failed` with `channel_adapter_not_configured` — visible, not silent.
      */
     channels?: readonly NotificationChannel[];
+    /**
+     * Overrides the window store from the persistence bundle. The bundle
+     * already pairs the memory backend with the in-process store and Postgres
+     * with the shared one; this exists for tests that need a specific policy
+     * against a specific backend.
+     */
+    rateLimitStore?: RateLimitWindowStore;
+    rateLimitPolicy?: RateLimitPolicy;
+    /**
+     * Set to `false` to wire a router with no limiter at all. Only for tests
+     * that assert unthrottled behaviour; a deployment always wants the limit.
+     */
+    rateLimit?: boolean;
   } = {},
 ): CoreApp {
   const clock = options.clock ?? systemClock;
+  // One registry per process. Every counter below is an in-memory increment: no
+  // instrumentation in this file adds a query, a transaction or a lock to any
+  // request or any worker drain.
+  const metrics = new MetricsRegistry();
   // One bundle, never a mix: see `Persistence` for why selecting adapters
   // individually would be a way to lose atomicity without noticing.
   const store = options.persistence ?? memoryPersistence(clock);
@@ -133,6 +172,7 @@ export function createCoreApp(
     1000,
     [fanOut, notificationFanOut],
     boundary,
+    workerMetrics(metrics, "outbox_relay"),
   );
   const subscriptions = new SubscriptionRegistry(store.delivery, clock, newId);
   const deliveries = new DeliveryWorker(
@@ -140,13 +180,24 @@ export function createCoreApp(
     outbox,
     options.transport ?? new FetchTransport(),
     clock,
+    8,
+    1000,
+    5000,
+    workerMetrics(metrics, "event_delivery"),
   );
   // Ingress records; the dispatcher is what actually hands the event over.
   // Splitting them is the point: see `EventIngress` and `InboundDispatcher`.
   const ingress = new EventIngress(store.inbound, (work) =>
     boundary.run((scope) => work(scope)),
   );
-  const dispatcher = new InboundDispatcher(store.inbound, bus, clock);
+  const dispatcher = new InboundDispatcher(
+    store.inbound,
+    bus,
+    clock,
+    5,
+    1000,
+    workerMetrics(metrics, "inbound_dispatcher"),
+  );
 
   const organization = new OrganizationService(store.organization, audit, clock, boundary);
   const money = new MoneyService(store.money, outbox, boundary, audit, clock);
@@ -195,18 +246,50 @@ export function createCoreApp(
     store.notification,
     options.channels ?? [],
     clock,
+    6,
+    1000,
+    30_000,
+    workerMetrics(metrics, "notification"),
   );
 
-  const router = new Router();
+  const depthSampler = new DepthSampler(
+    metrics,
+    {
+      outbox,
+      inbound: store.inbound,
+      delivery: store.delivery,
+      notification: store.notification,
+      reconciliation: fulfillment,
+    },
+    clock,
+  );
+
+  // The limiter is given to the router, not to any service: the edge is the only
+  // place a request rate exists. Background workers are invoked directly by the
+  // process that runs them and never pass through this router, so they cannot be
+  // throttled by construction rather than by remembering to exempt them.
+  const rateLimiter =
+    options.rateLimit === false
+      ? undefined
+      : new RateLimiter(
+          options.rateLimitStore ?? store.rateLimit,
+          clock,
+          options.rateLimitPolicy ?? DEFAULT_RATE_LIMIT_POLICY,
+        );
+  const router = new Router({ metrics, rateLimiter });
   router.get("/health", () => ({ status: 200, body: { status: "ok" } }));
   router.get("/ready", async () => ({
     status: 200,
     body: {
       status: "ready",
       persistence: store.kind,
-      outbox_pending: (await outbox.byStatus("pending")).length,
+      // An aggregate count, not the length of every pending row. Reading the
+      // whole queue to report its size made a readiness probe cost more the
+      // busier the system was.
+      outbox_pending: (await outbox.counts())["pending"] ?? 0,
     },
   }));
+  registerMetricsRoutes(router, metrics);
   registerIdentityRoutes(router, identity);
   registerOrganizationRoutes(router, organization, identity);
   registerMoneyRoutes(router, money, identity);
@@ -219,6 +302,8 @@ export function createCoreApp(
 
   return {
     router,
+    metrics,
+    depthSampler,
     bus,
     outbox,
     boundary,
