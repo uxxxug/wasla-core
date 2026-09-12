@@ -89,12 +89,12 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | # | Milestone | Verified status | Evidence / what is missing |
 |---|---|---|---|
 | 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
-| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete on both the money and the fulfillment side; multi-hold blocked — external dependency** | Migration 0011 finishes what 0009 started: `fulfillment.settlement_state` gained `partially_captured`, so a hold that moved part of the payer's money is no longer recorded as `released` — a value documented to mean no money moved. `FulfillmentPaymentPort.voidWithin` publishes `{ status, captured_minor }` instead of `unknown`, `release()` derives the state from it, `inspectHold()` has a `partially_captured` case, and the reconciliation read now surfaces money moved against work that did not complete (B-20). 18 tests × 2 backends. Earlier: migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. Multi-hold needs a MARKET contract decision — see "External dependencies" |
+| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete on both the money and the fulfillment side; multi-hold blocked — external dependency** | Migration 0011 finishes what 0009 started: `fulfillment.settlement_state` gained `partially_captured`, so a hold that moved part of the payer's money is no longer recorded as `released` — a value documented to mean no money moved. `FulfillmentPaymentPort.voidWithin` publishes `{ status, captured_minor }` instead of `unknown`, `release()` derives the state from it, `inspectHold()` has a `partially_captured` case, and the reconciliation read now surfaces money moved against work that did not complete (B-20). 18 tests × 2 backends. Earlier: migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. The 2026-09-12 (second) cycle then made the consequence explicit rather than implicit: a derived `financial_disposition`, `financial_decision_required` + `captured_minor` on both closure events, a separate pending-decision reconciliation read, the full terminal-path table in `docs/settlement.md`, and 14 + 1 tests. Multi-hold needs a MARKET contract decision — see "External dependencies" |
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Complete, except policy decisions that are not CORE's to make** | Migration 0010 adds `plan`, `plan_grant`, `subscription`, `subscription_period`, `usage_record` with RLS, an `EXCLUDE USING gist` constraint against overlapping periods, immutability triggers on an active plan's terms and grants, append-only triggers on usage, and a deferred constraint trigger reconciling a settled period against the hold that settled it. Module: `domain.ts` (entitlement derived, never stored), `repository.ts` + `pg-repository.ts`, `service.ts`, `http.ts`. Ten routes, `subscription.read` / `subscription.write` permissions, six event contracts. 23 tests × 2 backends. **No entitlement-check endpoint** — ADR 0008 requires a new ADR first (B-14). Proration, grace, trials, rollover and comped access are recorded as B-15…B-19 |
 | 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
 | 6 | Event normalisation and historical replay tooling | **Not started** | `inbound_event` now makes replay possible for the first time: the envelopes are kept. No tooling yet |
-| 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists (`listFinanciallyInconsistent`, `/v1/fulfillments/reconciliation/inconsistent`). Data migration cannot be planned without a production inventory or a merge policy |
+| 7 | Migration and reconciliation tooling; dry runs | **Blocked — B-2, B-3** | Financial reconciliation exists in two reads that answer different questions: `/v1/fulfillments/reconciliation/inconsistent` (needs an engineer) and `/v1/fulfillments/reconciliation/pending-financial-decision` (needs a business decision). Migration 0011's whole lifecycle — clean apply, apply over existing rows, refused rollback, permitted rollback, re-apply — is now rehearsed by a test against a throwaway database. Data migration cannot be planned without a production inventory or a merge policy |
 | 8 | Security hardening pass and observability export | **Partially complete** | Deny-by-default RLS on every table, hardened `search_path`, token hashing, audit scrubbing, correlation ids. No metrics/trace export, no rate limiting on the new ingress edge |
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
 
@@ -148,7 +148,8 @@ Nothing.
 | B-17 | Trial periods undecided | No trial exists. A zero-amount plan is expressible and settles without an authorization, which is not the same thing as a trial that converts to a paid plan | An owner decision on trial length, conversion and what a lapsed trial entitles |
 | B-18 | Quota rollover versus reset undecided | Quota resets each period, because usage is counted per period. Unused allowance does not carry forward | An owner decision on whether unused allowance accumulates |
 | B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
-| B-20 | What is owed when work fails after part of the hold was already captured | CORE now records this truthfully as `settlement_state = 'partially_captured'` on a `failed`/`cancelled` fulfillment and reports it through `/v1/fulfillments/reconciliation/inconsistent`, so no case is silently lost. It does **not** refund, retain or split automatically. `MoneyService.refund` exists and is exactly-once, so any decision is executable the moment it is made | An owner decision: refund in full, retain as a cancellation fee, or split — and who is allowed to authorise it |
+| B-20 | What is owed when work fails after part of the hold was already captured | CORE records the truth and stops. A `failed`/`cancelled` fulfillment holding `settlement_state = 'partially_captured'` derives `financial_disposition = 'decision_required'`, both closure events carry `financial_decision_required: true` with the observed `captured_minor`, and `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly these cases apart from CORE defects. CORE does **not** refund, retain, split, or mark the operation settled. `MoneyService.refund` is exactly-once, so whichever answer is chosen is executable the day it exists | Five separate owner decisions, listed under "B-20 as a contract gap" in the 2026-09-12 (second) cycle: who states the executed amount, who decides whether partial work earns partial settlement, who authorises a refund, whether a cancellation fee exists, and which system sends the final disposition |
+| B-21 | A closure delivered twice concurrently publishes the closure event twice | Money is single-valued: the capture is keyed in the ledger and a void of an already-closed hold returns unchanged, so no double capture and no double release — measured, not assumed. Event emission has no such key, and two genuinely overlapping `cancel` or completion calls both commit, so MARKET can receive the same closure twice under two `event_id`s. Every copy is identical and true, so this is a delivery defect, not a money defect. Pinned as it behaves in `tests/fulfillment-financial-decision.test.ts` | None — **this is CORE's own next milestone**, not an external dependency. Making the closure update conditional on the row still being open turns the losing transaction into a rollback, which drops its outbox row with it |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -1434,3 +1435,217 @@ pressure rather than a defect. It is recorded because a flake that is only
 mentioned when it fails is indistinguishable from one nobody noticed: if these
 two files fail intermittently in CI, this is the note that says it was already
 happening on 2026-09-12 and was not introduced by this change.
+
+## Cycle 2026-09-12 (second) — making the pending financial decision explicit (CORE-only agent)
+
+The previous cycle made `partially_captured` storable, so CORE stopped claiming
+that 2 500 had come back when it had not. That fixed the record and left the
+consequence implicit. This cycle closes the part of **B-20** that is CORE's, and
+states the rest as decisions somebody else owns.
+
+Scope discipline, unchanged: CORE only. No commercial or financial policy was
+invented, and nothing outside `uxxxug/wasla-core` was touched.
+
+### What was actually wrong, after the last fix
+
+| # | Finding | Evidence |
+|---|---|---|
+| G-12 | The consequence of a partial capture was reachable but not sayable. `settlement_state = 'partially_captured'` on a `cancelled` fulfillment is a true record, but the only mechanism that surfaced it was `isFinanciallyConsistent`, which also reports CORE's own bookkeeping defects. An operator opening that queue could not tell a case waiting on a pricing decision from a case waiting on an engineer, and both were counted as "CORE is inconsistent" | `listFinanciallyInconsistent` returned the `unsettled` intake refusal and the `partially_captured` cancellation as one undifferentiated list |
+| G-13 | `core.fulfillment.cancelled` was still readable as a refund. The event carried `settlement_state`, documented as optional and ignorable, and nothing in the payload said the money question was open. A consumer that ignores the field — which the contract permits — takes a cancellation to mean the payer was made whole | The payload had no field a consumer must read before telling a customer they were refunded |
+| G-14 | Amounts CORE did know were thrown away. `voidWithin` reports `captured_minor`, `release()` read it to pick a state and then dropped the number, so the closure event named a state without the amount and no consumer could say *how much* was undecided | `release()` returned `SettlementState`, not the amount behind it |
+| G-15 | Two overlapping closures publish the closure event twice. Recorded as **B-21**; measured, not theorised | `tests/fulfillment-financial-decision.test.ts`, postgres backend, intermittent |
+
+### Every terminal path, in one table
+
+`docs/settlement.md` now carries the full table the audit asked for: 19 rows,
+one per way a fulfillment can reach a terminal state, each with execution state,
+hold state, captured amount, remaining held amount, `settlement_state`,
+`financial_disposition` and whether a decision is owed. Six distinct paths reach
+the same fact — money left the payer and the work was not delivered — and the
+table names them so none is discovered later by accident.
+
+Two rows in it are honest gaps rather than behaviour:
+
+- **Row 10**, a completed job that cost less than the ceiling, is representable
+  and consistent but unreachable: nothing tells CORE a smaller amount, so a
+  completed job always draws the full ceiling. That is the MOVE dependency below,
+  not a CORE decision.
+- **Row 19**, a hold that expires while execution is still open, leaves
+  `settlement_state = 'held'` on the row until a MOVE event arrives. When one
+  arrives the outcome is truthful; if none ever does, neither reconciliation read
+  can see the contradiction, because both look only at the fulfillment row while
+  the contradiction lives across two modules. A liveness gap, not a false record.
+
+### What changed in CORE
+
+- **`financialDisposition(fulfillment)`** — derived on read, never stored, five
+  values: `no_money`, `awaiting_execution`, `settled`, `decision_required`,
+  `inconsistent`. `isFinanciallyConsistent` is now expressed through it so the
+  two cannot drift. `decision_required` is deliberately not a settled outcome.
+- **`requiresFinancialDecision(fulfillment)`** — the factual predicate: money
+  moved, work did not complete, CORE was not told what happens next. It encodes
+  no policy and picks no outcome.
+- **Both closure events now carry `financial_decision_required`**, and
+  `captured_minor` when CORE observed it. The contract text is explicit: while
+  the flag is true a consumer MUST NOT tell the payer they were refunded, MUST
+  NOT invoice the amount as earned, and MUST NOT treat the operation as settled.
+  A cancellation is not a refund.
+- **`captured_minor` is omitted rather than sent as 0 when CORE did not observe
+  it.** Zero is a claim that nothing moved; absent is a claim about CORE's
+  knowledge. Threaded end to end as `number | null` — `release()`, `settle()` and
+  `inspectHold()` all report the amount alongside the state instead of dropping
+  it.
+- **`GET /v1/fulfillments/reconciliation/pending-financial-decision`** — the
+  B-20 queue, separate from the defect queue. A non-empty list here is not a CORE
+  defect. Reads also return the derived `financial_disposition`.
+- **No new state, no new event, no migration.** The four settlement states and
+  migration 0011 were enough; `decision_required` is derived from what is already
+  stored. Adding a fifth stored state would have created a second source of truth
+  next to `settlement_state`, and a stored flag can disagree with the row it
+  describes.
+
+### What CORE will not do while a decision is owed
+
+No transition writes `released` when `captured_minor > 0`. No path emits a
+refund from a fulfillment outcome — `refundWithin` is only ever called by an
+explicit request naming its own reference. No closure marks the case settled: it
+stays in both reconciliation reads until an answer exists.
+
+### B-20 as a contract gap: five decisions, none of them CORE's
+
+Each row is a decision, not an implementation. CORE has no defensible default for
+any of them, so none was chosen.
+
+| # | Question | Who can answer it | What CORE needs when it is answered | Current risk |
+|---|---|---|---|---|
+| D-1 | Who states the actual executed amount when a job costs less than the consented ceiling? | MOVE — it is the only system that observes the work | An amount in minor units plus the currency on `move.job.completed`, asserted by MOVE, with a rule for "more than the ceiling" (refuse, or cap). Until it exists, `settle()` captures the whole hold | A completed job always draws the full ceiling. If MOVE's real cost is lower, the payer overpays and CORE has no record that it did |
+| D-2 | Does partial work earn partial settlement, and how much? | Commercial owner (MARKET's domain) | A disposition per case, not a formula CORE invents: how much of `captured_minor` is earned | Nothing is earned or returned. The amount sits recorded and undecided |
+| D-3 | Who authorises a refund of the captured part? | Commercial owner — a refund moves real money back | The existing `POST /v1/wallets/{id}/authorizations/{id}/refund` with a reference, called by whoever holds the authority | CORE will not infer a refund from a cancellation. It cannot be triggered by accident |
+| D-4 | Is there a cancellation fee, and on what basis? | Commercial owner | If yes, whether the fee is the already-captured amount or an independent charge — they are different ledger movements | No fee exists anywhere in CORE. Treating the captured amount as a fee by leaving it in place would be a policy decided by inaction |
+| D-5 | When is the operation financially settled, and who says so? | Commercial owner, then whichever system sends it | A single explicit inbound signal that closes the case, with the amount refunded and the amount retained, so the two sum to `captured_minor`. It must be a decision CORE receives, not a state CORE infers | `financial_disposition` stays `decision_required` forever. The queue grows and nothing drains it |
+
+D-5 is the load-bearing one: until an inbound "this is the disposition" contract
+exists, CORE can report the queue but cannot empty it. That contract is one
+event or one route and CORE can build either in a day — the blocker is the
+decision, not the code.
+
+### External dependencies — precise, and still not implemented
+
+Nothing outside CORE was modified. These are stated at the level an agent working
+on MARKET or MOVE can act on without asking a follow-up question.
+
+**Dependency 1 — the new enum value.**
+
+| Field | Value |
+|---|---|
+| Exact value | `partially_captured` (lower snake case, exactly this spelling) |
+| Field | `settlement_state` |
+| Events | `core.fulfillment.completed` v1, `core.fulfillment.cancelled` v1 |
+| Produced by | CORE, on the paths listed as rows 3, 6, 8, 12, 15, 17 of the table in `docs/settlement.md` |
+| Consumed by | MARKET (customer-facing wording, invoicing, order state) |
+| Correct handling | Part of the consented amount has moved and only the remainder was returned. Not a refund, not a full charge. Read `financial_decision_required` alongside it |
+| Behaviour per value | `none` no hold; `held` should not appear on a closure; `captured` the whole ceiling moved; `partially_captured` part moved, rest returned; `released` nothing moved; `unsettled` CORE could not close the hold — treat as unknown and do not settle |
+| Risk today, if an unknown value arrives | A consumer that maps unknown values onto `released` tells the customer they were refunded when they were not. The schema descriptions forbid it explicitly. A consumer that ignores the field entirely reads a cancellation as a refund — which is why `financial_decision_required` exists as a separate, plainly named boolean |
+
+**Dependency 2 — the executed amount.** Minimum CORE needs on
+`move.job.completed`: `executed_amount_minor` (integer, minor units) and
+`currency` (ISO 4217, must match the hold's). Correct source: MOVE, because it is
+the only system that observes the work. MARKET cannot supply it — it knows the
+consented ceiling, which is what CORE already has. Without it row 10 of the table
+stays unreachable and every completed job draws the full ceiling.
+
+**Dependency 3 — the disposition signal (D-5).** CORE needs one inbound decision
+carrying: the fulfillment id, the amount refunded, the amount retained (the two
+summing to `captured_minor`), a reference for exactly-once handling, and the
+identity of whoever authorised it. CORE will not design the policy behind it and
+will not act without it.
+
+### Tests
+
+`tests/fulfillment-financial-decision.test.ts` — 7 cases × 2 backends = **14
+tests**, covering the five shapes the audit asked for plus two more:
+
+1. no capture — 6 000 reserved, 0 captured, cancel → `released`, event says
+   `financial_decision_required: false` and `captured_minor: 0`, both queues
+   empty, wallet fully spendable again;
+2. partial capture — 6 000 reserved, 2 500 captured, cancel → `partially_captured`
+   with `captured_minor: 2 500` and the flag true, wallet at 3 500, no refund
+   posted, `decision_required`, in the pending queue and not in the settled pile;
+3. full capture — 6 000 reserved, completion → `captured`, `settled`, flag false,
+   `captured_minor` **absent** (pinned so it is never quietly turned into a 0);
+4. repeated closure — a second `cancel` and a late completion cannot move the
+   money truth twice; the late completion is refused, one closure event, one
+   capture;
+5. concurrent duplicate delivery — both the settle path and the release path:
+   money moves exactly once (proved through wallet balances, which a double
+   release would inflate), closure events all agree, and the duplicate-event race
+   is pinned as B-21;
+6. the two reconciliation reads separate a pending decision from an `unsettled`
+   defect;
+7. the HTTP surface: the new route, the derived `financial_disposition`, and that
+   the route is not swallowed by `/v1/fulfillments/{id}`.
+
+`tests/migration-0011-lifecycle.test.ts` — **1 test**, Postgres only, against a
+database it creates and drops so it cannot disturb the development one: apply
+clean → roll back with no rows in the new state (succeeds) → insert pre-0011 rows
+→ apply over existing data (rows survive untouched) → the widened constraint
+accepts `partially_captured` and still refuses a value outside the list → roll
+back **with** a real `partially_captured` row (**refuses**, row and version both
+still present) → remove the row → roll back (succeeds, narrowed constraint
+refuses the pair again) → re-apply. The refusal decision from the previous cycle
+was not weakened to make this easier; it is the property under test.
+
+**356 tests across 25 files pass with `DATABASE_URL`; 202 pass and 39 skip
+without it.** Gates green: `typecheck`, `check:governance`, `check:contracts`,
+`check:migrations`.
+
+### Proven, not assumed
+
+- With `src/modules/fulfillment/{domain,service,http}.ts` stashed, **all 14** new
+  tests fail on both backends.
+- With the API present but `requiresFinancialDecision` forced to `false` — the
+  implicit behaviour this cycle removes — **10 of 14** fail. That is the
+  behavioural proof rather than a compile-time one.
+- B-21 was observed, not inferred: repeated runs produce one closure event
+  usually and two occasionally on Postgres, with the money correct in both cases.
+
+### Roadmap triage after this cycle
+
+**Complete inside CORE:** external event ingress and egress; partial capture and
+refunds on both the money and the fulfillment side; the settlement truth table
+and the pending-decision queue; subscriptions, plans, periods and entitlements
+except the policy questions; RLS, token hashing, audit scrubbing, correlation
+ids; migrations 0001–0011 with rehearsed rollbacks.
+
+**Blocked on a decision outside CORE:** B-20 (D-1…D-5 above); multi-hold per
+fulfillment (MARKET); the entitlement-check endpoint (B-14, needs an ADR);
+proration, grace, trials, rollover, overrides (B-15…B-19); contract adoption in
+MARKET and MOVE (B-2…B-6); staging and cutover.
+
+**Actionable inside CORE right now, needing no external answer:**
+
+1. **B-21 — one closure, one closure event.** Make the closing update
+   conditional on the row still being open, so a losing concurrent transaction
+   rolls back and takes its outbox row with it.
+2. **Row 19 — cross-module reconciliation.** A read that lists open fulfillments
+   whose authorization is no longer `authorized`, so a hold that expired under an
+   open execution stops being invisible.
+3. Channels and notifications (milestone 4) — a large piece of product surface
+   with no external blocker.
+4. Metrics and trace export, rate limiting on the ingress edge (milestone 8).
+
+### Next task, and why it is this one
+
+**B-21: make a closure single-valued in events as well as in money.**
+
+It is next because it is the last place where CORE's output can mislead a
+consumer through no fault of the consumer, and because it needs nobody's
+permission. The stated priority for CORE is financially truthful, transactionally
+atomic, idempotent, auditable, contractually explicit — B-21 is the idempotency
+half of that, and it is the only item on the actionable list that touches money
+semantics. Cross-module reconciliation (row 19) comes after it: it is a read, and
+a read is worth more once the writes it reconciles are single-valued.
+
+It is also not cosmetic. The fix changes the repository contract — a conditional
+update that reports whether it matched — and both backends must agree about it,
+which is exactly the class of difference that produced B-12.
