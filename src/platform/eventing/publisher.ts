@@ -3,6 +3,7 @@ import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-m
 import type { TransactionBoundary } from "../persistence/transaction.js";
 import type { EventBus } from "./bus.js";
 import type { EventEnvelope } from "./envelope.js";
+import { FencedError } from "./fencing.js";
 import type { OutboxStore } from "./outbox.js";
 import { DEFAULT_MAX_RECLAIMS } from "./reclaim.js";
 import type { TransactionScope } from "../persistence/transaction.js";
@@ -40,6 +41,15 @@ export interface PublisherResult {
    * bad payload and a worker that keeps dying as the same event.
    */
   reclaim_exhausted: number;
+  /**
+   * Acknowledgements the outbox refused because this relay no longer held the claim
+   * (B-26). The event did reach the bus — that is not undone — but the row now
+   * belongs to a later claim, so this attempt's result is discarded and its fan-out
+   * rolled back rather than written against somebody else's claim. Counted apart
+   * from `failed` because no attempt is charged and nothing is rescheduled here:
+   * the current holder is already doing the work.
+   */
+  fenced: number;
 }
 
 /**
@@ -86,6 +96,7 @@ export class OutboxPublisher {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
@@ -122,23 +133,47 @@ export class OutboxPublisher {
           const fanOuts = this.fanOuts;
           await this.boundary.run(async (scope) => {
             for (const fanOut of fanOuts) await fanOut.queueFor(record.event, scope);
-            await this.outbox.markPublished(record.event.event_id, scope);
+            const applied = await this.outbox.markPublished(
+              record.event.event_id,
+              record.claim_token,
+              scope,
+            );
+            // Throw, not return: the fan-out rows are already written in this
+            // scope, and committing them against a row this relay no longer owns
+            // is the dual-write the transaction exists to prevent (B-26).
+            if (!applied) throw new FencedError(record.event.event_id);
           });
         } else {
-          await this.outbox.markPublished(record.event.event_id);
+          const applied = await this.outbox.markPublished(
+            record.event.event_id,
+            record.claim_token,
+          );
+          if (!applied) throw new FencedError(record.event.event_id);
         }
         result.published += 1;
         this.metrics.outcome("completed");
       } catch (err) {
+        // Before the attempts arithmetic, deliberately. A fence is not a failed
+        // publish: charging an attempt and scheduling a backoff would punish the
+        // row for a worker that was merely slow, and could dead-letter an event
+        // the current claim holder is publishing successfully right now.
+        if (err instanceof FencedError) {
+          result.fenced += 1;
+          this.metrics.outcome("fenced");
+          // `finally` below still runs and stops the timer; calling `stop()` here
+          // as well would record the item twice.
+          continue;
+        }
         const message = err instanceof Error ? err.message : String(err);
         if (record.attempts + 1 >= this.maxAttempts) {
-          await this.outbox.markDead(record.event.event_id, message);
+          await this.outbox.markDead(record.event.event_id, record.claim_token, message);
           result.dead += 1;
           this.metrics.outcome("failed_permanent");
         } else {
           const delay = this.baseBackoffMs * 2 ** record.attempts;
           await this.outbox.markFailed(
             record.event.event_id,
+            record.claim_token,
             message,
             new Date(now.getTime() + delay),
           );

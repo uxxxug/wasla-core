@@ -25,6 +25,7 @@ import type { AuditLog } from "../audit/audit.js";
 import type { Clock } from "../clock.js";
 import { conflict, invalid } from "../errors.js";
 import type { EventBus } from "../eventing/bus.js";
+import { UNFENCED } from "../eventing/fencing.js";
 import type { InboxStore } from "../eventing/inbox.js";
 import type {
   InboundEventStore,
@@ -501,7 +502,12 @@ export class ReplayService {
       // Now true, and it stops the dispatcher from doing the same work again.
       // Only ever moves a row forward: replay never returns a `processed` row to
       // `pending`, and never resets `attempts`.
-      await this.store.markProcessed(record.event.event_id);
+      //
+      // `UNFENCED`: replay holds no claim, by design — it selects `pending` and
+      // `dead` rows and advances them on an operator's authority, not a worker's
+      // (B-26). The one caller in CORE entitled to bypass the fence. The result is
+      // ignored for the same reason: there is no claim that could have been lost.
+      await this.store.markProcessed(record.event.event_id, UNFENCED);
     }
   }
 

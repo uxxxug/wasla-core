@@ -17,6 +17,14 @@ export interface DispatcherResult {
    * says nothing lived long enough to judge it.
    */
   reclaim_exhausted: number;
+  /**
+   * Acknowledgements the store refused because this dispatcher no longer held the
+   * claim (B-26). It stalled past its lease and recovery gave the row away; the
+   * event was still put on the bus, but the row's outcome now belongs to whoever
+   * holds the claim. Refusing here is what stops a stale success from marking an
+   * event processed whose newer attempt actually failed.
+   */
+  fenced: number;
 }
 
 /**
@@ -58,6 +66,7 @@ export class InboundDispatcher {
       dead: 0,
       reclaimed: 0,
       reclaim_exhausted: 0,
+      fenced: 0,
     };
     // Recovery first, so a restart picks up what the previous process abandoned
     // before it starts adding work of its own. This is the only place an expired
@@ -84,9 +93,17 @@ export class InboundDispatcher {
       const stop = this.metrics.startItem();
       try {
         await this.bus.publish(record.event);
-        await this.store.markProcessed(record.event.event_id);
-        result.processed += 1;
-        this.metrics.outcome("completed");
+        // Nothing here is transactional, so a refusal is reported and dropped
+        // rather than thrown: unlike the relay there are no sibling writes to roll
+        // back (B-26).
+        const applied = await this.store.markProcessed(record.event.event_id, record.claim_token);
+        if (applied) {
+          result.processed += 1;
+          this.metrics.outcome("completed");
+        } else {
+          result.fenced += 1;
+          this.metrics.outcome("fenced");
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (record.attempts + 1 >= this.maxAttempts) {
@@ -94,18 +111,33 @@ export class InboundDispatcher {
           // process is an operational fact someone has to see; the row keeps
           // the envelope and the last error so it can be replayed by hand once
           // the cause is fixed.
-          await this.store.markDead(record.event.event_id, message);
-          result.dead += 1;
-          this.metrics.outcome("failed_permanent");
+          const applied = await this.store.markDead(
+            record.event.event_id,
+            record.claim_token,
+            message,
+          );
+          if (applied) {
+            result.dead += 1;
+            this.metrics.outcome("failed_permanent");
+          } else {
+            result.fenced += 1;
+            this.metrics.outcome("fenced");
+          }
         } else {
           const delay = this.baseBackoffMs * 2 ** record.attempts;
-          await this.store.markFailed(
+          const applied = await this.store.markFailed(
             record.event.event_id,
+            record.claim_token,
             message,
             new Date(now.getTime() + delay),
           );
-          result.failed += 1;
-          this.metrics.outcome("retried");
+          if (applied) {
+            result.failed += 1;
+            this.metrics.outcome("retried");
+          } else {
+            result.fenced += 1;
+            this.metrics.outcome("fenced");
+          }
         }
       } finally {
         stop();
