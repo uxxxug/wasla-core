@@ -8,7 +8,7 @@ import type {
   InboundSelection,
   InboundStatus,
 } from "./ingress.js";
-import { tallyRows } from "./queue-counts.js";
+import { tallyRows, type CountRow } from "./queue-counts.js";
 
 interface InboundRow {
   event_id: string;
@@ -26,6 +26,7 @@ interface InboundRow {
   last_error: string | null;
   next_attempt_at: Date;
   received_at: Date;
+  claimed_at: Date | null;
 }
 
 function toRecord(row: InboundRow): InboundRecord {
@@ -48,12 +49,18 @@ function toRecord(row: InboundRow): InboundRecord {
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
     received_at: isoRequired(row.received_at),
+    claimed_at: iso(row.claimed_at),
   };
 }
 
+/** The insert list. Positional, so `claimed_at` stays out of it: a newly accepted
+ * event is by definition unclaimed and the column defaults to null. */
 const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlation_id,
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at,
   received_at`;
+
+/** Everything a read returns, including the claim (B-24). */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at`;
 
 /**
  * Durable ingress store on Postgres.
@@ -95,7 +102,7 @@ export class PgInboundEventStore implements InboundEventStore {
 
   async get(eventId: string): Promise<InboundRecord | undefined> {
     const result = await this.pool.query<InboundRow>(
-      `select ${COLUMNS} from inbound_event where event_id = $1`,
+      `select ${SELECT_COLUMNS} from inbound_event where event_id = $1`,
       [eventId],
     );
     const row = result.rows[0];
@@ -115,30 +122,54 @@ export class PgInboundEventStore implements InboundEventStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half: `claimed_at` says which of the two meanings
+   * `next_attempt_at` currently carries, and this query takes only rows where it
+   * is null. A row held by a dispatcher that died is therefore no longer
+   * silently re-served when its lease runs out — `reclaimExpired` frees it, and
+   * counts it, which is what makes a dying dispatcher visible instead of slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `update inbound_event set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
+      `update inbound_event set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                                claimed_at = $1
        where event_id in (
          select event_id from inbound_event
-         where status = 'pending' and next_attempt_at <= $1
+         where status = 'pending' and claimed_at is null and next_attempt_at <= $1
          order by next_attempt_at, received_at
          limit $2
          for update skip locked
        )
-       returning ${COLUMNS}`,
+       returning ${SELECT_COLUMNS}`,
       [iso(now), limit, String(leaseMs)],
     );
     return result.rows.map(toRecord);
   }
 
+  /** See `InboundEventStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    const result = await this.pool.query(
+      `update inbound_event
+          set claimed_at = null,
+              next_attempt_at = $1,
+              last_error = 'abandoned claim reclaimed after attempt ' || attempts
+       where event_id in (
+         select event_id from inbound_event
+         where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
+         order by next_attempt_at
+         limit $2
+         for update skip locked
+       )`,
+      [iso(now), limit],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async markProcessed(eventId: string): Promise<void> {
     await this.pool.query(
       `update inbound_event
-       set status = 'processed', last_error = null, processed_at = $2
+       set status = 'processed', last_error = null, processed_at = $2, claimed_at = null
        where event_id = $1`,
       [eventId, this.clock.now().toISOString()],
     );
@@ -147,7 +178,9 @@ export class PgInboundEventStore implements InboundEventStore {
   async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
     await this.pool.query(
       `update inbound_event
-       set attempts = attempts + 1, last_error = $2, next_attempt_at = $3
+       -- Clearing the claim is what puts next_attempt_at back to meaning a retry
+       -- schedule; leaving it set would make the retry look like a lease.
+       set attempts = attempts + 1, last_error = $2, next_attempt_at = $3, claimed_at = null
        where event_id = $1`,
       [eventId, error, iso(nextAttemptAt)],
     );
@@ -156,25 +189,30 @@ export class PgInboundEventStore implements InboundEventStore {
   async markDead(eventId: string, error: string): Promise<void> {
     await this.pool.query(
       `update inbound_event
-       set status = 'dead', attempts = attempts + 1, last_error = $2
+       set status = 'dead', attempts = attempts + 1, last_error = $2, claimed_at = null
        where event_id = $1`,
       [eventId, error],
     );
   }
 
   async counts(): Promise<Record<string, number>> {
-    const result = await this.pool.query<{ status: InboundStatus; total: string; retrying: string }>(
+    const result = await this.pool.query<CountRow>(
       `select status,
               count(*) as total,
-              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at > $1) as in_flight,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at <= $1) as abandoned
        from inbound_event group by status`,
+      [iso(this.clock.now())],
     );
     return tallyRows(result.rows, ["pending", "processed", "dead"]);
   }
 
   async byStatus(status: InboundStatus): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `select ${COLUMNS} from inbound_event where status = $1 order by received_at`,
+      `select ${SELECT_COLUMNS} from inbound_event where status = $1 order by received_at`,
       [status],
     );
     return result.rows.map(toRecord);
@@ -182,7 +220,7 @@ export class PgInboundEventStore implements InboundEventStore {
 
   async all(): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `select ${COLUMNS} from inbound_event order by received_at`,
+      `select ${SELECT_COLUMNS} from inbound_event order by received_at`,
     );
     return result.rows.map(toRecord);
   }
@@ -238,7 +276,7 @@ export class PgInboundEventStore implements InboundEventStore {
     }
     const clause = where.length > 0 ? `where ${where.join(" and ")}` : "";
     const result = await this.pool.query<InboundRow>(
-      `select ${COLUMNS} from inbound_event ${clause}
+      `select ${SELECT_COLUMNS} from inbound_event ${clause}
        order by received_at, event_id
        limit ${bind(selection.limit)}`,
       values,

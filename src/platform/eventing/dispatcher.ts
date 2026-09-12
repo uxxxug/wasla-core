@@ -7,6 +7,8 @@ export interface DispatcherResult {
   processed: number;
   failed: number;
   dead: number;
+  /** Rows a previous process claimed and never acknowledged (B-24). */
+  reclaimed: number;
 }
 
 /**
@@ -37,8 +39,16 @@ export class InboundDispatcher {
 
   async drainOnce(limit = 100): Promise<DispatcherResult> {
     const now = this.clock.now();
+    const result: DispatcherResult = { processed: 0, failed: 0, dead: 0, reclaimed: 0 };
+    // Recovery first, so a restart picks up what the previous process abandoned
+    // before it starts adding work of its own. This is the only place an expired
+    // lease is directly observable for this worker: the row was claimed by some
+    // process that never acknowledged it (B-24). Before `claimed_at` existed the
+    // row simply became due again and the death of a worker was indistinguishable
+    // from an event politely asking to be retried.
+    result.reclaimed = await this.store.reclaimExpired(now, limit);
+    this.metrics.outcome("reclaimed", result.reclaimed);
     const due = await this.store.claimDue(now, limit);
-    const result: DispatcherResult = { processed: 0, failed: 0, dead: 0 };
     this.metrics.claimed(due.length);
 
     for (const record of due) {

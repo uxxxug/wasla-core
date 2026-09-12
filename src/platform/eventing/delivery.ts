@@ -37,6 +37,16 @@ export interface EventDelivery {
   next_attempt_at: string;
   created_at: string;
   delivered_at: string | null;
+  /**
+   * When a worker claimed this delivery, or null when nobody holds it (B-24).
+   *
+   * While it is null, `next_attempt_at` is a retry schedule; while it is set,
+   * `next_attempt_at` is a lease expiry. Without the distinction a delivery held
+   * by a worker that died was indistinguishable from one waiting to be retried,
+   * so an abandoned claim could not be counted and nothing could answer "which
+   * deliveries are stuck".
+   */
+  claimed_at: string | null;
 }
 
 export interface DeliveryStore {
@@ -55,6 +65,18 @@ export interface DeliveryStore {
   queue(delivery: EventDelivery, scope?: TransactionScope): Promise<boolean>;
   /** Leases due deliveries so two workers cannot send the same one (B-22). */
   claimDue(now: Date, limit: number, leaseMs?: number): Promise<EventDelivery[]>;
+  /**
+   * Returns deliveries whose lease ran out to the pending pool and reports how
+   * many (B-24). The only thing that frees a delivery abandoned by a dead
+   * worker, because `claimDue` refuses claimed rows. Does not touch `attempts`:
+   * an abandoned attempt was never observed to fail, and charging it against the
+   * retry budget would let a rolling deploy dead-letter healthy deliveries.
+   *
+   * Nothing here re-sends. A delivery whose worker died mid-request may have
+   * reached the subscriber, which is why every CORE webhook carries the event id
+   * and subscribers are required to be idempotent (see `docs/outbound-delivery.md`).
+   */
+  reclaimExpired(now: Date, limit?: number): Promise<number>;
   markDelivered(deliveryId: string, status: number): Promise<void>;
   markFailed(
     deliveryId: string,
@@ -70,9 +92,12 @@ export interface DeliveryStore {
    * gauge sampler and fetching every pending row to take its `length` is how a
    * readiness probe becomes a table scan.
    *
-   * `retrying` is derived here, at read time, from the same rows: it is not a
-   * status any row carries and must never become a second store competing with
-   * the queue for the truth.
+   * Also reports `in_flight` and `abandoned`: pending deliveries a worker is
+   * holding, split by whether the lease has run out (B-24).
+   *
+   * All three are derived here, at read time, from the same rows: none is a
+   * status any row carries, and none must become a second store competing with
+   * the queue for the truth. They are subsets of `pending`, not additions to it.
    */
   counts(): Promise<Record<string, number>>;
   forEvent(eventId: string): Promise<EventDelivery[]>;
@@ -82,6 +107,15 @@ export interface DeliveryStore {
 export class InMemoryDeliveryStore implements DeliveryStore {
   private subscriptions = new Map<string, EventSubscription>();
   private deliveries = new Map<string, EventDelivery>();
+
+  /**
+   * The clock is required, not optional. `counts()` has to cut the claimed rows
+   * at a point in time, and `markDelivered` has to stamp one; a store that read
+   * the wall clock while the worker beside it read a test clock would report
+   * different things than Postgres for the same rows, which is exactly the
+   * backend divergence B-12 is about.
+   */
+  constructor(private readonly clock: Clock) {}
 
   async insertSubscription(
     subscription: EventSubscription,
@@ -160,22 +194,53 @@ export class InMemoryDeliveryStore implements DeliveryStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half: `claimed_at` says which of the two meanings
+   * `next_attempt_at` currently carries, and this query takes only rows where it
+   * is null. A delivery held by a worker that died is therefore no longer
+   * silently re-served when its lease runs out — `reclaimExpired` frees it, and
+   * counts it, which is what makes a dying worker visible instead of merely slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<EventDelivery[]> {
     const due = [...this.deliveries.values()]
-      .filter((d) => d.status === "pending" && new Date(d.next_attempt_at) <= now)
+      .filter((d) => d.status === "pending" && d.claimed_at === null && new Date(d.next_attempt_at) <= now)
       .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
       .slice(0, limit);
+    // The claimed rows, not the pre-claim ones: Postgres returns the updated
+    // rows and the two backends must not disagree about what a claim returns
+    // (B-12).
+    const claimed: EventDelivery[] = [];
     for (const delivery of due) {
-      this.deliveries.set(delivery.delivery_id, {
+      const next: EventDelivery = {
         ...delivery,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
-      });
+        claimed_at: now.toISOString(),
+      };
+      this.deliveries.set(delivery.delivery_id, next);
+      claimed.push(next);
     }
-    return due;
+    return claimed;
+  }
+
+  /** See `DeliveryStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    let reclaimed = 0;
+    for (const delivery of this.deliveries.values()) {
+      if (reclaimed >= limit) break;
+      if (delivery.status !== "pending" || delivery.claimed_at === null) continue;
+      if (new Date(delivery.next_attempt_at).getTime() > now.getTime()) continue;
+      this.deliveries.set(delivery.delivery_id, {
+        ...delivery,
+        claimed_at: null,
+        // Due immediately: it already waited out a whole lease for a worker that
+        // never came back.
+        next_attempt_at: now.toISOString(),
+        last_error: `abandoned claim reclaimed after attempt ${delivery.attempts}`,
+      });
+      reclaimed += 1;
+    }
+    return reclaimed;
   }
 
   async markDelivered(deliveryId: string, status: number): Promise<void> {
@@ -187,7 +252,13 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       attempts: existing.attempts + 1,
       last_error: null,
       last_status: status,
-      delivered_at: existing.next_attempt_at,
+      // The clock, not `next_attempt_at`. Since B-22 put the lease on
+      // `next_attempt_at`, reading it here stamped `delivered_at` one whole
+      // lease into the future — a delivery that had just succeeded claimed to
+      // have been delivered thirty seconds from now, and only on this backend.
+      // Postgres always used its clock here (B-12).
+      delivered_at: this.clock.now().toISOString(),
+      claimed_at: null,
     });
   }
 
@@ -205,6 +276,9 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       last_error: error,
       last_status: status,
       next_attempt_at: nextAttemptAt.toISOString(),
+      // The claim is over. `next_attempt_at` goes back to meaning a retry
+      // schedule, which it can only do once nobody holds the row.
+      claimed_at: null,
     });
   }
 
@@ -217,11 +291,16 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       attempts: existing.attempts + 1,
       last_error: error,
       last_status: status,
+      claimed_at: null,
     });
   }
 
   async counts(): Promise<Record<string, number>> {
-    return tallyByStatus([...this.deliveries.values()], ["pending", "delivered", "dead"]);
+    return tallyByStatus(
+      [...this.deliveries.values()],
+      ["pending", "delivered", "dead"],
+      this.clock.now(),
+    );
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
@@ -359,6 +438,7 @@ export class DeliveryFanOut {
           next_attempt_at: now,
           created_at: now,
           delivered_at: null,
+          claimed_at: null,
         },
         scope,
       );
@@ -375,6 +455,8 @@ export interface DeliveryWorkerResult {
   delivered: number;
   failed: number;
   dead: number;
+  /** Deliveries a previous process claimed and never acknowledged (B-24). */
+  reclaimed: number;
 }
 
 /**
@@ -403,8 +485,16 @@ export class DeliveryWorker {
 
   async drainOnce(limit = 100): Promise<DeliveryWorkerResult> {
     const now = this.clock.now();
+    const result: DeliveryWorkerResult = { delivered: 0, failed: 0, dead: 0, reclaimed: 0 };
+    // Recovery first, so a restart picks up what the previous process abandoned
+    // before it starts adding work of its own. This is the only place an expired
+    // lease is directly observable for this worker: the delivery was claimed by
+    // some process that never acknowledged it (B-24). Before `claimed_at` existed
+    // the row simply became due again and the death of a worker mid-request was
+    // indistinguishable from a subscriber that asked to be retried.
+    result.reclaimed = await this.store.reclaimExpired(now, limit);
+    this.metrics.outcome("reclaimed", result.reclaimed);
     const due = await this.store.claimDue(now, limit);
-    const result: DeliveryWorkerResult = { delivered: 0, failed: 0, dead: 0 };
     this.metrics.claimed(due.length);
 
     for (const delivery of due) {

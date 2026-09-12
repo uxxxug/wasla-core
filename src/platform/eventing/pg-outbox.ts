@@ -3,7 +3,7 @@ import { iso, isoRequired, runner, type Queryable } from "../persistence/postgre
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import type { OutboxRecord, OutboxStatus, OutboxStore } from "./outbox.js";
-import { tallyRows } from "./queue-counts.js";
+import { tallyRows, type CountRow } from "./queue-counts.js";
 
 interface OutboxRow {
   event_id: string;
@@ -20,6 +20,7 @@ interface OutboxRow {
   attempts: number;
   last_error: string | null;
   next_attempt_at: Date;
+  claimed_at: Date | null;
 }
 
 function toRecord(row: OutboxRow): OutboxRecord {
@@ -41,11 +42,17 @@ function toRecord(row: OutboxRow): OutboxRecord {
     attempts: row.attempts,
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
+    claimed_at: iso(row.claimed_at),
   };
 }
 
+/** The insert list. Positional, so `claimed_at` stays out of it: a new row is by
+ * definition unclaimed and the column defaults to null. */
 const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlation_id,
   causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at`;
+
+/** Everything a read returns, including the claim (B-24). */
+const SELECT_COLUMNS = `${COLUMNS}, claimed_at`;
 
 /**
  * Durable outbox (ADR 0009).
@@ -88,7 +95,7 @@ export class PgOutbox implements OutboxStore {
 
   async get(eventId: string): Promise<OutboxRecord | undefined> {
     const result = await this.pool.query<OutboxRow>(
-      `select ${COLUMNS} from outbox where event_id = $1`,
+      `select ${SELECT_COLUMNS} from outbox where event_id = $1`,
       [eventId],
     );
     const row = result.rows[0];
@@ -108,37 +115,69 @@ export class PgOutbox implements OutboxStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half of that: `claimed_at` says which of the two
+   * meanings `next_attempt_at` currently carries, and this query takes only rows
+   * where it is null. A row held by a process that died is therefore no longer
+   * silently re-served when its lease runs out — `reclaimExpired` frees it, and
+   * counts it, which is what makes a dying worker visible instead of merely slow.
+   *
+   * `for update skip locked` still does the work of keeping two simultaneous
+   * claims apart; `claimed_at` is about the interval *after* the statement
+   * commits, which no row lock covers.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
-      `update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
+      `update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                         claimed_at = $1
        where event_id in (
          select event_id from outbox
-         where status = 'pending' and next_attempt_at <= $1
+         where status = 'pending' and claimed_at is null and next_attempt_at <= $1
          order by next_attempt_at, created_at
          limit $2
          for update skip locked
        )
-       returning ${COLUMNS}`,
+       returning ${SELECT_COLUMNS}`,
       [iso(now), limit, String(leaseMs)],
     );
     return result.rows.map(toRecord);
   }
 
+  /** See `OutboxStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    const result = await this.pool.query(
+      `update outbox
+          set claimed_at = null,
+              next_attempt_at = $1,
+              last_error = 'abandoned claim reclaimed after attempt ' || attempts
+       where event_id in (
+         select event_id from outbox
+         where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
+         order by next_attempt_at
+         limit $2
+         for update skip locked
+       )`,
+      [iso(now), limit],
+    );
+    return result.rowCount ?? 0;
+  }
+
   /** Takes a scope: it commits with the outbound delivery rows it fans out to. */
   async markPublished(eventId: string, scope: TransactionScope = NO_SCOPE): Promise<void> {
     await runner(this.pool, scope).query(
-      `update outbox set status = 'published', last_error = null where event_id = $1`,
+      `update outbox set status = 'published', last_error = null, claimed_at = null
+       where event_id = $1`,
       [eventId],
     );
   }
 
   async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
     await this.pool.query(
-      `update outbox set attempts = attempts + 1, last_error = $2, next_attempt_at = $3
+      // Clearing the claim is what puts `next_attempt_at` back to meaning a
+      // retry schedule; leaving it set would make the retry look like a lease.
+      `update outbox set attempts = attempts + 1, last_error = $2, next_attempt_at = $3,
+                         claimed_at = null
        where event_id = $1`,
       [eventId, error, iso(nextAttemptAt)],
     );
@@ -146,7 +185,8 @@ export class PgOutbox implements OutboxStore {
 
   async markDead(eventId: string, error: string): Promise<void> {
     await this.pool.query(
-      `update outbox set attempts = attempts + 1, status = 'dead', last_error = $2
+      `update outbox set attempts = attempts + 1, status = 'dead', last_error = $2,
+                         claimed_at = null
        where event_id = $1`,
       [eventId, error],
     );
@@ -154,24 +194,29 @@ export class PgOutbox implements OutboxStore {
 
   async all(): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
-      `select ${COLUMNS} from outbox order by created_at, event_id`,
+      `select ${SELECT_COLUMNS} from outbox order by created_at, event_id`,
     );
     return result.rows.map(toRecord);
   }
 
   async counts(): Promise<Record<string, number>> {
-    const result = await this.pool.query<{ status: OutboxStatus; total: string; retrying: string }>(
+    const result = await this.pool.query<CountRow>(
       `select status,
               count(*) as total,
-              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at > $1) as in_flight,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at <= $1) as abandoned
        from outbox group by status`,
+      [iso(this.clock.now())],
     );
     return tallyRows(result.rows, ["pending", "published", "dead"]);
   }
 
   async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
-      `select ${COLUMNS} from outbox where status = $1 order by created_at, event_id`,
+      `select ${SELECT_COLUMNS} from outbox where status = $1 order by created_at, event_id`,
       [status],
     );
     return result.rows.map(toRecord);

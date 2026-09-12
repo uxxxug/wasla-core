@@ -28,6 +28,16 @@ export interface InboundRecord {
    * a late event from an old one.
    */
   received_at: string;
+  /**
+   * When a dispatcher claimed this row, or null when nobody holds it (B-24).
+   *
+   * While it is null, `next_attempt_at` is a retry schedule; while it is set,
+   * `next_attempt_at` is a lease expiry. Without the distinction a row held by a
+   * dispatcher that died was indistinguishable from a row waiting to be retried,
+   * so an abandoned claim could not be counted and nothing could answer "what is
+   * stuck".
+   */
+  claimed_at: string | null;
 }
 
 /**
@@ -71,6 +81,14 @@ export interface InboundEventStore {
   get(eventId: string): Promise<InboundRecord | undefined>;
   /** Leases due records so two dispatchers cannot claim the same work (B-22). */
   claimDue(now: Date, limit: number, leaseMs?: number): Promise<InboundRecord[]>;
+  /**
+   * Returns rows whose lease ran out to the pending pool and reports how many
+   * (B-24). The only thing that frees a row abandoned by a dead dispatcher,
+   * because `claimDue` refuses claimed rows. Does not touch `attempts`: an
+   * abandoned attempt was never observed to fail, and charging it against the
+   * retry budget would let a rolling deploy dead-letter healthy events.
+   */
+  reclaimExpired(now: Date, limit?: number): Promise<number>;
   markProcessed(eventId: string): Promise<void>;
   markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
   markDead(eventId: string, error: string): Promise<void>;
@@ -82,9 +100,12 @@ export interface InboundEventStore {
    * gauge sampler and fetching every pending row to take its `length` is how a
    * readiness probe becomes a table scan.
    *
-   * `retrying` is derived here, at read time, from the same rows: it is not a
-   * status any row carries and must never become a second store competing with
-   * the queue for the truth.
+   * Also reports `in_flight` and `abandoned`: pending rows a dispatcher is
+   * holding, split by whether the lease has run out (B-24).
+   *
+   * All three are derived here, at read time, from the same rows: none is a
+   * status any row carries, and none must become a second store competing with
+   * the queue for the truth. They are subsets of `pending`, not additions to it.
    */
   counts(): Promise<Record<string, number>>;
   /**
@@ -154,6 +175,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       last_error: null,
       next_attempt_at: now,
       received_at: now,
+      claimed_at: null,
     });
     return true;
   }
@@ -175,28 +197,59 @@ export class InMemoryInboundEventStore implements InboundEventStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half: `claimed_at` says which of the two meanings
+   * `next_attempt_at` currently carries, and this query takes only rows where it
+   * is null. A row held by a dispatcher that died is therefore no longer
+   * silently re-served when its lease runs out — `reclaimExpired` frees it, and
+   * counts it, which is what makes a dying dispatcher visible instead of slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
     const due = [...this.records.values()]
-      .filter((r) => r.status === "pending" && new Date(r.next_attempt_at) <= now)
+      .filter((r) => r.status === "pending" && r.claimed_at === null && new Date(r.next_attempt_at) <= now)
       .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
       .slice(0, limit);
+    // The claimed records, not the pre-claim ones: Postgres returns the updated
+    // rows and the two backends must not disagree about what a claim returns
+    // (B-12).
+    const claimed: InboundRecord[] = [];
     for (const record of due) {
-      this.records.set(record.event.event_id, {
+      const next: InboundRecord = {
         ...record,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
-      });
+        claimed_at: now.toISOString(),
+      };
+      this.records.set(record.event.event_id, next);
+      claimed.push(next);
     }
-    return due;
+    return claimed;
+  }
+
+  /** See `InboundEventStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    let reclaimed = 0;
+    for (const record of this.records.values()) {
+      if (reclaimed >= limit) break;
+      if (record.status !== "pending" || record.claimed_at === null) continue;
+      if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
+      this.records.set(record.event.event_id, {
+        ...record,
+        claimed_at: null,
+        // Due immediately: the row already waited out a whole lease for a
+        // dispatcher that never came back.
+        next_attempt_at: now.toISOString(),
+        last_error: `abandoned claim reclaimed after attempt ${record.attempts}`,
+      });
+      reclaimed += 1;
+    }
+    return reclaimed;
   }
 
   async markProcessed(eventId: string): Promise<void> {
     const record = this.records.get(eventId);
     if (!record) return;
-    this.records.set(eventId, { ...record, status: "processed", last_error: null });
+    this.records.set(eventId, { ...record, status: "processed", last_error: null, claimed_at: null });
   }
 
   async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
@@ -207,6 +260,9 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       attempts: record.attempts + 1,
       last_error: error,
       next_attempt_at: nextAttemptAt.toISOString(),
+      // The claim is over. `next_attempt_at` goes back to meaning a retry
+      // schedule, which it can only do once nobody holds the row.
+      claimed_at: null,
     });
   }
 
@@ -218,6 +274,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       status: "dead",
       attempts: record.attempts + 1,
       last_error: error,
+      claimed_at: null,
     });
   }
 
@@ -230,7 +287,11 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   }
 
   async counts(): Promise<Record<string, number>> {
-    return tallyByStatus([...this.records.values()], ["pending", "processed", "dead"]);
+    return tallyByStatus(
+      [...this.records.values()],
+      ["pending", "processed", "dead"],
+      this.clock.now(),
+    );
   }
 
   async select(selection: InboundSelection): Promise<InboundRecord[]> {

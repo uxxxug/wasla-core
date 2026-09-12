@@ -1,7 +1,7 @@
 import { iso, isoRequired, runner, type Queryable } from "../persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
-import { tallyRows } from "./queue-counts.js";
+import { tallyRows, type CountRow } from "./queue-counts.js";
 import type {
   DeliveryStatus,
   DeliveryStore,
@@ -30,6 +30,7 @@ interface DeliveryRow {
   next_attempt_at: Date;
   created_at: Date;
   delivered_at: Date | null;
+  claimed_at: Date | null;
 }
 
 const toSubscription = (row: SubscriptionRow): EventSubscription => ({
@@ -54,12 +55,18 @@ const toDelivery = (row: DeliveryRow): EventDelivery => ({
   next_attempt_at: isoRequired(row.next_attempt_at),
   created_at: isoRequired(row.created_at),
   delivered_at: row.delivered_at === null ? null : isoRequired(row.delivered_at),
+  claimed_at: iso(row.claimed_at),
 });
 
 const SUB_COLUMNS = `subscription_id, subscriber, event_type, endpoint_url,
   signing_secret, active, created_at`;
+/** The insert list. Positional, so `claimed_at` stays out of it: a newly queued
+ * delivery is by definition unclaimed and the column defaults to null. */
 const DEL_COLUMNS = `delivery_id, event_id, subscription_id, status, attempts,
   last_error, last_status, next_attempt_at, created_at, delivered_at`;
+
+/** Everything a read returns, including the claim (B-24). */
+const DEL_SELECT_COLUMNS = `${DEL_COLUMNS}, claimed_at`;
 
 export class PgDeliveryStore implements DeliveryStore {
   constructor(
@@ -169,31 +176,55 @@ export class PgDeliveryStore implements DeliveryStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half: `claimed_at` says which of the two meanings
+   * `next_attempt_at` currently carries, and this query takes only rows where it
+   * is null. A delivery held by a worker that died is therefore no longer
+   * silently re-served when its lease runs out — `reclaimExpired` frees it, and
+   * counts it, which is what makes a dying worker visible instead of merely slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `update event_delivery set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
+      `update event_delivery set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                                 claimed_at = $1
        where delivery_id in (
          select delivery_id from event_delivery
-         where status = 'pending' and next_attempt_at <= $1
+         where status = 'pending' and claimed_at is null and next_attempt_at <= $1
          order by next_attempt_at, created_at
          limit $2
          for update skip locked
        )
-       returning ${DEL_COLUMNS}`,
+       returning ${DEL_SELECT_COLUMNS}`,
       [iso(now), limit, String(leaseMs)],
     );
     return result.rows.map(toDelivery);
+  }
+
+  /** See `DeliveryStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    const result = await this.pool.query(
+      `update event_delivery
+          set claimed_at = null,
+              next_attempt_at = $1,
+              last_error = 'abandoned claim reclaimed after attempt ' || attempts
+       where delivery_id in (
+         select delivery_id from event_delivery
+         where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
+         order by next_attempt_at
+         limit $2
+         for update skip locked
+       )`,
+      [iso(now), limit],
+    );
+    return result.rowCount ?? 0;
   }
 
   async markDelivered(deliveryId: string, status: number): Promise<void> {
     await this.pool.query(
       `update event_delivery
        set status = 'delivered', attempts = attempts + 1, last_error = null,
-           last_status = $2, delivered_at = $3
+           last_status = $2, delivered_at = $3, claimed_at = null
        where delivery_id = $1`,
       [deliveryId, status, this.clock.now().toISOString()],
     );
@@ -207,7 +238,10 @@ export class PgDeliveryStore implements DeliveryStore {
   ): Promise<void> {
     await this.pool.query(
       `update event_delivery
-       set attempts = attempts + 1, last_error = $2, last_status = $3, next_attempt_at = $4
+       -- Clearing the claim is what puts next_attempt_at back to meaning a retry
+       -- schedule; leaving it set would make the retry look like a lease.
+       set attempts = attempts + 1, last_error = $2, last_status = $3, next_attempt_at = $4,
+           claimed_at = null
        where delivery_id = $1`,
       [deliveryId, error, status, iso(nextAttemptAt)],
     );
@@ -216,25 +250,31 @@ export class PgDeliveryStore implements DeliveryStore {
   async markDead(deliveryId: string, error: string, status: number | null): Promise<void> {
     await this.pool.query(
       `update event_delivery
-       set status = 'dead', attempts = attempts + 1, last_error = $2, last_status = $3
+       set status = 'dead', attempts = attempts + 1, last_error = $2, last_status = $3,
+           claimed_at = null
        where delivery_id = $1`,
       [deliveryId, error, status],
     );
   }
 
   async counts(): Promise<Record<string, number>> {
-    const result = await this.pool.query<{ status: DeliveryStatus; total: string; retrying: string }>(
+    const result = await this.pool.query<CountRow>(
       `select status,
               count(*) as total,
-              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at > $1) as in_flight,
+              count(*) filter (where status = 'pending' and claimed_at is not null
+                                 and next_attempt_at <= $1) as abandoned
        from event_delivery group by status`,
+      [iso(this.clock.now())],
     );
     return tallyRows(result.rows, ["pending", "delivered", "dead"]);
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_COLUMNS} from event_delivery where status = $1 order by created_at`,
+      `select ${DEL_SELECT_COLUMNS} from event_delivery where status = $1 order by created_at`,
       [status],
     );
     return result.rows.map(toDelivery);
@@ -242,7 +282,7 @@ export class PgDeliveryStore implements DeliveryStore {
 
   async forEvent(eventId: string): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_COLUMNS} from event_delivery where event_id = $1 order by created_at`,
+      `select ${DEL_SELECT_COLUMNS} from event_delivery where event_id = $1 order by created_at`,
       [eventId],
     );
     return result.rows.map(toDelivery);
@@ -250,7 +290,7 @@ export class PgDeliveryStore implements DeliveryStore {
 
   async all(): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_COLUMNS} from event_delivery order by created_at`,
+      `select ${DEL_SELECT_COLUMNS} from event_delivery order by created_at`,
     );
     return result.rows.map(toDelivery);
   }

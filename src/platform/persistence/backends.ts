@@ -92,7 +92,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     outbox: new InMemoryOutbox(clock),
     inbox: new InMemoryInbox(),
     inbound: new InMemoryInboundEventStore(clock),
-    delivery: new InMemoryDeliveryStore(),
+    delivery: new InMemoryDeliveryStore(clock),
     notification: new InMemoryNotificationStore(),
     boundary: new InMemoryTransactionBoundary(),
     replayLock: new InProcessReplayLock(),

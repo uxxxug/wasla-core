@@ -11,6 +11,18 @@ export interface OutboxRecord {
   attempts: number;
   last_error: string | null;
   next_attempt_at: string;
+  /**
+   * When a worker claimed this row, or null when nobody holds it (B-24).
+   *
+   * This is the column that tells the two meanings of `next_attempt_at` apart.
+   * While it is null, `next_attempt_at` is a retry schedule: the row is waiting
+   * for its time. While it is set, `next_attempt_at` is a lease expiry: a worker
+   * has the row and is expected back before then. Without it a row held by a
+   * process that died looked exactly like a row politely waiting to be retried,
+   * so lease expiry could not be counted and nothing could answer "what is
+   * stuck".
+   */
+  claimed_at: string | null;
 }
 
 /**
@@ -23,6 +35,19 @@ export interface OutboxStore {
   append(event: EventEnvelope, scope: TransactionScope): Promise<void>;
   /** Leases due records so two relays cannot claim the same work (B-22). */
   claimDue(now: Date, limit: number, leaseMs?: number): Promise<OutboxRecord[]>;
+  /**
+   * Returns rows whose lease ran out to the pending pool and reports how many
+   * (B-24). A worker that died mid-attempt left `claimed_at` set and a lease that
+   * has since expired; this is the only thing that frees such a row, because
+   * `claimDue` refuses claimed rows.
+   *
+   * Deliberately does not touch `attempts`: an attempt that was abandoned was
+   * never observed to fail, and charging it against the retry budget would let a
+   * rolling deploy dead-letter healthy events. The consequence — a row whose
+   * worker dies every time is retried for ever — is recorded as its own blocker
+   * rather than fixed by a side effect here.
+   */
+  reclaimExpired(now: Date, limit?: number): Promise<number>;
   /** One record by id. Outbound delivery needs the envelope long after it was published. */
   get(eventId: string): Promise<OutboxRecord | undefined>;
   markPublished(eventId: string, scope?: TransactionScope): Promise<void>;
@@ -36,9 +61,13 @@ export interface OutboxStore {
    * gauge sampler and fetching every pending row to take its `length` is how a
    * readiness probe becomes a table scan.
    *
-   * `retrying` is derived here, at read time, from the same rows: it is not a
-   * status any row carries and must never become a second store competing with
-   * the queue for the truth.
+   * Also reports `in_flight` and `abandoned`: pending rows a worker is holding,
+   * split by whether the lease has run out. Those two are how an operator asks
+   * what is being worked on and what is stuck (B-24).
+   *
+   * All three are derived here, at read time, from the same rows: none is a
+   * status any row carries, and none must become a second store competing with
+   * the queue for the truth. They are subsets of `pending`, not additions to it.
    */
   counts(): Promise<Record<string, number>>;
 }
@@ -56,6 +85,7 @@ export class InMemoryOutbox implements OutboxStore {
       attempts: 0,
       last_error: null,
       next_attempt_at: this.clock.now().toISOString(),
+      claimed_at: null,
     });
   }
 
@@ -76,25 +106,58 @@ export class InMemoryOutbox implements OutboxStore {
    * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
    * is not due again until then and a second worker's identical query does not
    * see it. `next_attempt_at` doubles as the lease expiry rather than a new
-   * column, so an abandoned claim comes back by the same clock that schedules
-   * retries — one timer, one truth. A worker that dies mid-attempt costs one
-   * lease of delay, which is the same trade every retry in CORE already makes.
+   * column, so the lease and the retry schedule are read off one timer.
+   *
+   * B-24 added the missing half of that: `claimed_at` says which of the two
+   * meanings `next_attempt_at` currently carries. A claim sets it, every
+   * acknowledgement clears it, and this query skips rows that still have it —
+   * so a row held by a dead process is no longer silently re-served when its
+   * lease runs out. `reclaimExpired` frees it and counts it, which is what makes
+   * a dying worker visible instead of merely slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const due: OutboxRecord[] = [];
     for (const record of this.records.values()) {
       if (record.status !== "pending") continue;
+      if (record.claimed_at !== null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
       // Written before the next iteration, with no await in between, so two
       // interleaved drains cannot both take it.
-      this.records.set(record.event.event_id, {
+      const claimed: OutboxRecord = {
         ...record,
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
-      });
-      due.push(record);
+        claimed_at: now.toISOString(),
+      };
+      this.records.set(record.event.event_id, claimed);
+      // The claimed record, not the pre-claim one: Postgres returns the updated
+      // row and the two backends must not disagree about what a claim returns
+      // (B-12). Callers read `event` and `attempts`, which the claim leaves
+      // alone.
+      due.push(claimed);
       if (due.length >= limit) break;
     }
     return due;
+  }
+
+  /** See `OutboxStore.reclaimExpired`. */
+  async reclaimExpired(now: Date, limit = 100): Promise<number> {
+    let reclaimed = 0;
+    for (const record of this.records.values()) {
+      if (reclaimed >= limit) break;
+      if (record.status !== "pending" || record.claimed_at === null) continue;
+      if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
+      this.records.set(record.event.event_id, {
+        ...record,
+        claimed_at: null,
+        // Due immediately. The row already waited out a whole lease for a worker
+        // that never came back; making it wait again would turn one crash into
+        // two delays.
+        next_attempt_at: now.toISOString(),
+        last_error: `abandoned claim reclaimed after attempt ${record.attempts}`,
+      });
+      reclaimed += 1;
+    }
+    return reclaimed;
   }
 
   /**
@@ -110,7 +173,7 @@ export class InMemoryOutbox implements OutboxStore {
     const record = this.records.get(eventId);
     if (!record) return;
     journalMapWrite(scope, this.records, eventId);
-    this.records.set(eventId, { ...record, status: "published", last_error: null });
+    this.records.set(eventId, { ...record, status: "published", last_error: null, claimed_at: null });
   }
 
   async markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void> {
@@ -121,6 +184,9 @@ export class InMemoryOutbox implements OutboxStore {
       attempts: record.attempts + 1,
       last_error: error,
       next_attempt_at: nextAttemptAt.toISOString(),
+      // The claim is over. `next_attempt_at` goes back to meaning a retry
+      // schedule, which it can only do once nobody holds the row.
+      claimed_at: null,
     });
   }
 
@@ -132,6 +198,7 @@ export class InMemoryOutbox implements OutboxStore {
       attempts: record.attempts + 1,
       status: "dead",
       last_error: error,
+      claimed_at: null,
     });
   }
 
@@ -144,6 +211,6 @@ export class InMemoryOutbox implements OutboxStore {
   }
 
   async counts(): Promise<Record<string, number>> {
-    return tallyByStatus([...this.records.values()]);
+    return tallyByStatus([...this.records.values()], undefined, this.clock.now());
   }
 }
