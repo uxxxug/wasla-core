@@ -3915,3 +3915,24 @@ multi-hold blocked; 5 waits on external adoption; 7 remains blocked on B-2/B-3
 and 9 on B-5/B-6. **B-2…B-6**, **B-14…B-20**, **B-30**, the new **B-31…B-34** and
 **D-6…D-8** are open owner decisions. No MOVE or MARKET code was read or written
 in this cycle.
+
+### CI verdict for this cycle — read, not assumed
+
+Head `069bd67` on `reputation-adr-0015`, pushed to `uxxxug/wasla-core`:
+
+| Run | Event | Verdict |
+|---|---|---|
+| `34716967545` | push | **success**, 38s |
+| `34716991234` | pull_request (PR #2 → `main`) | **success**, 32s |
+
+The `verify` job passes on both. What that verdict does **not** cover, stated so
+no later reader mistakes green for proof: CI sets no `DATABASE_URL`, so the 302
+database-backed assertions — every Postgres half of the dual-backend suites, the
+append-only trigger, both corrected `CHECK` constraints and the live-schema
+checks — are **skipped there** and were verified locally against PostgreSQL 18.6
+(687 passing). Migration 0018 has been applied and rolled forward locally only;
+no deployed database has run it. Per this repository's own rule, code and tests
+existing is not production proof.
+
+PR #1 (the reservation entry) was merged to `main` before implementation began;
+PR #2 carries the implementation and is open for review.
