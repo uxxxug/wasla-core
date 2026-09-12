@@ -16,7 +16,7 @@ record and is not restated here.
 | 0007 | No direct MOVE ↔ MARKET business communication | Governance gate; no MOVE/MARKET client exists in CORE | enforced |
 | 0008 | Closed list of synchronous paths | Only `/v1/access/check`, `/v1/sessions/current` exposed so far | enforced |
 | 0009 | Event backbone with outbox/inbox | `src/platform/eventing/*`, 12 passing tests | implemented |
-| 0010 | CORE degradation rules | not yet implemented | pending |
+| 0010 | CORE degradation rules | not implemented; what exists is fail-closed behaviour (canonical errors, backoff, leases, reclaim budgets, dead letters, `/ready`) rather than a degradation policy, and the ADR text is not in this repository | blocked — B-35 |
 | 0011 | Database ownership | `db/migrations/0001` contains CORE tables only; identifier types are recorded in `docs/identifiers.md` and asserted by `src/platform/ids.ts` | enforced |
 | 0012 | Pricing / regulatory | not implemented — regulatory policy is an open blocker | blocked |
 | 0013 | Subscription / entitlement in CORE | implemented | migration 0010, `src/modules/subscription/`, `docs/subscriptions.md`; policy gaps recorded as B-14…B-19 |
