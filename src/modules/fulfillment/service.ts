@@ -76,16 +76,26 @@ export interface FulfillmentPaymentPort {
     uow: UnitOfWork,
     input: { authorization_id: string; correlation_id: string },
   ): Promise<unknown>;
+  /**
+   * Releases whatever is still held and reports the hold as it now stands.
+   *
+   * The return value is not decoration. Since migration 0009 a void can close a
+   * hold that already moved money, and only money knows how much. A port that
+   * answered `unknown` forced fulfillment to assume nothing moved, which is how
+   * a partially captured hold came to be recorded as `released` — a settlement
+   * state whose documented meaning is that no money moved at all.
+   */
   voidWithin(
     uow: UnitOfWork,
     input: { authorization_id: string; reason: string; correlation_id: string },
-  ): Promise<unknown>;
+  ): Promise<{ status: string; captured_minor: number }>;
   /**
    * Reads a hold without changing it. Used at intake to refuse work that can
    * never be settled. Throws when the authorization does not exist.
    */
   getAuthorization?(authorizationId: string): Promise<{
     status: string;
+    captured_minor: number;
     expires_at: string | null;
   }>;
 }
@@ -506,6 +516,10 @@ export class FulfillmentService {
   /**
    * Releases the money hold and reports where the money ended up.
    *
+   * The money state it reports is derived from the hold money hands back, never
+   * assumed: a hold that had already captured part of its amount closes as
+   * `partially_captured`, not `released`.
+   *
    * A void that cannot be applied (for example because the hold was already
    * captured out of band) is NOT swallowed silently: the fulfillment is marked
    * `unsettled` and an audit record names the inconsistency, so closure still
@@ -520,12 +534,15 @@ export class FulfillmentService {
   ): Promise<SettlementState> {
     if (!this.payments || !fulfillment.payment_authorization_id) return "none";
     try {
-      await this.payments.voidWithin(uow, {
+      const hold = await this.payments.voidWithin(uow, {
         authorization_id: fulfillment.payment_authorization_id,
         reason,
         correlation_id: correlationId,
       });
-      return "released";
+      // `released` is a claim that no money moved. It is only true when the
+      // hold never captured anything; a hold that moved part of its amount and
+      // released the rest is a different fact and gets a different name.
+      return hold.captured_minor > 0 ? "partially_captured" : "released";
     } catch (err) {
       // Deliberately OUT of the unit of work (B-9). Nothing was mutated here,
       // so there is no change for this entry to be atomic with, and it is the
@@ -563,7 +580,7 @@ export class FulfillmentService {
     if (!this.payments?.getAuthorization) {
       return { usable: true, settlement: "held", reason: null };
     }
-    let authorization: { status: string; expires_at: string | null };
+    let authorization: { status: string; captured_minor: number; expires_at: string | null };
     try {
       authorization = await this.payments.getAuthorization(authorizationId);
     } catch {
@@ -573,6 +590,18 @@ export class FulfillmentService {
       // Money already moved for work that has not been coordinated yet: the
       // order is refused and the mismatch is surfaced for reconciliation.
       return { usable: false, settlement: "unsettled", reason: "payment_hold_already_captured" };
+    }
+    if (authorization.status === "partially_captured") {
+      // A closed hold that moved part of its amount. Refused for the same
+      // reason as a fully captured one — there is nothing left to guard the
+      // execution — but recorded as `partially_captured` rather than
+      // `released`, because money did move and this fulfillment must not claim
+      // otherwise.
+      return {
+        usable: false,
+        settlement: "partially_captured",
+        reason: "payment_hold_partially_captured",
+      };
     }
     if (authorization.status !== "authorized") {
       return { usable: false, settlement: "released", reason: "payment_hold_not_authorized" };

@@ -75,8 +75,10 @@ remote, pushes are fast-forward, and CI runs and passes there.
 
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
-against both. Migrations 0001–0007 are applied and verified on two real engines
-(PostgreSQL 18.4 locally, 17.6 managed), rollbacks included.
+against both. Migrations 0001–0011 are applied and verified on real engines
+(PostgreSQL 18.6 locally in the latest cycle, 18.4 and 17.6 managed earlier),
+rollbacks included — 0009 and 0011 verified as *refusing* to roll back while
+money history would be falsified by doing so.
 
 ## Remaining, in dependency order
 
@@ -87,7 +89,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | # | Milestone | Verified status | Evidence / what is missing |
 |---|---|---|---|
 | 1 | External event ingress and egress: MARKET and MOVE can reach CORE, and CORE can reach them | **CORE side complete** | Inbound: `POST /v1/events`, `inbound_event` (migration 0007), `InboundDispatcher`, trust boundary tied to the credential. Outbound: `event_subscription` + `event_delivery` (migration 0008), `DeliveryFanOut` committing with the outbox row, `DeliveryWorker` with failure classification, HMAC-signed bodies, operator-only subscription routes. 11 + 13 tests × 2 backends. What remains is not CORE's: MOVE and MARKET must stand up endpoints and deduplicate on `event_id` |
-| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete; multi-hold blocked — external dependency** | Migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. Multi-hold needs a MARKET contract decision — see "External dependencies" |
+| 2 | Settlement beyond one hold per fulfillment: partial capture, refunds, multi-hold | **Partial capture and refunds complete on both the money and the fulfillment side; multi-hold blocked — external dependency** | Migration 0011 finishes what 0009 started: `fulfillment.settlement_state` gained `partially_captured`, so a hold that moved part of the payer's money is no longer recorded as `released` — a value documented to mean no money moved. `FulfillmentPaymentPort.voidWithin` publishes `{ status, captured_minor }` instead of `unknown`, `release()` derives the state from it, `inspectHold()` has a `partially_captured` case, and the reconciliation read now surfaces money moved against work that did not complete (B-20). 18 tests × 2 backends. Earlier: migration 0009 splits the consent ceiling from the amounts that moved (`captured_minor`, `refunded_minor`), adds `partially_captured`, makes `ledger_transaction.authorization_id` a foreign key and enforces aggregate-vs-ledger agreement with two deferred constraint triggers. Service has `capture(amount?, capture_reference?)` and `refund`, both exactly-once on the ledger reference; `balance()` holds only the uncaptured remainder. `core.payment.refunded` contract published, `captured`/`voided` payloads extended. Routes: `POST .../capture` (optional body), `POST .../refund`. 15 tests × 2 backends. Multi-hold needs a MARKET contract decision — see "External dependencies" |
 | 3 | Subscriptions, plans, periods, entitlements (ADR 0013) | **Complete, except policy decisions that are not CORE's to make** | Migration 0010 adds `plan`, `plan_grant`, `subscription`, `subscription_period`, `usage_record` with RLS, an `EXCLUDE USING gist` constraint against overlapping periods, immutability triggers on an active plan's terms and grants, append-only triggers on usage, and a deferred constraint trigger reconciling a settled period against the hold that settled it. Module: `domain.ts` (entitlement derived, never stored), `repository.ts` + `pg-repository.ts`, `service.ts`, `http.ts`. Ten routes, `subscription.read` / `subscription.write` permissions, six event contracts. 23 tests × 2 backends. **No entitlement-check endpoint** — ADR 0008 requires a new ADR first (B-14). Proration, grace, trials, rollover and comped access are recorded as B-15…B-19 |
 | 4 | Channels and notifications; Telegram adapter | **Not started** | Telegram exists only as an identity channel type (correctly, per ADR 0004). No delivery path |
 | 5 | Publish and adopt the versioned contracts in MOVE and MARKET | **Blocked — external dependency** | 14 event schemas and the OpenAPI contract are published in-repo. Adoption is not CORE's to do |
@@ -146,6 +148,7 @@ Nothing.
 | B-17 | Trial periods undecided | No trial exists. A zero-amount plan is expressible and settles without an authorization, which is not the same thing as a trial that converts to a paid plan | An owner decision on trial length, conversion and what a lapsed trial entitles |
 | B-18 | Quota rollover versus reset undecided | Quota resets each period, because usage is counted per period. Unused allowance does not carry forward | An owner decision on whether unused allowance accumulates |
 | B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
+| B-20 | What is owed when work fails after part of the hold was already captured | CORE now records this truthfully as `settlement_state = 'partially_captured'` on a `failed`/`cancelled` fulfillment and reports it through `/v1/fulfillments/reconciliation/inconsistent`, so no case is silently lost. It does **not** refund, retain or split automatically. `MoneyService.refund` exists and is exactly-once, so any decision is executable the moment it is made | An owner decision: refund in full, retain as a cancellation fee, or split — and who is allowed to authorise it |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -172,8 +175,14 @@ Nothing.
 
 ## Tests that pass at this commit
 
-71 of 71 locally, across 11 files. Counted by running the suite at this commit,
-not carried over from a previous cycle.
+**341 of 341 across 23 files** with `DATABASE_URL` set (both backends), 185
+without. Counted by running the suite at this commit.
+
+The per-area list below was written when the suite stood at 71 tests across 11
+files and describes those cases only; it was never extended as later cycles
+added files. Each cycle section further down carries the tests it added, and
+those sections are the current record. The list is kept because the cases in it
+still exist and still pass, not because it is complete.
 
 - Eventing (12): envelope completeness, malformed envelope rejection,
   transaction rollback leaves no event, commit writes state and event together,
@@ -1275,3 +1284,153 @@ entries behind it — so the fixture goes through the real `MoneyService`.
   integration path, and no MARKET or MOVE code was touched.
 - **Answering entitlement across systems** is B-14 and needs an ADR before any
   endpoint exists.
+
+## Cycle 2026-09-12 — the fulfillment side of partial settlement (CORE-only agent)
+
+A CORE-only audit cycle. No MOVE or MARKET code was read or touched; the two
+external dependencies it surfaces are recorded below for their owning agents.
+
+### The audit came first, and the roadmap held up
+
+The instruction was not to trust this document. So the starting point was the
+code, the commits and the suite, on a real engine: PostgreSQL 18.6 provisioned
+locally, migrations 0001–0010 applied, **318 of 318 tests passing** at
+`f2c13a9` with `DATABASE_URL` set, `tsc --noEmit` clean, all four gates green.
+Every claim spot-checked in the "Remaining" table and the cycle sections matched
+the code. One stale claim was found — the "Tests that pass at this commit"
+header still said 71 of 71 across 11 files, four cycles out of date — and is
+corrected above rather than quietly deleted.
+
+### The defect: a settlement state that lied about money
+
+Migration 0009 made a hold capturable in legs and gave it a fourth status,
+`partially_captured`. The fulfillment row that binds money to execution was
+never widened to match. Its vocabulary stayed
+`none | held | captured | released | unsettled`, where `released` is documented
+in the domain as **"the hold was voided; no money moved"**.
+
+`FulfillmentPaymentPort.voidWithin` returned `Promise<unknown>`, so fulfillment
+could not ask how much had moved and assumed nothing had. Three reachable paths
+therefore recorded `released` over money that was gone. Reproduced on a real
+database before anything was changed, with 2 500 of a 6 000 hold captured:
+
+| # | Path | Recorded | Actual | Reconciliation saw |
+|---|---|---|---|---|
+| G-9 | `move.job.rejected` (or `cancel`) after a partial capture | `released` | `partially_captured`, `captured_minor = 2500`, wallet down 2 500 | nothing — `isFinanciallyConsistent` returned `true` |
+| G-10 | intake of an order whose hold had already closed part-captured | `released`, reason `payment_hold_not_authorized` | hold `partially_captured` | nothing |
+| G-11 | `move.job.completed` on a hold already closed | `released`, reason `payment_settlement_failed` | hold `partially_captured` | nothing |
+
+G-10's reason was also wrong on its own terms: the hold was not
+"not authorized", it was spent. The refusal was right; the explanation MARKET
+receives was not.
+
+The severity is in the last column. `listFinanciallyInconsistent()` returned
+zero rows in all three cases, and the closure event told MARKET the money had
+been returned. This is worse than an unsettled hold, which at least announces
+itself: CORE was asserting a false fact about money and the one mechanism built
+to catch that was structurally unable to see it.
+
+### The fix, and the seam it closes
+
+- `SettlementState` gains `partially_captured`, documented as the hold having
+  closed with part of the consented amount moved and the remainder released.
+- `voidWithin` now publishes `{ status, captured_minor }`. `MoneyService`
+  already returned `PaymentAuthorization`, so no money code changed — the port
+  was hiding information the implementation had all along. `release()` derives
+  `partially_captured` when `captured_minor > 0` and `released` otherwise, so
+  the state comes from what money reports rather than from what the call site
+  assumed.
+- `getAuthorization?` gains `captured_minor`; `inspectHold()` gains a
+  `partially_captured` case returning reason `payment_hold_partially_captured`.
+- `isFinanciallyConsistent`: `completed` accepts `partially_captured` (a job
+  that cost less than the ceiling); `failed`/`cancelled` does **not**, so those
+  cases surface in the reconciliation read.
+
+No contract was redesigned and no existing value changed meaning. The change is
+additive in both the schema and the published schemas, and the ordinary
+`released` path is asserted unchanged.
+
+### Why a truthful state is still reported as inconsistent
+
+`fulfillment_settlement_alignment_check` stores `partially_captured` against
+`failed` and `cancelled`, while `isFinanciallyConsistent` calls it inconsistent.
+That is deliberate and not a contradiction: one governs what is recordable, the
+other what needs a human. The payer has paid for work that did not complete, and
+whether that is refunded, retained as a cancellation fee or split is a policy
+decision CORE has not been given — recorded as **B-20**, not invented.
+
+Refusing to store the state would only push the service back to writing
+`released`, which is the falsehood being removed. Reporting it is the reversible
+direction: an operator can act on a case CORE surfaced and cannot act on one it
+hid.
+
+### Migration 0011
+
+Additive. Extends `fulfillment_settlement_state_check` and
+`fulfillment_settlement_alignment_check`, and widens the partial index behind
+the reconciliation read to `('unsettled', 'partially_captured')` — a partial
+index that excluded the row the read exists to find would have left it scanning.
+No column added, no data rewritten.
+
+The rollback **refuses** while any row is `partially_captured`, for the same
+reason 0009's does: there is no earlier value that states the fact truthfully.
+`released` claims nothing moved, `captured` claims all of it did. Verified by
+inserting such a row on the real database and watching the rollback abort by
+name, then verified again that it completes on a clean table.
+
+### Proven, not assumed
+
+The fix was reverted with the tests and the migration left in place: **12 of the
+18 new tests fail on both backends**, each on the specific state or event field
+it pins. The 6 that still pass are the regression guards — the plain `released`
+path, the remainder-capture path, and the two that check the TypeScript union,
+the CHECK constraint and both published schemas still declare one vocabulary.
+
+An existing schema test used `partially_captured` as its example of an *unknown*
+settlement state. It now asserts a genuinely unfamiliar value instead, and the
+accepted/refused pair lists were extended in both directions, including
+`coordinating`/`dispatched` against `partially_captured` being refused: open
+work may not claim a terminal money state.
+
+### Tests
+
+`tests/fulfillment-partial-settlement.test.ts` — 9 cases × 2 backends: a
+rejection after a partial capture recorded as `partially_captured` with the
+wallet balance proving 2 500 moved; the same case surfacing in the
+organization-scoped reconciliation read; `partially_captured` published on the
+closure contract MARKET consumes; a cancellation that moved nothing still
+recorded as `released` and still consistent; intake refusing an order whose hold
+had already closed part-captured, with the honest reason and no
+`core.fulfillment.created`; a success claim against a closed hold still failing
+but no longer claiming the money never left; a partial capture that leaves the
+hold open still capturing the remainder on success and settling as `captured`;
+and a completed fulfillment that cost less than the ceiling accepted as
+consistent — asserted through a real commit, so Postgres' alignment constraint
+judges it too.
+
+`tests/db-schema.test.ts` extended as described. **341 tests pass with
+`DATABASE_URL`, 185 without.**
+
+### External dependencies this records — not implemented
+
+- **MARKET** consumes `settlement_state` on `core.fulfillment.completed` and
+  `core.fulfillment.cancelled`. Both enums now include `partially_captured`.
+  A consumer that maps this field to customer-facing wording must not treat an
+  unrecognised value as `released`; the schema descriptions say so explicitly.
+  No MARKET code was touched.
+- **A completed fulfillment settling for less than the consented ceiling** is
+  storable and consistent, but CORE has no path that produces it: capturing part
+  of a hold and completing needs the actual amount, which only MARKET or MOVE
+  knows. Recorded here rather than guessing an amount inside CORE.
+
+### An environment observation, not a finding
+
+On the first `npm run verify` of this cycle three tests failed on the sandbox —
+two timeouts in `concurrency-and-restart.test.ts` and one `deadlock detected` in
+`settlement-atomicity.test.ts`. Both files deliberately create contention, and
+they pass on repeated runs of the same commit. The machine has 2 vCPUs and runs
+the database beside the suite, so the likeliest explanation is scheduling
+pressure rather than a defect. It is recorded because a flake that is only
+mentioned when it fails is indistinguishable from one nobody noticed: if these
+two files fail intermittently in CI, this is the note that says it was already
+happening on 2026-09-12 and was not introduced by this change.

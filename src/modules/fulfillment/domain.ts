@@ -21,13 +21,25 @@ export type FulfillmentStatus =
  *
  * - `none`      no hold guards this fulfillment (unfunded coordination).
  * - `held`      the hold exists and is still authorized.
- * - `captured`  the hold was captured; the money moved.
- * - `released`  the hold was voided; no money moved.
+ * - `captured`  the hold was captured in full; the whole consented amount moved.
+ * - `released`  the hold was voided and **no money moved at all**.
+ * - `partially_captured`
+ *               the hold closed with part of the consented amount having moved
+ *               and the remainder released. Since migration 0009 a hold can be
+ *               captured in legs, so this is a reachable terminal money state
+ *               and it is NOT the same fact as `released`: calling it
+ *               `released` would claim nothing moved when some did, and the
+ *               settlement state is what a reconciliation trusts.
  * - `unsettled` CORE closed the execution but could NOT bring the hold to a
- *               terminal state. This is the only inconsistent value and it is
- *               deliberately explicit: it must be reconciled by an operator.
+ *               terminal state. It must be reconciled by an operator.
  */
-export type SettlementState = "none" | "held" | "captured" | "released" | "unsettled";
+export type SettlementState =
+  | "none"
+  | "held"
+  | "captured"
+  | "partially_captured"
+  | "released"
+  | "unsettled";
 
 export interface Fulfillment {
   fulfillment_id: string;
@@ -52,16 +64,28 @@ export function isClosed(status: FulfillmentStatus): boolean {
  * A fulfillment is financially consistent when its execution state and its
  * money state agree:
  *  - open work may only hold money or hold none of it;
- *  - a completed execution must have captured the hold it declared;
- *  - a failed or cancelled execution must have released it;
+ *  - a completed execution must have captured the hold it declared, in full or
+ *    in part — a job that cost less than the consented ceiling is a legitimate
+ *    outcome of migration 0009's split captures;
+ *  - a failed or cancelled execution must have released it and moved nothing;
  *  - `unsettled` is never consistent.
+ *
+ * `partially_captured` on a **failed or cancelled** fulfillment is deliberately
+ * reported as inconsistent. Nothing is broken in CORE's bookkeeping — the money
+ * state is terminal and truthful — but the payer has paid for work that did not
+ * complete, and whether that money is refunded, kept as a cancellation fee or
+ * split is a policy decision CORE has not been given (blocker B-20). Surfacing
+ * it in the reconciliation read is the reversible direction: an operator can
+ * act on a case CORE reported, and cannot act on one it hid.
  */
 export function isFinanciallyConsistent(fulfillment: Fulfillment): boolean {
   const { status, settlement_state: settlement } = fulfillment;
   if (settlement === "unsettled") return false;
   if (!isClosed(status)) return settlement === "none" || settlement === "held";
   if (settlement === "held") return false;
-  if (status === "completed") return settlement === "captured" || settlement === "none";
+  if (status === "completed") {
+    return settlement === "captured" || settlement === "partially_captured" || settlement === "none";
+  }
   return settlement === "released" || settlement === "none";
 }
 
