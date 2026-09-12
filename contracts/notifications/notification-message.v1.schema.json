@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.wasla.local/notifications/notification-message.v1.schema.json",
+  "title": "Notification message v1",
+  "description": "What CORE hands to a channel adapter. This is the contract a provider integration is written against, and it is deliberately not a serialisation of the internal notification row: the row carries claim tokens, attempt counters and error text that no adapter may see. Every field here is either addressing, a rendered human-readable message, or the small set of named event facts the message was rendered from. Adding a field is a contract change; renaming one is a breaking change.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "notification_id",
+    "idempotency_key",
+    "channel",
+    "address",
+    "template",
+    "body",
+    "data",
+    "attempt"
+  ],
+  "properties": {
+    "notification_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "CORE's identifier for this notification. Stable across attempts, so an operator can take it from a provider console back to CORE."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Derived from the event and the recipient (`<event_id>:<recipient_id>`), so every attempt at the same notification carries the same key and a provider that honours idempotency keys collapses a repeat. CORE does not assume any provider does: the key is offered, never relied on."
+    },
+    "channel": {
+      "type": "string",
+      "enum": [
+        "telegram",
+        "email",
+        "phone"
+      ],
+      "description": "Which channel the adapter is being asked to use. An adapter is registered for exactly one channel and must refuse anything else."
+    },
+    "address": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The verified address for that channel, resolved once at fan-out time and frozen. Never re-resolved per attempt: a retry must go where the notification was created for."
+    },
+    "template": {
+      "type": "string",
+      "enum": [
+        "fulfillment_dispatched",
+        "fulfillment_completed",
+        "fulfillment_failed",
+        "fulfillment_cancelled",
+        "subscription_past_due"
+      ],
+      "description": "Which message this is, from a closed set. An adapter may use it to pick a provider-side template; it must not need to parse the body to find out what happened."
+    },
+    "subject": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Present for channels that have a subject line, null for channels that do not (telegram, phone)."
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The rendered message. Rendered from named event fields by CORE, never from a dump of an internal record."
+    },
+    "data": {
+      "type": "object",
+      "description": "The named event facts the body was rendered from, so an adapter using a provider-side template can rebuild the same message without re-deriving anything. Only the fields listed here are ever included, and a field is absent rather than null when the event did not carry it.",
+      "additionalProperties": false,
+      "properties": {
+        "reference": {
+          "type": "string",
+          "description": "What the message calls the work: MARKET's opaque order reference when the event carries one, otherwise the CORE fulfillment id. CORE holds no customer identity behind that reference (see ROADMAP D-7)."
+        },
+        "reason": {
+          "type": "string",
+          "description": "The domain reason code the event carried. A code support can look up, not prose."
+        },
+        "settlement_state": {
+          "type": "string",
+          "enum": [
+            "held",
+            "captured",
+            "partially_captured",
+            "released",
+            "none",
+            "unsettled"
+          ],
+          "description": "The settlement state at closure, verbatim from the event. Absent when the event carried none."
+        },
+        "financial_decision_required": {
+          "type": "boolean",
+          "description": "True when money is still held and no capture-or-release decision has been made. A message rendered from such an event MUST NOT be phrased as a refund or a final settlement, because no such decision has happened (ROADMAP D-6)."
+        },
+        "subscription_id": {
+          "type": "string",
+          "description": "Subscription the message is about, for subscription templates."
+        },
+        "period_id": {
+          "type": "string",
+          "description": "The billing period that went unpaid, when the event carries it."
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 3
+        },
+        "amount_minor": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Amount in minor units exactly as the ledger holds it. Not divided and not locale-formatted: CORE does not know the recipient's locale, and a misplaced decimal point in a payment demand is worse than an unglamorous number."
+        }
+      }
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Which attempt this is, starting at 1. Present so an adapter can log it; the retry decision belongs to CORE, never to the adapter."
+    }
+  },
+  "examples": [
+    {
+      "notification_id": "0f5d2b8e-3c7a-4a3d-9c62-1b0e6ad5f411",
+      "idempotency_key": "6c1f0e2a-5b44-4e1c-9a8f-2d3c4b5a6e7f:018f3c2a-9d21-4a55-b0e7-11c2d3e4f501",
+      "channel": "telegram",
+      "address": "584213197",
+      "template": "fulfillment_completed",
+      "subject": "Your request is complete",
+      "body": "Request order-8821 has been completed. The authorised payment was charged.",
+      "data": {
+        "reference": "order-8821",
+        "settlement_state": "captured",
+        "financial_decision_required": false
+      },
+      "attempt": 1
+    },
+    {
+      "notification_id": "2b3c4d5e-6f70-4812-9a3b-4c5d6e7f8091",
+      "idempotency_key": "11112222-3333-4444-5555-666677778888:018f3c2a-9d21-4a55-b0e7-11c2d3e4f502",
+      "channel": "email",
+      "address": "ops@example.test",
+      "template": "fulfillment_failed",
+      "subject": "Your request could not be completed",
+      "body": "Request order-9910 could not be completed (reason: move_job_failed). A payment amount is held pending review; no refund or charge has been decided yet.",
+      "data": {
+        "reference": "order-9910",
+        "reason": "move_job_failed",
+        "settlement_state": "held",
+        "financial_decision_required": true
+      },
+      "attempt": 2
+    }
+  ]
+}

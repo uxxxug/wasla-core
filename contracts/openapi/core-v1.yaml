@@ -947,6 +947,147 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/EventDelivery" }
         "403": { description: Caller is not an operator }
+  /v1/notification-recipients:
+    post:
+      summary: Register who is told about one CORE event type
+      description: >-
+        Binds an event type to an identity and one of its verified channels.
+        Operator-only: deciding that a person receives messages about a tenant's
+        events is an infrastructure decision with a privacy consequence, not a
+        tenant setting.
+
+        Only channels a person can receive on are accepted (telegram, email,
+        phone), and only if the identity has a verified link on that channel —
+        an unverified address is somebody's claim, not a confirmed destination.
+
+        organization_id may only be set for event types whose payload carries
+        the tenant (core.subscription.*, core.fulfillment.created). Closure
+        events do not carry organization_id (blocker B-23), so a tenant-scoped
+        recipient for them could never match and registration is refused rather
+        than accepted into silence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [event_type, identity_id, channel, correlation_id]
+              properties:
+                organization_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                  description: >-
+                    Absent or null means platform-wide. Only permitted for event
+                    types that carry a tenant.
+                event_type: { type: string, pattern: "^core\\." }
+                identity_id: { type: string, format: uuid }
+                channel: { type: string, enum: [telegram, email, phone] }
+                correlation_id: { type: string }
+      responses:
+        "201":
+          description: Recipient registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRecipient" }
+        "400":
+          description: >-
+            Unknown or non-notifiable event type, unreceivable channel, no
+            verified link on that channel, or a tenant scope the event cannot
+            carry
+        "403": { description: Caller is not an operator }
+        "404": { description: Identity or organization not found }
+    get:
+      summary: List who is told about which events
+      parameters:
+        - in: query
+          name: organization_id
+          schema: { type: string, format: uuid }
+          description: Restricts the list to one tenant's recipients.
+      responses:
+        "200":
+          description: Recipients
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/NotificationRecipient" }
+        "403": { description: Caller is not an operator }
+  /v1/notification-recipients/{recipient_id}/deactivate:
+    post:
+      summary: Stop notifying a recipient about future events
+      description: >-
+        Notifications already queued stay queued. They describe something that
+        already happened, and dropping them silently would lose a message CORE
+        had already committed to sending.
+      parameters:
+        - in: path
+          name: recipient_id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [correlation_id]
+              properties:
+                correlation_id: { type: string }
+      responses:
+        "200":
+          description: Recipient deactivated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NotificationRecipient" }
+        "403": { description: Caller is not an operator }
+        "404": { description: Recipient not found }
+  /v1/notifications:
+    get:
+      summary: Inspect what people have been told, and what is stuck
+      description: >-
+        One list with filters plus the counts an operator watches, including the
+        derived `retrying` state (a pending row that has already been attempted).
+        There is deliberately no /pending, /failed or /retrying path: they are the
+        same question with a different filter.
+
+        This does not overlap /v1/event-deliveries/undelivered, which answers
+        whether a subscribing *system* received an event. This answers whether a
+        *person* was told.
+      parameters:
+        - in: query
+          name: organization_id
+          schema: { type: string, format: uuid }
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, processing, accepted, delivered, failed] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: Notifications, newest first, with counts by state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, summary, items]
+                properties:
+                  count: { type: integer }
+                  summary:
+                    type: object
+                    description: Row counts per state, plus the derived retrying count.
+                    additionalProperties: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Notification" }
+        "400": { description: Unknown status or out-of-range limit }
+        "403": { description: Caller is not an operator }
 components:
   securitySchemes:
     bearerAuth:
@@ -959,6 +1100,64 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    NotificationRecipient:
+      type: object
+      description: Who CORE tells about one event type, on which channel.
+      required: [recipient_id, event_type, identity_id, channel, active, created_at]
+      properties:
+        recipient_id: { type: string }
+        organization_id: { type: string, format: uuid, nullable: true }
+        event_type: { type: string }
+        identity_id: { type: string, format: uuid }
+        channel: { type: string, enum: [telegram, email, phone] }
+        active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    Notification:
+      type: object
+      description: >-
+        One message to one person about one event. `accepted` means a provider
+        took it; `delivered` means a provider confirmed it reached the recipient,
+        which no adapter can report yet (dependency D-8). The distinction is kept
+        in the model rather than collapsed, so a future provider callback does not
+        require a migration of meaning.
+      required:
+        [notification_id, event_id, recipient_id, channel, template, status, attempts, created_at]
+      properties:
+        notification_id: { type: string, format: uuid }
+        event_id: { type: string, format: uuid }
+        recipient_id: { type: string }
+        organization_id: { type: string, format: uuid, nullable: true }
+        channel: { type: string, enum: [telegram, email, phone] }
+        address:
+          type: string
+          nullable: true
+          description: Null only on a row born failed because the channel was unroutable.
+        template: { type: string }
+        subject: { type: string }
+        body: { type: string }
+        data: { type: object }
+        idempotency_key:
+          type: string
+          description: >-
+            event_id:recipient_id. Stable across retries and across dispatcher
+            restarts, and passed to the adapter so a cooperating provider can
+            collapse a repeat.
+        status:
+          type: string
+          enum: [pending, processing, accepted, delivered, failed, retrying]
+          description: >-
+            `retrying` is derived, not stored: a pending row with attempts > 0.
+        attempts: { type: integer }
+        last_error:
+          type: string
+          nullable: true
+          description: Provider failure reason, with secrets and addresses redacted.
+        provider_message_id: { type: string, nullable: true }
+        next_attempt_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        accepted_at: { type: string, format: date-time, nullable: true }
+        delivered_at: { type: string, format: date-time, nullable: true }
+        failed_at: { type: string, format: date-time, nullable: true }
     EventSubscription:
       type: object
       description: >-

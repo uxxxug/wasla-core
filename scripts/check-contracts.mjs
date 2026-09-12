@@ -37,6 +37,31 @@ for (const file of schemaFiles) {
   }
 }
 
+// Non-event published contracts (today: the notification message a channel
+// adapter is written against). Held to the same bar as an event schema, because
+// an adapter author reads it the same way: if it has no examples, the next
+// integration is written against the implementation instead of the contract.
+const otherContractDirs = ["contracts/notifications"];
+let otherContracts = 0;
+for (const dir of otherContractDirs) {
+  for (const file of readdirSync(join(root, dir)).filter((f) => f.endsWith(".schema.json"))) {
+    otherContracts += 1;
+    let schema;
+    try {
+      schema = JSON.parse(readFileSync(join(root, dir, file), "utf8"));
+    } catch (err) {
+      errors.push(`${dir}/${file}: invalid JSON — ${err.message}`);
+      continue;
+    }
+    for (const key of ["$id", "title", "description", "type"]) {
+      if (!schema[key]) errors.push(`${dir}/${file}: missing "${key}"`);
+    }
+    if (!Array.isArray(schema.examples) || schema.examples.length === 0) {
+      errors.push(`${dir}/${file}: at least one example payload is required`);
+    }
+  }
+}
+
 // OpenAPI: parsed structurally without a YAML dependency.
 const openapi = readFileSync(join(root, "contracts/openapi/core-v1.yaml"), "utf8");
 if (!/^openapi:\s*3\.1\.\d/m.test(openapi)) errors.push("core-v1.yaml: openapi 3.1.x header missing");
@@ -90,5 +115,5 @@ if (errors.length > 0) {
   process.exit(1);
 }
 console.log(
-  `Contract validation passed: ${schemaFiles.length} event schemas, ${emitted.size} emitted event types covered.`,
+  `Contract validation passed: ${schemaFiles.length} event schemas, ${otherContracts} other published contracts, ${emitted.size} emitted event types covered.`,
 );
