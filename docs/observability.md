@@ -95,9 +95,10 @@ cannot answer either.
 `retried` and `failed_permanent` are separate counters because they are separate
 operational facts: a retry is the system working, a permanent failure is work
 that will never happen unless a person acts. `fenced` is an acknowledgement
-refused because the claim token was stale — the B-22 protection firing — and it
-must never be counted as a completion, or the counters would claim one message
-was delivered twice. `reclaimed` is a lease that expired and was taken back — it
+refused because the claim token was stale, and it must never be counted as a
+completion, or the counters would claim one message was delivered twice. Since
+B-26 all four workers can emit it; until then only `notification` could, because
+only that table had a token to match on. `reclaimed` is a lease that expired and was taken back — it
 is now reported by all four workers, not only the notification dispatcher (B-24,
 resolved below). It is the counter that separates a crash-looping worker from a
 bad payload: both leave work undone, but only one of them is your fault.
@@ -418,8 +419,9 @@ cannot be counted as in flight for ever even if a future writer forgets.
 **What was rejected, and why.** A `processing` status would have changed what
 every existing reader means by `pending` — a contract change to fix a metric. A
 `claim_token` would give real fencing, but needs tokens threaded through every
-acknowledgement on both backends; that is a bigger, separately reviewable change
-and is recorded as its own blocker rather than smuggled in here.
+acknowledgement on both backends; that was a bigger, separately reviewable change
+and was recorded as its own blocker rather than smuggled in here. It has since been
+done — see B-26 below.
 
 **Deploying it.** Existing rows get `NULL`, meaning "not held". That is safe for
 rows genuinely in flight when the migration runs: they keep their future
@@ -478,3 +480,78 @@ Rolling **back** is again code first, then the migration: code that writes
 `reclaims` against a schema without the column fails every recovery. Rows already
 dead-lettered by an exhausted budget stay dead — see `docs/replay.md` for what can
 be brought back and what currently cannot.
+
+## B-26, resolved: a claim stays exclusive for as long as it is held
+
+**The defect.** B-22 made claiming exclusive at the instant it happens, B-24 made
+an abandoned claim visible, B-25 bounded how often it may be recovered. All three
+are about the moment of claiming. None of them said anything about the interval
+after it, and that is where the last hole was:
+
+1. worker A claims row R with a 30s lease, then stalls — a GC pause, a blocked
+   syscall, a slow POST to a subscriber;
+2. the lease expires, recovery frees R, worker B claims it and finishes it;
+3. A wakes up and calls `markPublished` / `markProcessed` / `markDelivered`. Its
+   statement names R by id and nothing else, so it applies.
+
+A's acknowledgement describes an attempt that was abandoned, and it overwrites B's:
+A's status, A's `last_error`, and for a delivery a `last_status` from a response B
+never received. Two attempts happened and the row records the wrong one. The worst
+version is a stale success on `inbound_event` — an event marked `processed` whose
+live attempt actually failed, so it is never dispatched again and the failure is
+invisible. `core_worker_outcomes_total{outcome="fenced"}` existed to count exactly
+this refusal and, for three of the four workers, could only ever be zero.
+
+**The fix.** `claim_token text` on `outbox`, `inbound_event` and `event_delivery`
+(migration 0016) — the shape `notification` has had since 0012. `claimDue` stamps a
+fresh v4 UUID and returns it on the record; every acknowledgement takes it as its
+second argument and matches on it; recovery and every acknowledgement clear it. The
+acknowledgements now return `boolean` — `false` means refused — and the three
+workers report a `fenced` count on their result alongside the metric.
+
+`src/platform/eventing/fencing.ts` holds the three pieces: `newClaimToken()`,
+`isFenced(rowToken, fence)`, and `UNFENCED` for a caller that legitimately holds no
+claim. There is exactly one such caller, the replay service: an operator advancing a
+`dead` row was never a worker, and a fence that applied to every caller would have
+broken the only recovery path this queue has. `UNFENCED` is a named constant rather
+than a bare `null` so every unfenced acknowledgement in CORE is findable in one
+search.
+
+**What a fence does not do.** It does not prevent the duplicate side effect. If the
+stalled worker already published to the bus or POSTed to a subscriber, that has
+happened; delivery is at-least-once and stays at-least-once, and subscribers still
+have to deduplicate on `event_id`. What the fence protects is the row: the recorded
+status, error, response code and timestamps stay those of the attempt that actually
+completed.
+
+**The one transactional case.** The relay marks a row published inside the same
+transaction that queues its fan-out deliveries — that is the dual-write the outbox
+exists to prevent. There, returning `false` is not enough: the delivery rows are
+already written in that scope. A refused `markPublished` therefore throws
+`FencedError`, which rolls the fan-out back, and the relay's catch block checks for
+it **before** the attempts arithmetic. A fence is not a failed publish: charging an
+attempt and imposing a backoff would punish a row whose only problem is a worker
+slower than its lease, and could eventually dead-letter an event the current claim
+holder is publishing successfully.
+
+**What was rejected, and why.** A `uuid` column would have been four bytes a row
+cheaper than `text`, but `notification.claim_token` is `text` and one type for one
+concept across four queues is worth more. Generating the token in the database
+(`gen_random_uuid()`) would have put it outside the in-memory backend's reach and
+made the two backends disagree about what a claim returns, which is B-12. A token
+per row rather than per batch claim would cost one statement per row and refuse
+nothing extra, since a batch is claimed and abandoned as a unit. And the strong
+constraint — every claimed row carries a token — was rejected because it is false
+for rows already claimed when the migration runs, and a backfilled token would fence
+out a worker still doing real work.
+
+**Deploying it.** Existing rows get `NULL`, meaning no token held. During the window
+where the migration is applied and old code is still running, the old
+untokenised acknowledgements still match, so nothing is refused and nothing breaks —
+the fence is simply not in force for claims taken before the deploy. Rolling **back**
+is code first, then the migration, because code that stamps `claim_token` against a
+schema without the column fails every claim and stops all three queues.
+
+**Non-zero `fenced` is a tuning signal, not a bug report.** It means workers are
+routinely taking longer than their lease, so the lease is too short or the work is
+too slow. It says nothing about the subscriber, the payload or the bus.

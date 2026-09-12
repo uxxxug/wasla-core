@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Bounded recovery — an abandoned claim can no longer be recovered for ever. B-24 made lease expiry countable and deliberately did not charge the recovered row an attempt, which left one unbounded loop: a payload that kills whichever worker touches it was claimed, abandoned, reclaimed and claimed again indefinitely, never once counted as having failed. Migration 0015 adds a second budget, `reclaims`, to `outbox`, `inbound_event` and `event_delivery`; `reclaimExpired` now takes a limit and dead-letters the row on the increment that passes it, and the three workers report that as `failed_permanent` with a `reclaim_exhausted` field on the result. The two budgets stay independent, so the backoff curve and the derived `retrying` state keep their meaning. **B-25 resolved.** The cycle also recorded **B-27**: replay covers `inbound_event` only, so a dead `outbox` or `event_delivery` row still has no revival path — durable and unreachable at the same time. 592 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **592 passed / 35 files**; `npm test` without a database 335 passed / 46 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **15** migrations applied, including 0015 executed against that database rather than merely written. Falsifiable and checked by mutation: making the budget unbounded in memory fails 4 tests, raising the Postgres threshold so it never trips fails 3, and charging `attempts` on reclaim fails 4 including one B-24 test — each mutation restored and `tsc` re-run clean afterwards. The `reclaims` column, its default and its check constraint are asserted against the live schema in `tests/db-schema.test.ts`, not just against the migration file. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
+**Last milestone:** Claim fencing — a claim is now exclusive for as long as it is held, not only at the instant it is taken. B-22 made claiming a write, B-24 made an abandoned claim visible, B-25 bounded how often it may be recovered; all three are about the moment of claiming, and none of them stopped a worker that stalled past its lease from waking up and acknowledging work that had already been reclaimed and finished by somebody else. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery`; `claimDue` stamps it, recovery and every acknowledgement clear it, and the nine acknowledgements across six store implementations match on it and return `boolean`. The three workers report a `fenced` count, so `core_worker_outcomes_total{outcome="fenced"}` is finally reportable by all four workers rather than by `notification` alone. The relay's refusal throws `FencedError` so its fan-out rolls back and no attempt is charged. **B-26 resolved.** 608 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **608 passed / 36 files**; `npm test` without a database 342 passed / 47 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied, with 0016 executed against that database and its `.down.sql` executed and re-applied rather than merely written. Falsifiable and checked by mutation: making `isFenced` never fence fails 5 of the 14 new tests, dropping the `claim_token = $2` predicate from the Postgres `markPublished` fails 2, and letting the in-memory recovery keep the token fails 2 — each mutation restored and `tsc` re-run clean afterwards. The `claim_token` column, its nullability, its absent default and the `*_claim_token_check` constraint are asserted against the **live** schema in `tests/db-schema.test.ts`, including that the constraint actually rejects a token on an unclaimed row. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` can time out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -165,7 +165,7 @@ Nothing.
 | B-23 | **Resolved.** The three closure/dispatch payloads carried no `organization_id`, so a tenant-scoped notification recipient for them could never match and had to be refused outright (HTTP 400), and MARKET/MOVE could not route a closure without calling CORE back. CORE owns tenancy and is the only system that can state it, so the omission was CORE's to fix. `core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry a **required** `organization_id`, read from the fulfillment row rather than from any prior event — which is what makes it correct on the intake-refusal path, where the row is created and closed in one transaction and no `created` event is ever published. `TENANT_SCOPED_EVENT_TYPES` widened accordingly; the registry's refusal is unchanged and still guards `core.*` events that genuinely name no organization (`core.payment.captured`). Proven by `tests/fulfillment-lifecycle-contract.test.ts`, which also validates emitted payloads against the published schemas, and by an end-to-end fan-out test in `tests/notifications.test.ts` showing two tenants watching one event type and only the right one being messaged | resolved | — |
 | B-24 | **Resolved.** Lease expiry was indistinguishable from a scheduled retry for three of the four workers, so `core_worker_outcomes_total{outcome="reclaimed"}` could only be reported for notifications. The B-22 fix made every claim write a lease, but for the outbox relay, the inbound dispatcher and the delivery worker that lease rode on `next_attempt_at`, which is also the retry-schedule field — one column, two meanings, nothing on the row saying which. Migration 0014 adds a nullable `claimed_at timestamptz` to `outbox`, `inbound_event` and `event_delivery`, which makes the overloaded column readable: `claimed_at is null` means `next_attempt_at` is a retry schedule, `claimed_at is not null` means it is a lease expiry. `claimDue` sets it and takes only rows where it is null, so an expired lease is no longer silently re-served; `reclaimExpired(now, limit)` on all three ports (mirroring the one `PgNotificationStore` already had) clears it, makes the row due immediately and records `last_error = 'abandoned claim reclaimed after attempt N'`; every worker recovers **before** claiming, so a recovered row is worked in the same tick; every acknowledgement clears it, enforced by a per-table check constraint (`claimed_at IS NULL OR status = 'pending'`) so a finished row cannot be counted in flight for ever. `counts()` gains `in_flight` and `abandoned`, both subsets of `pending` and both cut at the injected clock so the two backends agree. Rejected: a `processing` status, which would change what every existing reader means by `pending` — a contract change to fix a metric; and a `claim_token`, which is real fencing and is recorded separately as B-26. **Decision about existing rows** (the roadmap required this be stated): they get `NULL` = "not held", which is safe for rows genuinely in flight during the migration — they keep their future `next_attempt_at`, stay invisible until the lease would have expired anyway, then are claimed as today. No downtime and no worker stop; the one cost is that claims held across the migration are not counted when taken over. Rollback is the reverse order — code first, then `0014_worker_claim_visibility.down.sql` — because code that writes `claimed_at` against a schema without it fails every claim and stops all three queues | resolved | — |
 | B-25 | **Resolved.** An abandoned claim did not spend an attempt, so a row whose worker died on it every time was recovered for ever and never dead-lettered: the one queue state that requires a human was the one state it could not reach. Fixed with a **second budget** rather than by reusing the first — `reclaims integer not null default 0` on `outbox`, `inbound_event` and `event_delivery` (migration 0015), incremented by `reclaimExpired(now, maxReclaims, limit)`, which dead-letters the row on the increment that passes the limit (default 3, `DEFAULT_MAX_RECLAIMS`) instead of freeing it. The three workers report the two counts as `reclaimed` and `failed_permanent`, plus a `reclaim_exhausted` field on their result. Charging `attempts` was rejected on evidence, not taste: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop would impose exponential delays a healthy row never earned, and `retrying` is derived as `pending and attempts > 0`, so a row nobody had tried would report as retrying. Charging the attempt at claim time — the notification store's single-counter approach — was rejected because B-22 declined to change `attempts` semantics for these three workers and it would silently halve every retry limit. `tests/reclaim-budget.test.ts` covers all three queues plus the worker-level result and metrics on both backends; the column, its default and its check constraint are asserted against the live schema | — |
-| B-26 | No fencing token on the three eventing queues, so `core_worker_outcomes_total{outcome="fenced"}` remains unreportable for them and a stalled worker's late acknowledgement can still land | `claimed_at` makes a claim **visible**; it does not make it **exclusive over time**. A worker that stalls past its lease, is reclaimed, and then wakes up and calls `markPublished`/`markProcessed`/`markDelivered` will succeed, because the acknowledgement names the row and not the claim. `PgNotificationStore` has a `claim_token` and can refuse exactly this, which is why `fenced` is reportable for notifications alone. Pre-existing — B-24 neither introduced nor worsened it — and the window is small (it needs a stall longer than a whole lease followed by a successful write) but it is a genuine at-most-once gap on a queue whose deliveries are signed POSTs to partners | A `claim_token uuid` per queue table, returned by `claimDue` and required by every acknowledgement, which means threading the token through `OutboxPublisher`, `InboundDispatcher` and `DeliveryWorker` and through six store implementations, plus a decision about what a refused acknowledgement should do with the work already performed (the POST was sent; the row now belongs to somebody else). Its own cycle, and a real contract change to the store ports |
+| B-26 | **Resolved.** A claim was exclusive at the instant it was taken (B-22), visible while held (B-24) and bounded in how often it could be taken back (B-25) — and none of that made it exclusive *over time*. A worker that stalled past its lease, was reclaimed, and then called `markPublished`/`markProcessed`/`markDelivered` succeeded, because the acknowledgement named the row and not the claim; the row then recorded the abandoned attempt instead of the one that happened. The worst case is a stale success on `inbound_event`: an event marked `processed` whose live attempt actually failed is never dispatched again and the failure is invisible. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery` — the shape `notification` has had since 0012 — stamped by `claimDue`, cleared by recovery and by every acknowledgement, and matched by all nine acknowledgements across the six store implementations, which now return `boolean`. `src/platform/eventing/fencing.ts` holds `newClaimToken()`, `isFenced()`, `UNFENCED` and `FencedError`. The three workers report a `fenced` count and emit `core_worker_outcomes_total{outcome="fenced"}`, an outcome that has been in the catalogue since Milestone 8 and that only `notification` could produce until now. The relay is the one transactional case: `markPublished` runs inside the transaction that queues the fan-out, so a refusal throws `FencedError` to roll those delivery rows back, and the catch block checks for it **before** the attempts arithmetic — a fence is not a failed publish and must not charge an attempt or impose a backoff. Replay passes `UNFENCED` and is the only caller in CORE entitled to: an operator advancing a `dead` row holds no claim, and a fence that applied to every caller would have broken the only recovery path this queue has. Rejected: `uuid` (to match `notification.claim_token text`), `gen_random_uuid()` in the database (unavailable to the in-memory backend — B-12), a token per row rather than per batch claim (one statement per row, refusing nothing extra), and the strong constraint "every claimed row carries a token" (false for rows already claimed when the migration runs, and a backfilled token would fence out a worker still doing real work). What it does **not** fix: the duplicate side effect. A POST or a bus publish that already happened is not undone — delivery stays at-least-once and subscribers still deduplicate on `event_id`. The fence protects what the row records | resolved | — |
 | B-27 | A dead `outbox` or `event_delivery` row has no revival path in CORE at all | Replay (`src/platform/replay/service.ts`) reads `inbound_event` only; its `DEFAULT_STATUSES = ["pending", "dead"]` is what makes a dead inbound event operator-recoverable. There is no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead `outbox` row — an event MOVE and MARKET will now **never** receive — and a dead `event_delivery` row are durable and unreachable at the same time, which is precisely the defect Milestone 6 was created to remove for inbound events. B-25 makes this matter more, not less: it adds a second, entirely new way for rows in exactly those two tables to reach `dead`. Recovering one today means a manual `update` against the database, unreviewed and unaudited | A revival command per queue that resets `status` to `pending`, clears `claimed_at`, zeroes `reclaims` and leaves `attempts` alone, under the same compulsory-narrowing and audit rules replay already enforces; or extend the replay service to cover all three queues rather than adding a third mechanism. Needs an owner decision on whether reviving a dead outbox row should re-publish the original envelope unchanged or emit a fresh one with a new `event_id` |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
@@ -3189,3 +3189,163 @@ reviving a dead outbox row re-publishes the original envelope or emits a fresh o
 with a new `event_id` — and that answer changes the shape of the code, so it should
 not be guessed. **B-14…B-19** and **B-20** need owner decisions. **Milestone 9** is
 still blocked on B-5/B-6.
+
+## Cycle 2026-09-12 (tenth) — B-26, a claim is exclusive for as long as it is held (CORE-only agent)
+
+Reviewed the working tree at `0edb7af` before planning anything: 592 tests over 35
+files pass with `DATABASE_URL` set, 335 pass and 46 skip without one, `tsc --noEmit`
+is clean, all four gates pass and all 15 migrations are applied to a real
+PostgreSQL 18.4. The state matched what the previous cycle claimed, so B-26 — the
+blocker that cycle's own B-24 work had recorded — was the next honest piece of work.
+
+### The defect, stated precisely
+
+Three cycles have now been spent on claiming, and each fixed a different property of
+the same instant:
+
+| Blocker | What it made true |
+| --- | --- |
+| B-22 | claiming is a write, so two workers cannot claim the same row |
+| B-24 | a held claim is visible, so an abandoned one can be found and counted |
+| B-25 | recovery is bounded, so an abandoned claim cannot be recovered for ever |
+
+None of them said anything about the interval **after** the claim. The sequence that
+still misbehaved:
+
+1. worker A claims row R, lease 30s, and stalls — a GC pause, a blocked syscall, a
+   subscriber that takes 40 seconds to answer a POST;
+2. the lease expires; `reclaimExpired` frees R; worker B claims it and finishes it;
+3. A wakes up and calls `markPublished` / `markProcessed` / `markDelivered`. Its
+   statement is `update … where event_id = $1`. It names the row. It applies.
+
+The row now records A's outcome: A's status, A's `last_error`, and for a delivery a
+`last_status` from a response B never received. Two attempts happened and the row
+describes the abandoned one. The most damaging variant is a stale **success** on
+`inbound_event` — an event marked `processed` whose live attempt actually failed will
+never be dispatched again, and nothing anywhere reports a failure.
+
+This was not a hypothesis about the schema. `core_worker_outcomes_total` has had a
+`fenced` outcome in its catalogue since Milestone 8, described in
+`docs/observability.md` as "an acknowledgement refused because the claim token was
+stale". For three of the four workers that counter could only ever be zero, because
+their tables had no token to match on. The metric existed; the mechanism did not.
+
+### The fix
+
+`claim_token text` on `outbox`, `inbound_event` and `event_delivery` (migration
+0016) — deliberately the same shape `notification` has had since 0012, since this is
+the same concept and `PgNotificationStore` already proved the pattern works.
+
+- `src/platform/eventing/fencing.ts` — `newClaimToken()` (a v4 UUID from
+  `node:crypto`), `isFenced(rowToken, fence)`, `UNFENCED` for a caller that holds no
+  claim, and `FencedError` for the one case where returning `false` is not enough.
+- `claimDue` generates **one** token per call and stamps it on every row in the
+  batch, in the statement that already writes the lease. A batch is claimed and
+  abandoned as a unit, so a token per row would cost a statement per row and refuse
+  nothing extra.
+- All nine acknowledgements across six store implementations take the fence as their
+  second argument and return `Promise<boolean>`; `false` means refused. Postgres does
+  it in the same statement — `where event_id = $1 and ($2::text is null or
+  claim_token = $2) returning event_id`, then `rows.length === 1` — so there is no
+  read-then-write race in the fence itself.
+- Recovery clears the token, and so does every acknowledgement: a claim that has
+  ended leaves no token behind that a later write could match.
+- `OutboxPublisher`, `InboundDispatcher` and `DeliveryWorker` each report a `fenced`
+  count on their result and emit `core_worker_outcomes_total{outcome="fenced"}`. No
+  catalogue change was needed — the outcome was already defined.
+
+**The relay is the one transactional case.** `markPublished` runs inside the same
+transaction that queues the fan-out deliveries; that dual-write is the entire reason
+the outbox exists. Returning `false` there is not sufficient, because the delivery
+rows are already written in that scope, so a refused `markPublished` throws
+`FencedError` and the transaction rolls back with them. The catch block checks for
+`FencedError` **first**, before the attempts arithmetic, and `continue`s: a fence is
+not a failed publish, and charging an attempt would impose a backoff on a row whose
+only problem is a worker slower than its lease — and could eventually dead-letter an
+event the current claim holder is publishing successfully.
+
+**Replay is the only unfenced caller**, and passes `UNFENCED` explicitly with a
+comment saying why. An operator advancing a `dead` inbound event was never a worker
+and never held a claim; a fence that applied to every caller would have broken the
+only recovery path this queue has. `UNFENCED` is a named constant rather than a bare
+`null` so that every unfenced acknowledgement in CORE is findable in one search.
+
+### What was rejected, and why
+
+- **`uuid` instead of `text`.** Four bytes a row cheaper and self-validating, but
+  `notification.claim_token` is `text`; one type for one concept across four queues
+  is worth more than the bytes.
+- **`default gen_random_uuid()` in the schema.** Puts token generation outside the
+  in-memory backend's reach and makes the two backends disagree about what a claim
+  returns — B-12, the divergence this repository keeps paying for.
+- **The strong constraint, "every claimed row carries a token."** It reads better and
+  it is false: rows already claimed when the migration runs have `claimed_at` and no
+  token, and backfilling one would fence out a worker still doing real work. The
+  constraint shipped is the weak direction only — a token implies a claim.
+- **Fencing replay too.** Rejected above.
+- **Treating a refusal as a failure.** Rejected above for the relay; the same
+  reasoning applies to the other two workers, which count it and move on.
+
+### What this does not fix
+
+It does not prevent the duplicate side effect. If the stalled worker already
+published to the bus or POSTed to a subscriber, that happened. Delivery is
+at-least-once and stays at-least-once; subscribers still deduplicate on `event_id`.
+What the fence protects is the **record**: status, error, response code and
+timestamps stay those of the attempt that actually completed. Saying otherwise in the
+docs would be a false guarantee, so `docs/outbound-delivery.md` now states the limit
+next to the at-least-once paragraph it qualifies.
+
+Operationally, a persistently non-zero `fenced` is a tuning signal rather than a bug
+report: it means workers routinely take longer than their lease, so the lease is too
+short or the work too slow. For the delivery worker it usually means `timeoutMs` is
+close to or above `LEASE_MS`.
+
+### A defect found in the migration runner contract
+
+The first version of `0016_worker_claim_fencing.sql` applied cleanly and then broke
+`tests/migration-0011-lifecycle.test.ts`, which runs `down` and `up` again. The
+runner does not record migrations — `scripts/db-migrate.mjs` says so in its header
+comment, and each migration is expected to insert its own `schema_migrations` row.
+0016 was missing that insert, and its `.down.sql` was missing the matching delete, so
+`up` re-ran it for ever and failed on the second `ADD COLUMN`. Both are now present.
+Beyond that, every statement in the forward migration was made re-runnable — `ADD
+COLUMN IF NOT EXISTS`, and a `DROP CONSTRAINT IF EXISTS` before each `ADD
+CONSTRAINT`, since Postgres has no `ADD CONSTRAINT IF NOT EXISTS`. A migration that
+records itself should never run twice, but one that cannot survive running twice
+turns any interrupted deploy into a manual repair before the next deploy can
+proceed — which is exactly the state this cycle had to clean up by hand.
+
+### Verification
+
+`tests/claim-fencing.test.ts` adds 14 tests (7 cases across both backends): a stale
+acknowledgement is refused on each of the three queues; the token is cleared whenever
+a claim ends; the dispatcher reports `fenced` and the exposition shows
+`core_worker_outcomes_total{worker="inbound_dispatcher",outcome="fenced"} 1`; a fenced
+relay rolls its fan-out delivery rows back; and `UNFENCED` still applies. The stall is
+simulated rather than asserted about — the publish callback advances the injected
+clock past the lease and runs recovery, so the reclaim genuinely happens before the
+acknowledgement.
+
+`tests/db-schema.test.ts` asserts against the **live** schema: the column exists on
+all three tables, is nullable, has no default, and the `*_claim_token_check`
+constraint has the expected definition; then it inserts an `outbox` row and shows
+that setting a token without `claimed_at` is actually rejected with
+`constraint === "outbox_claim_token_check"` while setting both succeeds.
+
+608 tests over 36 files pass with `DATABASE_URL`; 342 pass and 47 skip without one;
+`tsc --noEmit` clean; governance, contract, migration and roadmap gates pass; 0016
+was applied, rolled back and re-applied against real PostgreSQL 18.4. Three mutations
+confirm the tests can fail: `isFenced` always returning false fails 5 tests, dropping
+the fence predicate from the Postgres `markPublished` fails 2, and leaving the token
+in place during in-memory recovery fails 2. Each was restored and `tsc` re-run clean.
+
+### What CORE still needs from elsewhere
+
+Nothing new. **B-27** remains the honest next piece of work inside CORE and is still
+blocked on one owner answer: does reviving a dead `outbox` row re-publish the original
+envelope unchanged, or emit a fresh one with a new `event_id`? That answer changes the
+shape of the code, so it should not be guessed. B-25 and now B-26 both make it matter
+more: there are more ways to reach `dead`, and the rows that get there are still
+unreachable. **B-14…B-19** and **B-20** need owner decisions. **Milestone 9** is still
+blocked on B-5/B-6. No MOVE or MARKET code was read or written in this cycle.

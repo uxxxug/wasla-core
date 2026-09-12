@@ -77,6 +77,19 @@ record must not imply a subscriber answered. `counts()` reports `in_flight` and
 `abandoned` for the same reason:
 a partner outage and a crash-looping worker used to produce identical numbers.
 
+**A stalled worker cannot report on a delivery it no longer holds.** The claim also
+stamps a `claim_token`, and `markDelivered`, `markFailed` and `markDead` match on it
+(B-26). A worker that stalls past its lease, is reclaimed, and then reports the
+response it eventually received is refused rather than applied — otherwise it would
+overwrite the live attempt's `last_status` and `delivered_at` with a response code
+nobody is waiting on any more, and could reopen a delivered row for retry. The
+refusal is counted as `fenced` on the worker's result and in
+`core_worker_outcomes_total`; it does **not** mean the subscriber missed anything,
+and it does not undo a POST that already went out. That is the at-least-once
+guarantee above, unchanged: this only protects what the row records. A persistently
+non-zero `fenced` means the lease is shorter than the work, which for this worker
+usually means `timeoutMs` is close to or above the lease.
+
 **A failed attempt is either worth repeating or it is not.** This distinction
 matters more than the backoff curve:
 
