@@ -222,6 +222,95 @@ no honest value for an existing row. `released` would claim no money moved and
 `captured` would claim all of it did. The rollback refuses while any row is
 `partially_captured` and points the operator at the query that lists them.
 
+## Every path that can close with money in the middle (B-20)
+
+The table is the whole point of this section: for each way a fulfillment can
+reach a terminal state, what the money looks like, and whether anyone still owes
+a decision. `held` below is the part of the hold that is still reserved and not
+yet drawn.
+
+`captured` is what money reports on the authorization; `remaining held` is the
+consented ceiling minus it, and reaches 0 the moment the hold closes, because a
+closed hold reserves nothing regardless of what it captured.
+
+| # | Path | Trigger | Execution | Hold (money) | captured | remaining held | `settlement_state` | `financial_disposition` | Decision owed? |
+|---|------|---------|-----------|--------------|----------|----------------|--------------------|--------------------------|----------------|
+| 1 | intake refused, hold missing | `core.market.order.created` with an unknown authorization | `failed` | — | — | — | `none` | `no_money` | no |
+| 2 | intake refused, hold already fully captured | order arrives after money left | `failed` | `captured` | full | 0 | `unsettled` | `inconsistent` | no — **engineer**: money moved for work never coordinated |
+| 3 | intake refused, hold closed after a partial capture | order arrives after a leg was drawn and the rest released | `failed` | `partially_captured` | part | 0 | `partially_captured` | `decision_required` | **yes** |
+| 4 | intake refused, hold voided or expired-out | hold no longer authorized, nothing captured | `failed` | `voided` | 0 | 0 | `released` | `settled` | no |
+| 5 | intake refused, hold expired but still open | past `expires_at`, nothing captured | `failed` | `voided` by CORE | 0 | 0 | `released` | `settled` | no |
+| 6 | intake refused, hold expired with a captured leg | past `expires_at`, a leg already drawn | `failed` | `partially_captured` | part | 0 | `partially_captured` | `decision_required` | **yes** |
+| 7 | MOVE rejects the job | `move.job.rejected`, nothing captured | `failed` | `voided` | 0 | 0 | `released` | `settled` | no |
+| 8 | MOVE rejects the job after a leg was drawn | `move.job.rejected`, a leg already captured | `failed` | `partially_captured` | part | 0 | `partially_captured` | `decision_required` | **yes** |
+| 9 | MOVE completes, capture succeeds | `move.job.completed` with `outcome=completed` | `completed` | `captured` | full | 0 | `captured` | `settled` | no |
+| 10 | MOVE completes for less than the ceiling | — **not reachable today**, see below | `completed` | `partially_captured` | part | 0 | `partially_captured` | `settled` | no — work delivered and paid for |
+| 11 | MOVE completes, capture refused, release clean | hold no longer capturable, nothing had moved | `failed` (`payment_settlement_failed:…`) | `voided` | 0 | 0 | `released` | `settled` | no |
+| 12 | **MOVE completes, capture refused, part had moved** | the reference case: 6 000 reserved, 2 500 drawn, hold closed | `failed` | `partially_captured` | 2 500 | 0 | `partially_captured` | `decision_required` | **yes** |
+| 13 | MOVE completes, capture refused, release also fails | money unreachable on both calls | `failed` | unknown | unknown | unknown | `unsettled` | `inconsistent` | no — **engineer** |
+| 14 | MOVE reports failure | `move.job.completed` with `outcome=failed`, nothing captured | `failed` | `voided` | 0 | 0 | `released` | `settled` | no |
+| 15 | MOVE reports failure after a leg was drawn | same, with money already moved | `failed` | `partially_captured` | part | 0 | `partially_captured` | `decision_required` | **yes** |
+| 16 | cancelled before execution closes | `POST /cancel`, nothing captured | `cancelled` | `voided` | 0 | 0 | `released` | `settled` | no |
+| 17 | **cancelled after a leg was drawn** | `POST /cancel` with 2 500 already moved | `cancelled` | `partially_captured` | 2 500 | 0 | `partially_captured` | `decision_required` | **yes** |
+| 18 | any of the above, delivered twice | duplicate or retried event, or a second `cancel` | unchanged | unchanged | unchanged | unchanged | unchanged | unchanged | no — the first outcome stands |
+| 19 | hold expires while execution is still open | the expiry sweep runs, no MOVE event yet | `coordinating`/`dispatched` | `voided` or `partially_captured` | 0 or part | 0 | `held` (stale) | `awaiting_execution` | see the gap below |
+
+Row 10 is the one row no code path can produce yet. `settle` captures the whole
+remaining hold because nothing tells it a smaller figure: `move.job.completed`
+carries no executed amount. The schema and the consistency rule accept the pair
+so the row is representable the day MOVE sends one — that is the second contract
+dependency in the ROADMAP, not something CORE can decide. Until then a completed
+job always draws the full ceiling.
+
+Rows 3, 6, 8, 12, 15 and 17 are the same fact reached six ways: money left the
+payer and the work was not delivered. CORE records it and stops. It does not
+refund, does not keep the money against a cancellation fee, and does not mark
+the operation finished — because it has not been told which of those is right.
+
+### What CORE will not do while a decision is owed
+
+- No transition writes `released` when `captured_minor > 0`. `released` is a
+  claim that no money moved.
+- Both closure events carry `financial_decision_required: true` in those rows,
+  so `core.fulfillment.cancelled` cannot be read as "the customer was refunded".
+- `isFinanciallyConsistent` returns false, so the case stays in the
+  reconciliation read instead of disappearing into the finished pile.
+- `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly
+  these rows, separately from defects, so the queue can be counted.
+- Nothing in CORE emits a refund. `refundWithin` exists and is only ever called
+  by an explicit request that names its reference — never inferred from a
+  fulfillment outcome.
+
+### The disposition, and why a boolean was not enough
+
+`financial_disposition` is derived from the two states on every read and never
+stored, so it cannot drift from them:
+
+| disposition | meaning | who acts |
+|---|---|---|
+| `no_money` | no hold guards this fulfillment | nobody |
+| `awaiting_execution` | a hold guards open work | nobody yet |
+| `settled` | money reached a terminal state that agrees with the outcome | nobody |
+| `decision_required` | money moved, work did not complete, policy unknown | the business (B-20) |
+| `inconsistent` | the two states contradict each other, or `unsettled` | an engineer |
+
+`isFinanciallyConsistent` collapsed the last two into one `false`, which put a
+CORE defect and an unanswered business question in the same queue. They need
+different people.
+
+### Known gap: row 19, a stale hold on open work
+
+If the expiry sweep closes a hold while the fulfillment is still open, the
+fulfillment row keeps `settlement_state = 'held'` until a MOVE event arrives.
+When one arrives the outcome is truthful (rows 12 and 15 handle it). If none ever
+arrives, the row sits open and the reconciliation reads cannot see the problem,
+because both of them look only at the fulfillment row and the contradiction is
+between two modules.
+
+This is a liveness gap, not a false record: CORE never claims money came back.
+Closing it needs a reconciliation that compares open fulfillments against their
+authorizations, which is the next milestone rather than part of this one.
+
 ## Not implemented: multiple holds per fulfillment
 
 Deliberately left out, recorded as an external dependency rather than invented.
