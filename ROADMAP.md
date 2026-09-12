@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Queue revival — `dead` is no longer a state with no exit. B-22 gave the outbound queues a `dead` status, B-25 added a second route into it and B-26 made the acknowledgement that writes it fence-safe; none of the three built the way back, so a dead `outbox` row or `event_delivery` row was durable and unreachable at once and the recovery procedure was an `UPDATE` typed into a production console. `selectDead`/`revive` on both stores for both queues (no schema change: it is a status transition over existing columns), `QueueRevivalService` with a dry run that writes nothing at all, its own advisory-lock key, the `events.revive` permission for `platform_admin` alone, two audit entries per run, and `npm run revive` as a dry run unless `--execute`. The owner question that had blocked B-27 is answered and implemented: **revival re-publishes the original envelope unchanged** — it returns the row to `pending` and publishes nothing itself, so the existing relay and delivery worker send the stored envelope under the same `event_id`, and CORE still has exactly one publish path. `attempts` and `last_error` are preserved on purpose, which means a row that died at `maxAttempts` gets exactly one further attempt and every subsequent one costs another journalled decision. A delivery whose subscription has since been deactivated is refused. **B-27 resolved.** 636 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **636 passed / 37 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied — this cycle added no migration, because reviving a row is a status transition over columns that already exist. Falsifiable and checked by mutation: dropping `status = 'dead'` from the revival update fails 2 of the 28 new tests (one per backend), zeroing `attempts` on revival fails 2, and removing the inactive-subscription refusal fails 2 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) still applies.
+**Last milestone:** Deactivating a subscription now stops sending. Fan-out had always filtered on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, so every delivery already pending when the subscription was switched off was still claimed, signed and POSTed, up to `maxAttempts` spread over hours of backoff. An operator switching off a compromised or leaking endpoint got "stop queueing new work" when they had asked for "stop sending", which is not a defensible reading of the only control CORE offers over a subscriber. The worker now re-checks `active` on each claimed delivery and **suppresses** the row: `markSuppressed` on both backends dead-letters it with the reason recorded, without sending it, without charging an attempt and without touching `last_status`, so the evidence of the last real attempt survives. Checked at the moment of sending rather than swept at deactivation time, because a sweep cannot close the race it leaves behind. Nothing is lost: with B-27 in place the way back is reactivate, then `npm run revive`, and revival refuses while the subscription is still inactive so the two halves cannot contradict each other. **B-28 resolved.** 642 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **642 passed / 37 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied — no migration this cycle either: suppression writes `status`, `last_error` and the claim columns, and reuses `dead` rather than adding a fourth status and widening a check constraint. Falsifiable and checked by mutation: removing the `active` re-check in the worker fails 6 tests across both backends, charging an attempt for a suppression fails 4, and suppressing without making the row terminal fails 6 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) recurred in this cycle's full run and passes in isolation; every one of the 642 assertions passed in both cases.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -167,7 +167,7 @@ Nothing.
 | B-25 | **Resolved.** An abandoned claim did not spend an attempt, so a row whose worker died on it every time was recovered for ever and never dead-lettered: the one queue state that requires a human was the one state it could not reach. Fixed with a **second budget** rather than by reusing the first — `reclaims integer not null default 0` on `outbox`, `inbound_event` and `event_delivery` (migration 0015), incremented by `reclaimExpired(now, maxReclaims, limit)`, which dead-letters the row on the increment that passes the limit (default 3, `DEFAULT_MAX_RECLAIMS`) instead of freeing it. The three workers report the two counts as `reclaimed` and `failed_permanent`, plus a `reclaim_exhausted` field on their result. Charging `attempts` was rejected on evidence, not taste: the backoff is `baseBackoffMs * 2 ** attempts`, so a crash loop would impose exponential delays a healthy row never earned, and `retrying` is derived as `pending and attempts > 0`, so a row nobody had tried would report as retrying. Charging the attempt at claim time — the notification store's single-counter approach — was rejected because B-22 declined to change `attempts` semantics for these three workers and it would silently halve every retry limit. `tests/reclaim-budget.test.ts` covers all three queues plus the worker-level result and metrics on both backends; the column, its default and its check constraint are asserted against the live schema | — |
 | B-26 | **Resolved.** A claim was exclusive at the instant it was taken (B-22), visible while held (B-24) and bounded in how often it could be taken back (B-25) — and none of that made it exclusive *over time*. A worker that stalled past its lease, was reclaimed, and then called `markPublished`/`markProcessed`/`markDelivered` succeeded, because the acknowledgement named the row and not the claim; the row then recorded the abandoned attempt instead of the one that happened. The worst case is a stale success on `inbound_event`: an event marked `processed` whose live attempt actually failed is never dispatched again and the failure is invisible. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery` — the shape `notification` has had since 0012 — stamped by `claimDue`, cleared by recovery and by every acknowledgement, and matched by all nine acknowledgements across the six store implementations, which now return `boolean`. `src/platform/eventing/fencing.ts` holds `newClaimToken()`, `isFenced()`, `UNFENCED` and `FencedError`. The three workers report a `fenced` count and emit `core_worker_outcomes_total{outcome="fenced"}`, an outcome that has been in the catalogue since Milestone 8 and that only `notification` could produce until now. The relay is the one transactional case: `markPublished` runs inside the transaction that queues the fan-out, so a refusal throws `FencedError` to roll those delivery rows back, and the catch block checks for it **before** the attempts arithmetic — a fence is not a failed publish and must not charge an attempt or impose a backoff. Replay passes `UNFENCED` and is the only caller in CORE entitled to: an operator advancing a `dead` row holds no claim, and a fence that applied to every caller would have broken the only recovery path this queue has. Rejected: `uuid` (to match `notification.claim_token text`), `gen_random_uuid()` in the database (unavailable to the in-memory backend — B-12), a token per row rather than per batch claim (one statement per row, refusing nothing extra), and the strong constraint "every claimed row carries a token" (false for rows already claimed when the migration runs, and a backfilled token would fence out a worker still doing real work). What it does **not** fix: the duplicate side effect. A POST or a bus publish that already happened is not undone — delivery stays at-least-once and subscribers still deduplicate on `event_id`. The fence protects what the row records | resolved | — |
 | B-27 | **Resolved.** A dead `outbox` or `event_delivery` row had no revival path in CORE at all. Replay reads `inbound_event` only, and there was no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead outbox row — an event MOVE and MARKET would never receive — was durable and unreachable at the same time, which is the exact defect Milestone 6 removed for inbound events. B-25 had made it worse by adding a second route to `dead`. Recovering a row meant a manual `update` against the database, unreviewed and unaudited, and free to resurrect a row that had already been published | Closed by `selectDead`/`revive` on `OutboxStore` and `DeliveryStore` in both backends, `QueueRevivalService` (`src/platform/replay/revive.ts`), the `events.revive` permission and `npm run revive`, all documented in `docs/queue-revival.md`. The owner decision is taken and recorded: revival **re-publishes the original envelope unchanged**. It publishes nothing itself — the row goes back to `pending` and the existing relay and delivery worker do what they always do, which keeps one publish path in CORE and keeps `event_id` stable for every consumer inbox and every subscriber that deduplicates on it. A fresh envelope was rejected: it would need a second publish path and would make a month-old fact arrive as news |
-| B-28 | Deactivating a subscription does not stop deliveries already queued for it | `DeliveryFanOut` filters `subscriptionsFor` on `active`, so no new delivery is queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checks `active`, and a delivery that was already `pending` when the subscription was switched off is still claimed, signed and POSTed. Found while building B-27, which is why revival refuses a dead delivery for an inactive subscription: revival is a new decision to send, so it must honour the switch, while an already-pending row predates the decision and draining it may well be intended. Both readings are defensible, which is exactly why CORE should not pick one silently | Needs an owner answer: does deactivating a subscription mean *stop sending now* (the worker must skip and dead-letter or cancel pending rows for inactive subscriptions) or *stop queueing new work* (current behaviour, and the queue drains)? The second is cheaper and is what ships today; the first is what an operator switching off a compromised endpoint almost certainly expects. CORE has documented the current behaviour rather than changing it |
+| B-28 | **Resolved.** `DeliveryFanOut` filtered `subscriptionsFor` on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, and a delivery that was already `pending` when the subscription was switched off was still claimed, signed and POSTed, for up to `maxAttempts` across hours of backoff. Found while building B-27, whose revival refuses an inactive subscription; the worker's own behaviour was the other half and contradicted it. The documented reasoning for the old behaviour — those deliveries were promised, and dropping them is worse than delivering them late — was right that they must not be dropped and wrong that "late" is what an operator asked for when switching off a leaking endpoint | Closed by `markSuppressed` on `DeliveryStore` in both backends and an `active` re-check in the worker: the row is dead-lettered with the reason recorded, unsent, with `attempts` and `last_status` untouched, and reported as `suppressed` in the worker result. Read as **stop sending**, not *stop queueing*, because the realistic reasons to deactivate are urgent — a compromised endpoint, a leaked secret, a partner asking to be switched off. Checked at the moment of sending rather than swept at deactivation, since a sweep cannot close the race where fan-out reads the active subscriptions, the deactivation commits and fan-out then queues its row. `dead` reused rather than a fourth status, following the precedent B-25 set for its own new route to `dead`. Recovery is reactivate then `npm run revive` |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -3470,4 +3470,116 @@ documented current behaviour rather than guessing. With B-27 closed, every remai
 blocker inside CORE's reach is now an owner decision rather than an implementation
 gap: **B-14…B-19** (subscription policy), **B-20** (what is owed when work fails
 after a partial capture), **D-6…D-8**. **Milestone 9** remains blocked on B-5/B-6.
+No MOVE or MARKET code was read or written in this cycle.
+
+## Cycle 2026-09-12 (twelfth) — B-28, deactivation stops sending (CORE-only agent)
+
+Baseline `13b9085`, working tree clean, 636 tests passing. No MOVE or MARKET code
+was read or written. No owner input was waited for: the question B-28 recorded had
+two defensible answers, so this cycle picked the one that survives the reasons the
+control actually gets used, and wrote down the one it rejected.
+
+### The defect
+
+Deactivating a subscription is the only control CORE gives an operator over whether
+a subscriber is sent anything. It half worked. `DeliveryFanOut` filtered on
+`active`, so nothing new was queued — and `DeliveryWorker.drainOnce` never looked at
+`active` again, so every delivery already pending kept going out: claimed, signed,
+POSTed, up to `maxAttempts` spread across hours of exponential backoff.
+
+The repository documented that as intentional, and the reasoning was recorded in
+`docs/outbound-delivery.md`: those deliveries were promised, and dropping them
+silently is worse than delivering them late. Half of that is correct — they must not
+be dropped. The other half does not survive contact with why anyone reaches for the
+switch. The realistic reasons are urgent: the endpoint is compromised, it is
+leaking, the signing secret is out, the partner asked to be switched off. In every
+one of them "stop queueing new work" is not what was asked for, and "late" is not a
+concession the operator offered.
+
+B-27 made the contradiction explicit rather than creating it: revival refuses to
+bring back a delivery for an inactive subscription, on the grounds that reviving is
+a new decision to send and must honour the switch. The worker, sending rows it
+already had, honoured nothing.
+
+### The decision, and the alternative rejected
+
+**Deactivation means stop sending.** The worker re-checks `active` on each claimed
+delivery and suppresses the row.
+
+The alternative was to keep the queue draining and treat deactivation as a queueing
+control only. It is cheaper and it was already shipped, which is exactly why it
+needed to be argued rather than inherited. It loses because it makes the only
+available emergency control not an emergency control.
+
+Three sub-decisions, each with its own reason:
+
+- **Checked in the worker, not swept at deactivation time.** A sweep cannot close
+  the race it leaves behind: fan-out reads the active subscriptions, the
+  deactivation commits, and fan-out then queues its row. Only a decision taken at
+  the moment of sending sees the current answer. It also costs nothing — the worker
+  was already reading the subscription for its endpoint and secret.
+- **Dead-lettered, not skipped.** Skipping without a write would leave rows claimed
+  and released on every drain for ever, absent from the `retrying` reading and
+  counted as ordinary backlog. `dead` says the true thing: no further automatic
+  attempt until a human acts.
+- **`dead` reused, not a fourth status.** `dead` already means precisely that, and
+  B-25 set the precedent when it added its own new route into it — distinguished by
+  `last_error` and its own count in the worker result, not by a new status, a
+  migration and a wider check constraint. `markSuppressed` is a separate method from
+  `markDead` for one reason only, below.
+
+### What suppression must not do
+
+**It must not charge an attempt.** No request was made, so incrementing `attempts`
+would record a failure that never happened, inflate the backoff of a later attempt,
+and — because a revival preserves `attempts` (B-27) — could hand back a row already
+at `maxAttempts` without anything ever having been sent. `last_status` is left alone
+too, so the response code of the last real attempt survives; only `last_error` is
+replaced, because the last thing that happened to the row is that CORE was told to
+stop, and that is what an operator needs to read first.
+
+This is why `markSuppressed` exists instead of a call to `markDead` with a different
+string: `markDead` increments `attempts`, correctly, for every case it serves.
+
+### Nothing is lost
+
+The loop is closed and every step of it is journalled or visible:
+
+```
+deactivate → queued rows suppressed (dead, reason recorded, nothing sent)
+           → reactivate
+           → npm run revive -- --queue event-delivery --subscription <id> --execute
+           → the worker sends the original envelope, same event_id
+```
+
+Reviving before reactivating is refused, so an operator working from the dead-letter
+queue cannot undo the switch by reviving past it. B-27 and B-28 are two halves of one
+operator story and neither is much use alone: suppression without a revival path
+parks events with no way back, and a revival path without suppression brings back
+rows that were being sent anyway.
+
+### Verification
+
+Three new tests in `tests/outbound-delivery.test.ts` (queued work stopped and the row
+terminal rather than re-claimed on every pass; a suppression after a real 503 leaving
+`attempts` at 1 and `last_status` at 503) and one in `tests/queue-revival.test.ts`
+walking the whole loop: switched off, suppressed, revival refused, switched on,
+revived, delivered under the original `event_id`. The eleven exhaustive
+`DeliveryWorkerResult` assertions in `tests/outbound-delivery.test.ts` gained
+`suppressed: 0` — they enumerate the result on purpose, so a new field cannot be
+added without every one of them noticing.
+
+642 tests over 37 files pass with `DATABASE_URL`; `tsc --noEmit` clean; governance,
+contract, migration and roadmap gates pass; no migration. Three mutations confirm the
+tests can fail: removing the `active` re-check fails 6 across both backends, charging
+an attempt for a suppression fails 4, and suppressing without making the row terminal
+fails 6. Each was restored and `tsc` re-run clean.
+
+### What CORE still needs from elsewhere
+
+Nothing new. Every blocker still open inside CORE's reach is an owner decision rather
+than an implementation gap: **B-14…B-19** (subscription policy), **B-20** (what is
+owed when work fails after a partial capture), **D-6…D-8**. **Milestone 9** remains
+blocked on B-5/B-6. B-28 is the last defect this agent found by reading CORE's own
+code; the next cycle needs either one of those answers or a new defect worth naming.
 No MOVE or MARKET code was read or written in this cycle.

@@ -112,6 +112,17 @@ fourth time is dead-lettered and counted as `failed_permanent`, not as another
 `reclaimed`. A queue that keeps reporting `reclaimed` is still recovering; once it
 reports `failed_permanent` it has stopped trying, and a person has to look.
 
+`failed_permanent` on the delivery worker now covers a third case that is neither a
+subscriber's refusal nor an exhausted recovery budget: a delivery **suppressed**
+because its subscription was deactivated (B-28). It gets no outcome of its own,
+because from the queue's point of view the delivery ended permanently without being
+delivered, which is what the counter already means — and a metric vocabulary that
+grows a label per reason ends up with a label per line of code. The distinction is
+carried where it is actionable instead: `DeliveryWorkerResult.suppressed`, and
+`last_error` on the row. A suppression is not charged an attempt, for the same
+reason a `reclaimed` item is not: nothing was sent, so there is no observed failure
+to record.
+
 Item duration is measured with `process.hrtime.bigint()`, not with the injectable
 domain clock: a test that freezes time must still be able to advance leases
 without producing fictional latencies.

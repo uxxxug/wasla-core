@@ -114,6 +114,63 @@ subscribers must be idempotent on it. A revival is refused if the subscription h
 since been deactivated, because deactivating a subscription is how sending to that
 subscriber is stopped and the worker itself does not re-check it.
 
+## Deactivation
+
+Deactivating a subscription is the only control CORE gives an operator over
+whether a subscriber is sent anything. The realistic reasons to reach for it are
+urgent — the endpoint is compromised, it is leaking, the signing secret is out, or
+the partner asked to be switched off — so it means **stop sending**, not *stop
+queueing*.
+
+Both halves are needed for that to be true, and until B-28 only the first existed:
+
+1. **Fan-out** filters on `active`, so no new delivery is queued.
+2. **The worker** re-checks `active` on each claimed delivery, and any row queued
+   while the subscription was still active is *suppressed*: dead-lettered with
+   `last_error` naming the subscription, without being sent.
+
+The old behaviour was that step 2 did not exist, so a delivery already pending
+when the subscription was switched off was still claimed, signed and POSTed, up to
+`maxAttempts` spread over hours of backoff. The previous reasoning — that those
+deliveries were promised and dropping them is worse than delivering them late —
+was right about one thing and wrong about the other: they are not dropped, but
+"late" is not what an operator asked for when they switched off a leaking endpoint.
+
+The check is in the worker rather than in a sweep at deactivation time, because a
+sweep cannot close the race it leaves: fan-out reads the active subscriptions, the
+deactivation commits, and then fan-out queues its row. Only a decision taken at the
+moment of sending sees the current answer. It also costs nothing — the worker was
+already reading the subscription for its endpoint and secret.
+
+A suppression **does not charge an attempt** and does not set `last_status`. No
+request was made, so there is no failure to record; charging one would inflate a
+later backoff and, since a revival preserves `attempts`, could hand back a row
+already at `maxAttempts` without anything ever having been sent. `last_status` is
+left as it was, so the response code of the last real attempt survives.
+
+Nothing is lost. The recovery loop is one command, and it is journalled:
+
+```
+deactivate  →  queued rows suppressed (dead, reason recorded)
+            →  reactivate
+            →  npm run revive -- --queue event-delivery --subscription <id> --execute
+            →  the worker sends the original envelope, same event_id
+```
+
+Revival **refuses** while the subscription is still inactive (see
+`docs/queue-revival.md`), so the two halves cannot contradict each other: an
+operator working from the dead-letter queue cannot undo the switch by reviving past
+it.
+
+Why `dead` rather than a fourth status: `dead` already means exactly "no further
+automatic attempt, visible to an operator, recoverable only when a human acts",
+which is what a suppressed delivery is. B-25 set the precedent when it added its own
+new route to `dead` — distinguished by `last_error` and its own count in the worker
+result, not by a new status, a migration and a wider check constraint. The worker
+reports `suppressed` separately from `dead` so the distinction is legible where it
+matters; in the metrics both are `failed_permanent`, because from the queue's point
+of view the delivery ended permanently without being delivered.
+
 ## Signing
 
 Each body is signed `HMAC-SHA256` with the subscription's secret, sent as
@@ -150,9 +207,10 @@ which no `service` role holds.
 
 - `POST /v1/event-subscriptions`
 - `GET /v1/event-subscriptions`
-- `POST /v1/event-subscriptions/:subscription_id/deactivate` — stops new work
-  being queued. Deliveries already queued stay queued: they were promised, and
-  dropping them silently is worse than delivering them late.
+- `POST /v1/event-subscriptions/:subscription_id/deactivate` — **stops sending.**
+  No new work is queued, and work already queued is not sent either: see
+  *Deactivation* below. Until B-28 this route stopped only the queueing, and
+  pending deliveries kept going out for hours afterwards.
 - `POST /v1/event-subscriptions/:subscription_id/activate`
 - `GET /v1/event-deliveries/undelivered` — pending plus dead. An empty list is
   the invariant to expect.

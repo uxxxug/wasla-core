@@ -76,8 +76,12 @@ journal beside the name of whoever took it.
   path in CORE that POSTs to an endpoint somebody deliberately switched off, at the
   request of an operator looking at a dead-letter queue rather than at the
   subscription list. A delivery that was already `pending` when the subscription
-  was deactivated is a different case and is left alone: it predates the decision,
-  and draining it is not this command's business.
+  was deactivated is no longer a different case: since B-28 the worker suppresses it
+  instead of sending it, so the whole loop is closed — deactivate, the queued rows
+  are dead-lettered with the reason recorded, reactivate, revive, and the subscriber
+  receives the original envelope. Reviving before reactivating is refused, so an
+  operator working from the dead-letter queue cannot undo the switch by reviving
+  past it.
 - **A scope that does not narrow is refused.** The queue name is not narrowing:
   `--queue outbox --limit 1000` reads "revive everything that ever died", which is
   precisely the request that has to be spelled out rather than defaulted into. At
