@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Deactivating a subscription now stops sending. Fan-out had always filtered on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, so every delivery already pending when the subscription was switched off was still claimed, signed and POSTed, up to `maxAttempts` spread over hours of backoff. An operator switching off a compromised or leaking endpoint got "stop queueing new work" when they had asked for "stop sending", which is not a defensible reading of the only control CORE offers over a subscriber. The worker now re-checks `active` on each claimed delivery and **suppresses** the row: `markSuppressed` on both backends dead-letters it with the reason recorded, without sending it, without charging an attempt and without touching `last_status`, so the evidence of the last real attempt survives. Checked at the moment of sending rather than swept at deactivation time, because a sweep cannot close the race it leaves behind. Nothing is lost: with B-27 in place the way back is reactivate, then `npm run revive`, and revival refuses while the subscription is still inactive so the two halves cannot contradict each other. **B-28 resolved.** 642 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **642 passed / 37 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **16** migrations applied — no migration this cycle either: suppression writes `status`, `last_error` and the claim columns, and reuses `dead` rather than adding a fourth status and widening a check constraint. Falsifiable and checked by mutation: removing the `active` re-check in the worker fails 6 tests across both backends, charging an attempt for a suppression fails 4, and suppressing without making the row terminal fails 6 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) recurred in this cycle's full run and passes in isolation; every one of the 642 assertions passed in both cases.
+**Last milestone:** Work that MOVE delivered *after* CORE cancelled the order is no longer lost. MOVE executes over minutes, so a cancellation can land mid-execution: CORE closed the fulfillment `cancelled`, released the hold and told MARKET, which told the customer their order was cancelled and gave the money back — and then MOVE's already in-flight `move.job.completed` arrived saying the work was done. CORE answered `409 fulfillment was cancelled` and stored nothing, so the dispatcher retried a refusal that can never come good five times across hours of backoff and dead-lettered the most consequential message MOVE can send as an error string in `inbound_event`; meanwhile the row read `cancelled` + `released`, a *consistent* pair, so both reconciliation reads returned empty and CORE asserted queryably that nothing was owed while a driver had delivered an order for free. The report is now answered and recorded: two columns (migration 0017) hold MOVE's own `completed_at` and the reporting job, `financialDisposition` reads them as `decision_required` so the case lands in B-20's queue rather than the finished pile, and the additive event `core.fulfillment.executed_after_cancellation` carries the fact to MARKET, which is the only side that can talk to that customer. CORE moves no money and says so: the hold was voided and cannot be captured, and re-charging a payer who was told their order was cancelled is not a decision CORE has been given. **B-29 resolved.** 657 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **657 passed / 38 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **17** migrations applied — migration 0017 adds two nullable columns and two check constraints to `fulfillment` (both-or-neither, and the marker only on `status = 'cancelled'`), with no index and no backfill: the reports this cycle exists for were refused and never stored, so every existing row correctly reads as unmarked. Falsifiable and checked by mutation: removing the marker check in `financialDisposition` fails 9 tests, dropping `is null` from the conditional write fails 1, restoring the old 409 fails 19, and recording a late `failed` report as though it were a delivery fails 2 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) recurred again in this cycle's full run and passes in isolation; every one of the 657 assertions passed.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -160,6 +160,7 @@ Nothing.
 | B-18 | Quota rollover versus reset undecided | Quota resets each period, because usage is counted per period. Unused allowance does not carry forward | An owner decision on whether unused allowance accumulates |
 | B-19 | Entitlement overrides (comped or granted access) undecided | There is no way to entitle an owner without a paid subscription. Adding one would introduce a second source of truth beside the subscription, which is exactly what the derived design avoids, so it needs a decision rather than an implementation | An owner decision on who may override and how it is audited |
 | B-20 | What is owed when work fails after part of the hold was already captured | CORE records the truth and stops. A `failed`/`cancelled` fulfillment holding `settlement_state = 'partially_captured'` derives `financial_disposition = 'decision_required'`, both closure events carry `financial_decision_required: true` with the observed `captured_minor`, and `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly these cases apart from CORE defects. CORE does **not** refund, retain, split, or mark the operation settled. `MoneyService.refund` is exactly-once, so whichever answer is chosen is executable the day it exists | Five separate owner decisions, listed under "B-20 as a contract gap" in the 2026-09-12 (second) cycle: who states the executed amount, who decides whether partial work earns partial settlement, who authorises a refund, whether a cancellation fee exists, and which system sends the final disposition |
+| B-30 | What is owed when MOVE delivers work after the order was cancelled | CORE records the fact and stops. The fulfillment stays `cancelled` with the hold released, the marker columns added in migration 0017 say the work was performed anyway, `financial_disposition` derives `decision_required`, `core.fulfillment.executed_after_cancellation` carries it to MARKET, and no money moves. CORE cannot move any: the cancellation voided the hold, a voided hold cannot be captured, and re-charging a payer who has been told their order was cancelled is not a decision CORE was given. Raised by the B-29 cycle, which closed the part CORE owns — losing the fact — and left the part it does not | An owner decision, of exactly B-20's kind: whether MOVE is paid out of band, whether the payer is asked again or the order reinstated, and who absorbs the loss when neither happens. One answer per branch is enough; CORE has the reading and the event to act on it the moment the answer exists |
 | B-21 | **Resolved.** Two overlapping closures both committed, because the closing `update` named the row and not its version, so the loser overwrote the winner's terminal row and published a second closure event. `updateIfStatusIn` / `insertIfAbsent` return `applied` \| `stale` and the service treats `stale` as "somebody else closed it", so one closure produces one closure event. Money was never wrong; only the events were multi-valued | resolved | — |
 | B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
 | B-23 | **Resolved.** The three closure/dispatch payloads carried no `organization_id`, so a tenant-scoped notification recipient for them could never match and had to be refused outright (HTTP 400), and MARKET/MOVE could not route a closure without calling CORE back. CORE owns tenancy and is the only system that can state it, so the omission was CORE's to fix. `core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry a **required** `organization_id`, read from the fulfillment row rather than from any prior event — which is what makes it correct on the intake-refusal path, where the row is created and closed in one transaction and no `created` event is ever published. `TENANT_SCOPED_EVENT_TYPES` widened accordingly; the registry's refusal is unchanged and still guards `core.*` events that genuinely name no organization (`core.payment.captured`). Proven by `tests/fulfillment-lifecycle-contract.test.ts`, which also validates emitted payloads against the published schemas, and by an end-to-end fan-out test in `tests/notifications.test.ts` showing two tenants watching one event type and only the right one being messaged | resolved | — |
@@ -168,6 +169,7 @@ Nothing.
 | B-26 | **Resolved.** A claim was exclusive at the instant it was taken (B-22), visible while held (B-24) and bounded in how often it could be taken back (B-25) — and none of that made it exclusive *over time*. A worker that stalled past its lease, was reclaimed, and then called `markPublished`/`markProcessed`/`markDelivered` succeeded, because the acknowledgement named the row and not the claim; the row then recorded the abandoned attempt instead of the one that happened. The worst case is a stale success on `inbound_event`: an event marked `processed` whose live attempt actually failed is never dispatched again and the failure is invisible. Migration 0016 adds `claim_token text` to `outbox`, `inbound_event` and `event_delivery` — the shape `notification` has had since 0012 — stamped by `claimDue`, cleared by recovery and by every acknowledgement, and matched by all nine acknowledgements across the six store implementations, which now return `boolean`. `src/platform/eventing/fencing.ts` holds `newClaimToken()`, `isFenced()`, `UNFENCED` and `FencedError`. The three workers report a `fenced` count and emit `core_worker_outcomes_total{outcome="fenced"}`, an outcome that has been in the catalogue since Milestone 8 and that only `notification` could produce until now. The relay is the one transactional case: `markPublished` runs inside the transaction that queues the fan-out, so a refusal throws `FencedError` to roll those delivery rows back, and the catch block checks for it **before** the attempts arithmetic — a fence is not a failed publish and must not charge an attempt or impose a backoff. Replay passes `UNFENCED` and is the only caller in CORE entitled to: an operator advancing a `dead` row holds no claim, and a fence that applied to every caller would have broken the only recovery path this queue has. Rejected: `uuid` (to match `notification.claim_token text`), `gen_random_uuid()` in the database (unavailable to the in-memory backend — B-12), a token per row rather than per batch claim (one statement per row, refusing nothing extra), and the strong constraint "every claimed row carries a token" (false for rows already claimed when the migration runs, and a backfilled token would fence out a worker still doing real work). What it does **not** fix: the duplicate side effect. A POST or a bus publish that already happened is not undone — delivery stays at-least-once and subscribers still deduplicate on `event_id`. The fence protects what the row records | resolved | — |
 | B-27 | **Resolved.** A dead `outbox` or `event_delivery` row had no revival path in CORE at all. Replay reads `inbound_event` only, and there was no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead outbox row — an event MOVE and MARKET would never receive — was durable and unreachable at the same time, which is the exact defect Milestone 6 removed for inbound events. B-25 had made it worse by adding a second route to `dead`. Recovering a row meant a manual `update` against the database, unreviewed and unaudited, and free to resurrect a row that had already been published | Closed by `selectDead`/`revive` on `OutboxStore` and `DeliveryStore` in both backends, `QueueRevivalService` (`src/platform/replay/revive.ts`), the `events.revive` permission and `npm run revive`, all documented in `docs/queue-revival.md`. The owner decision is taken and recorded: revival **re-publishes the original envelope unchanged**. It publishes nothing itself — the row goes back to `pending` and the existing relay and delivery worker do what they always do, which keeps one publish path in CORE and keeps `event_id` stable for every consumer inbox and every subscriber that deduplicates on it. A fresh envelope was rejected: it would need a second publish path and would make a month-old fact arrive as news |
 | B-28 | **Resolved.** `DeliveryFanOut` filtered `subscriptionsFor` on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, and a delivery that was already `pending` when the subscription was switched off was still claimed, signed and POSTed, for up to `maxAttempts` across hours of backoff. Found while building B-27, whose revival refuses an inactive subscription; the worker's own behaviour was the other half and contradicted it. The documented reasoning for the old behaviour — those deliveries were promised, and dropping them is worse than delivering them late — was right that they must not be dropped and wrong that "late" is what an operator asked for when switching off a leaking endpoint | Closed by `markSuppressed` on `DeliveryStore` in both backends and an `active` re-check in the worker: the row is dead-lettered with the reason recorded, unsent, with `attempts` and `last_status` untouched, and reported as `suppressed` in the worker result. Read as **stop sending**, not *stop queueing*, because the realistic reasons to deactivate are urgent — a compromised endpoint, a leaked secret, a partner asking to be switched off. Checked at the moment of sending rather than swept at deactivation, since a sweep cannot close the race where fan-out reads the active subscriptions, the deactivation commits and fan-out then queues its row. `dead` reused rather than a fourth status, following the precedent B-25 set for its own new route to `dead`. Recovery is reactivate then `npm run revive` |
+| B-29 | **Resolved.** MOVE executes over minutes, so a cancellation can arrive mid-execution. CORE closed the fulfillment `cancelled`, released the hold and published `core.fulfillment.cancelled`, and then refused MOVE's already in-flight `move.job.completed` with `409 fulfillment was cancelled` and recorded nothing. Two failures followed, both worse than the race: the inbound dispatcher retries whatever is thrown at it and this refusal can never come good — a cancelled fulfillment does not reopen — so the report was retried five times across hours of backoff and dead-lettered as an error string; and the row read `cancelled` + `released`, which `financialDisposition` calls `settled`, so `listFinanciallyInconsistent()` and `listPendingFinancialDecision()` both returned empty while a driver had delivered an order whose payer had been refunded. Found by reading CORE's own code and proved with a throwaway probe before anything was changed; the existing single-closure test covered only the *simultaneous* race, where refusing the loser is still correct, and nothing covered the sequential shape | Closed by recording the fact instead of refusing it. Migration 0017 adds `executed_after_cancellation_at` (MOVE's `completed_at`, not CORE's receipt time) and `executed_after_cancellation_job_reference` (separate from `move_job_reference`, which is null whenever the cancellation beat MOVE's acceptance — the commonest ordering for this case), both nullable, with check constraints for both-or-neither and marker-only-on-cancelled. A conditional store write `markExecutedAfterCancellation` makes the marker single-valued the same way B-21 made the closure single-valued, so one report produces one marker, one event and one audit entry however often it is redelivered. `financialDisposition` returns `decision_required` — placed after the `unsettled` and still-`held` checks so a CORE defect is never masked by a business question — and the additive event `core.fulfillment.executed_after_cancellation` v1 tells MARKET, the only side that can talk to the customer it already told the order was cancelled. No existing contract changed and the cancellation is not re-published. CORE moves **no** money, deliberately: the voided hold cannot be captured and re-charging a refunded payer is not CORE's decision — who pays MOVE and who absorbs the loss is a B-20-class owner question, recorded as **B-30**. Scope is the `cancelled` branch only: a late `completed` on a `failed` row is either MOVE contradicting itself or a redelivery of the report that closed the row, and keeps its existing refusal; a late `failed` after a cancellation records nothing and is answered rather than refused, since both sides agree the work was not delivered and a 409 would only be dead-lettered for nothing. Reports lost before the deploy can be recovered by reviving the `inbound_event` rows carrying `fulfillment was cancelled` (B-27, `npm run revive`); the migration performs no backfill and invents no history |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -3583,3 +3585,126 @@ owed when work fails after a partial capture), **D-6…D-8**. **Milestone 9** re
 blocked on B-5/B-6. B-28 is the last defect this agent found by reading CORE's own
 code; the next cycle needs either one of those answers or a new defect worth naming.
 No MOVE or MARKET code was read or written in this cycle.
+
+## Cycle 2026-09-12 (thirteenth) — B-29, work delivered after cancellation (CORE-only agent)
+
+Scope was CORE alone. No MOVE or MARKET code was read or written. B-29 did not exist
+in this file when the cycle started: B-28 had exhausted the defects this agent had
+found, so the cycle began by hunting for a new one in CORE's own code and proving it
+before changing anything.
+
+### How it was found, and proved
+
+By following one question through the code: what happens to a `move.job.completed`
+that arrives after a cancellation has already closed the fulfillment? A throwaway
+probe test answered it exactly — `THROWN: fulfillment was cancelled 409`, `ROW:
+cancelled released customer_cancelled`, `INCONSISTENT: 0`, `DECISION: 0`, wallet
+fully refunded. The probe was deleted once the real tests existed; it existed to
+establish that the defect was real before a line of production code moved.
+
+The reason no existing test caught it is worth recording. `fulfillment-single-closure`
+test 5 covers the *simultaneous* race and asserts the losing closure changes nothing,
+which is still correct. The shape that matters here is *sequential*: MOVE runs for
+minutes, the cancellation commits and is published, and the completion turns up
+afterwards. Nothing covered that, and the two readings that should have caught it —
+`listFinanciallyInconsistent()` and `listPendingFinancialDecision()` — were the ones
+returning empty.
+
+### Both halves of the failure
+
+The 409 was the visible half. The invisible half was worse: the dispatcher retries
+whatever a consumer throws, and a refusal that can never come good — a cancelled
+fulfillment does not reopen — burned five attempts across hours of backoff and then
+dead-lettered the report. So the only trace that a driver had delivered an order was
+an error string in a queue table nobody reconciles against.
+
+The second half was the reading. `cancelled` + `released` is a *consistent* pair;
+`financialDisposition` calls it `settled`. CORE was not merely unaware that money was
+owed, it answered the question wrongly to anyone who asked. Being wrong is bad; being
+confidently and queryably wrong is worse, because it stops the search.
+
+### What was built
+
+Migration 0017 adds two nullable columns to `fulfillment`:
+`executed_after_cancellation_at`, which is MOVE's own `completed_at` and not CORE's
+receipt time (the question an operator asks is how long after the cancellation the
+work landed), and `executed_after_cancellation_job_reference`, kept separately from
+`move_job_reference` because that column is null whenever the cancellation beat
+MOVE's acceptance — precisely the ordering that produces this case most often. Two
+check constraints: both columns or neither, and the marker only on
+`status = 'cancelled'`. No index, because both reconciliation reads scan the table
+already and a partial index on a column that is null for nearly every row is a write
+cost with no reader; when those reads become SQL predicates the index belongs in that
+migration. No backfill, because the reports this cycle exists for were refused and
+never stored, so unmarked is the *true* reading of every existing row.
+
+`markExecutedAfterCancellation` is a conditional write — `status = 'cancelled' and
+executed_after_cancellation_at is null` — deliberately separate from
+`updateIfStatusIn` so B-21's closure guard is not widened to admit a write that is
+not a closure. It makes the marker single-valued the way B-21 made the closure
+single-valued: one report, one marker, one event, one audit entry, however many times
+MOVE's queue redelivers it, and a second job reporting later does not overwrite the
+first record.
+
+`financialDisposition` returns `decision_required` for a marked row, placed **after**
+the `unsettled` and still-`held` checks. Ordering is the whole point: a row still
+holding money on a closed fulfillment is CORE failing to finish its own work, and a
+business question must never mask an engineering defect.
+
+The new event `core.fulfillment.executed_after_cancellation` v1 is additive; no
+existing contract changed and the cancellation is not re-published, because MARKET
+already handled it and must not handle it twice. It goes out because MARKET is the
+only side that can talk to the customer it has already told the order was cancelled.
+
+### What was deliberately not built
+
+No money moves. Not as caution — as a matter of what is possible and what is
+legitimate. The cancellation voided the hold and a voided hold cannot be captured;
+inventing a fresh charge against a payer who was told their order was cancelled is
+not a decision CORE has ever been given. Recorded as **B-30**, alongside B-20, which
+is the same question with a different trigger.
+
+Scope was held to the `cancelled` branch. A late `completed` for a fulfillment closed
+`failed` is either MOVE contradicting its own earlier report or a redelivery of the
+very report that closed the row; marking it would fabricate a contradiction out of a
+duplicate, so that path keeps its existing refusal untouched. A late `failed` after a
+cancellation records nothing and is answered rather than refused — both sides agree
+the work was not delivered, so there is nothing to surface, and a 409 would only be
+retried until it was dead-lettered over a report that contradicts nothing.
+
+### Tests
+
+A new file, `tests/fulfillment-post-cancellation-execution.test.ts`, on both
+backends: the report is answered and recorded with the money left exactly where the
+cancellation put it; redelivery and a second job change nothing; a late `failed`
+records nothing; the acceptance-lost ordering records the job that reported even
+though `move_job_reference` is null; the store contract answers `applied` once and
+`stale` for an already-marked row, a row that is not cancelled and a row that does
+not exist; the disposition reads `decision_required` for `released` and `none` and
+still `inconsistent` for `held` and `unsettled`; and the two Postgres check
+constraints refuse a half-written marker and a marker on a non-cancelled row. One
+case drives the real inbound queue — submit, `drainOnce` — and asserts
+`processed: 1, dead: 0`, which is the half of the defect that was invisible from the
+service.
+
+Four existing tests asserted the old refusal and were rewritten rather than deleted,
+each keeping the invariant it was really about: the closure count, the money, and the
+reason and instant of the cancellation are all still asserted unchanged, and the
+simultaneous race in `concurrency-and-restart` now asserts that the cancellation
+winner leaves a decision pending instead of nothing at all.
+
+657 tests over 38 files pass with `DATABASE_URL`; `tsc --noEmit` clean; governance,
+contract, migration and roadmap gates pass. Four mutations confirm the tests can
+fail: removing the marker check in `financialDisposition` fails 9, dropping `is null`
+from the conditional write fails 1, restoring the old 409 fails 19, and recording a
+late `failed` as a delivery fails 2. Each was restored and `tsc` re-run clean.
+
+### What CORE still needs from elsewhere
+
+Nothing new to implement, one new question to answer. **B-30** joins **B-20** as an
+owner decision about money CORE can describe but not direct. **B-14…B-19**
+(subscription policy) and **D-6…D-8** remain open owner decisions; **Milestone 9**
+remains blocked on B-5/B-6. Operators deploying this should know that reports lost
+before it can be recovered: revive the `inbound_event` rows whose `last_error`
+carries `fulfillment was cancelled` (B-27, `npm run revive`) and the new path records
+them properly. No MOVE or MARKET code was read or written in this cycle.

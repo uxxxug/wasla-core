@@ -325,7 +325,7 @@ stored, so it cannot drift from them:
 | `no_money` | no hold guards this fulfillment | nobody |
 | `awaiting_execution` | a hold guards open work | nobody yet |
 | `settled` | money reached a terminal state that agrees with the outcome | nobody |
-| `decision_required` | money moved, work did not complete, policy unknown | the business (B-20) |
+| `decision_required` | money moved, work did not complete, policy unknown; or work was delivered after the order was cancelled (B-29) | the business (B-20) |
 | `inconsistent` | the two states contradict each other, or `unsettled` | an engineer |
 
 `isFinanciallyConsistent` collapsed the last two into one `false`, which put a
@@ -405,6 +405,81 @@ key to a hold CORE does not have — so the column is left null and the declared
 reference is kept on the audit entry as `unresolved_hold_reference`. Before that,
 this documented path could not commit on PostgreSQL at all, and only worked
 in memory.
+
+## Work delivered after the order was cancelled (B-29, resolved 2026-09-12)
+
+MOVE executes over minutes. A cancellation can arrive during those minutes, and
+CORE handles it correctly: the fulfillment closes `cancelled`, the hold is
+released, `core.fulfillment.cancelled` goes out, and MARKET tells the customer the
+order is cancelled and hands the money back. What then arrives is MOVE's already
+in-flight `move.job.completed` with `outcome: "completed"` — the work was
+performed anyway, for an order nobody is paying for.
+
+CORE used to answer that report with `409 fulfillment was cancelled` and store
+nothing. Both consequences were worse than the race:
+
+- The inbound dispatcher retries whatever is thrown at it, and this refusal can
+  never come good, because a cancelled fulfillment does not reopen. So the report
+  was retried five times across hours of backoff and then dead-lettered in
+  `inbound_event`. The single most consequential message MOVE can send ended up as
+  an error string in a queue table.
+- The row read `cancelled` + `released`, which is a *consistent* pair, so
+  `financialDisposition` called it `settled` and both reconciliation reads —
+  `listFinanciallyInconsistent()` and `listPendingFinancialDecision()` — returned
+  nothing. CORE asserted, queryably, that no money question was open, while a
+  driver had delivered an order for free.
+
+### What CORE does now
+
+The report is answered, not refused, and the fact is recorded on the fulfillment:
+
+| column | meaning |
+|---|---|
+| `executed_after_cancellation_at` | MOVE's `completed_at` for the work, not CORE's receipt time. An operator's first question is how far after the cancellation the work landed, and a receipt time answers a different question. |
+| `executed_after_cancellation_job_reference` | the job that reported. Kept separately from `move_job_reference`, which is null whenever the cancellation beat MOVE's acceptance — precisely the ordering that produces this case most often. |
+
+Two check constraints hold the shape: both columns or neither, and the marker only
+on `status = 'cancelled'`. `financialDisposition` reads the marker and answers
+`decision_required`, after the `unsettled` and still-`held` checks so a real CORE
+defect is never masked by a business question. The new event
+`core.fulfillment.executed_after_cancellation` carries the fact to MARKET, which is
+the only side that can talk to the customer it already told the order was
+cancelled. The cancellation itself is not re-published and does not change.
+
+### What CORE deliberately does not do
+
+It moves no money. It cannot: the cancellation voided the hold, and a voided hold
+cannot be captured. Nor should it invent a new charge — the payer consented to a
+purchase CORE then told them was cancelled, and re-charging them silently is not a
+decision CORE has been given. Whether MOVE is paid out of band, whether the payer
+is asked again, and who absorbs the loss are questions of exactly B-20's kind. What
+CORE owes is to hold the question somewhere a person can find it, which is what the
+`decision_required` reading and the event now do.
+
+### Scope: the cancelled branch only
+
+A late `completed` for a fulfillment already closed `failed` is **not** marked.
+There it is either MOVE contradicting its own earlier failure report, or a
+redelivery of the very report that closed the row; marking it would fabricate a
+contradiction out of a duplicate. That path keeps its existing refusal
+(`fulfillment already closed by another job`) unchanged.
+
+A late `failed` after a cancellation records nothing, and is answered rather than
+refused. MOVE saying the work was not delivered and CORE saying the order was
+cancelled agree with each other: there is nothing to surface and no decision for
+anyone to take, and a 409 would only be retried until the report was dead-lettered
+over a report that contradicts nothing.
+
+### Recovering the reports already lost
+
+This change is not retroactive and the migration performs no backfill: it invents
+no history. Reports refused before the deploy were never stored, so every existing
+row correctly reads as unmarked. Those reports may still be sitting in
+`inbound_event` with `status = 'dead'` and `last_error` containing
+`fulfillment was cancelled`. After deploying this change they can be revived with
+the B-27 revival path (`npm run revive`, see `docs/queue-revival.md`), and the new
+code will record them properly instead of refusing them again. That is a deliberate
+operator action taken once, not something CORE does on its own.
 
 ## Not implemented: multiple holds per fulfillment
 

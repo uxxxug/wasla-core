@@ -51,7 +51,7 @@ CORE inventing rules for data it does not issue.
 
 | Column | Why |
 |---|---|
-| `market_order_reference`, `move_job_reference` | Another product's identifier. CORE keeps it opaque and must accept whatever MARKET or MOVE uses — today that is a UUID, but CORE does not get to require it |
+| `market_order_reference`, `move_job_reference`, `executed_after_cancellation_job_reference` | Another product's identifier. CORE keeps it opaque and must accept whatever MARKET or MOVE uses — today that is a UUID, but CORE does not get to require it |
 | `identity_link.external_id` | A channel's own user id. A Telegram user id is a signed 64-bit integer, not a UUID |
 | `business_reference` | A caller-supplied idempotency key, chosen to be meaningful to the caller |
 | `correlation_id`, `causation_id` | Trace identifiers that frequently originate outside CORE |

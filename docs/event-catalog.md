@@ -17,6 +17,7 @@ Delivery is at-least-once. Consumers must be idempotent on `event_id` via their 
 | `core.fulfillment.dispatched` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.dispatched.v1.schema.json` |
 | `core.fulfillment.completed` | 1 | implemented | fulfillment | MARKET | `contracts/events/core.fulfillment.completed.v1.schema.json` |
 | `core.fulfillment.cancelled` | 1 | implemented | fulfillment | MARKET, MOVE | `contracts/events/core.fulfillment.cancelled.v1.schema.json` |
+| `core.fulfillment.executed_after_cancellation` | 1 | implemented | fulfillment | MARKET, MOVE | `contracts/events/core.fulfillment.executed_after_cancellation.v1.schema.json` |
 | `core.subscription.created` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.created.v1.schema.json` |
 | `core.subscription.period_settled` | 1 | implemented | subscription | MARKET | `contracts/events/core.subscription.period_settled.v1.schema.json` |
 | `core.subscription.past_due` | 1 | implemented | subscription | MARKET, MOVE | `contracts/events/core.subscription.past_due.v1.schema.json` |
@@ -49,7 +50,19 @@ market.order.created            (MARKET -> CORE)
        │    └─ core.fulfillment.completed (outcome failed)   status: failed
        └─ cancellation (MARKET or operator, via CORE API)
             └─ core.fulfillment.cancelled (CORE -> MARKET, MOVE)     status: cancelled
+                 └─ move.job.completed arriving afterwards, outcome completed
+                      └─ core.fulfillment.executed_after_cancellation
+                                        (CORE -> MARKET, MOVE)      status: cancelled (unchanged)
 ```
+
+The last branch is the one exception to "every transition is published": it is not a
+transition. The fulfillment stays `cancelled` and the money stays where the
+cancellation left it. What is published is a fact that arrived after the lifecycle
+had ended — MOVE performed the work anyway — and it is published because MARKET has
+already told a customer their order was cancelled and handed the money back, and only
+MARKET can talk to that customer about an order that turned up regardless. Before
+B-29 that report was refused with a 409, retried until the inbound event was
+dead-lettered, and stored nowhere. See `docs/settlement.md`.
 
 Every transition of the fulfillment lifecycle is published. A consumer that
 replays the CORE stream can reconstruct the exact state without querying CORE.
