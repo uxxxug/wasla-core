@@ -223,4 +223,63 @@ describe.skipIf(!DATABASE_URL)("the CORE schema enforces execution/money consist
     const definitions = indexes.rows.map((row) => String(row["indexdef"]));
     expect(definitions.some((definition) => definition.includes("'unsettled'"))).toBe(true);
   });
+
+  it("refuses a claim on a queue row that is no longer pending (B-24)", async () => {
+    // `claimed_at` is a lease held by a running worker. On a published, processed,
+    // delivered or dead row it cannot mean anything, and if it could be left
+    // behind it would be counted as work in flight for ever. The application
+    // clears it on every acknowledgement; this asserts the database would not
+    // accept the mistake even if a future writer forgot.
+    const eventId = randomUUID();
+    await client.query(
+      `insert into outbox (event_id, event_type, version, producer, occurred_at,
+                           correlation_id, entity_type, entity_id, payload, status,
+                           attempts, next_attempt_at, created_at)
+       values ($1, 'core.fulfillment.dispatched', 1, 'wasla-core', now(), $2,
+               'fulfillment', $3, '{}'::jsonb, 'pending', 0, now(), now())`,
+      [eventId, `corr-${eventId}`, randomUUID()],
+    );
+
+    // Claimed while pending: allowed.
+    await client.query("update outbox set claimed_at = now() where event_id = $1", [eventId]);
+
+    // Published while still claimed: refused, by name, so the failure is
+    // attributable rather than a generic constraint violation.
+    let constraint: string | undefined;
+    try {
+      await client.query("update outbox set status = 'published' where event_id = $1", [eventId]);
+    } catch (error) {
+      constraint = (error as { constraint?: string }).constraint;
+    }
+    expect(constraint).toBe("outbox_claim_check");
+
+    // Releasing the claim in the same statement is accepted, which is what every
+    // acknowledgement in the store adapters now does.
+    await client.query(
+      "update outbox set status = 'published', claimed_at = null where event_id = $1",
+      [eventId],
+    );
+    const row = await client.query("select status, claimed_at from outbox where event_id = $1", [
+      eventId,
+    ]);
+    expect(row.rows[0]?.["status"]).toBe("published");
+    expect(row.rows[0]?.["claimed_at"]).toBe(null);
+  });
+
+  it("indexes the leases so recovery does not scan the queues (B-24)", async () => {
+    // Recovery runs on every worker tick and looks for pending rows that carry a
+    // claim whose lease has expired. Without a partial index on exactly that
+    // predicate, the cheapest thing a worker does on a healthy queue becomes a
+    // scan of every row it has ever published.
+    for (const table of ["outbox", "inbound_event", "event_delivery"]) {
+      const indexes = await client.query("select indexdef from pg_indexes where tablename = $1", [
+        table,
+      ]);
+      const definitions = indexes.rows.map((row) => String(row["indexdef"]));
+      expect(
+        definitions.some((d) => d.includes("claimed_at IS NOT NULL")),
+        `${table} has no lease index`,
+      ).toBe(true);
+    }
+  });
 });

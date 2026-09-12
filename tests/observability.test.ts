@@ -668,6 +668,103 @@ describe.each(backends)("operational metrics on $name", (backend) => {
     expect(core.metrics.gaugeValue("core_queue_depth", { queue: "outbox", state: "retrying" })).toBe(1);
   });
 
+  it("tells an abandoned claim apart from a scheduled retry, and counts the recovery", async () => {
+    // B-24. Before `claimed_at` these two rows were indistinguishable: both
+    // pending, both with a `next_attempt_at` in the future. One is waiting for a
+    // retry it asked for; the other is held by a process that died. An operator
+    // could not tell them apart, and `reclaimed` was uncountable for this worker
+    // because nothing on the row said a claim had ever happened.
+    await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+    await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+
+    // A worker claims everything due, acknowledges one row as a failure to be
+    // retried in a minute, and then dies holding the rest.
+    const claimed = await store.outbox.claimDue(clock.now(), 100, 30_000);
+    expect(claimed.length).toBeGreaterThan(1);
+    const abandoned = claimed.length - 1;
+    const retriedId = claimed[0]!.event.event_id;
+    await store.outbox.markFailed(
+      retriedId,
+      "transient",
+      new Date(clock.now().getTime() + 60_000),
+    );
+
+    // Inside the lease: one row scheduled for a retry, the rest being worked on.
+    // `in_flight` is the answer to "what is a worker doing right now", which no
+    // reader of these tables could give before.
+    expect(await store.outbox.counts()).toMatchObject({
+      retrying: 1,
+      in_flight: abandoned,
+      abandoned: 0,
+    });
+
+    // The lease runs out. Only the held rows become abandoned; the retrying row
+    // is still simply waiting its turn, and must never be counted as stuck.
+    clock.advance(31_000);
+    expect(await store.outbox.counts()).toMatchObject({
+      retrying: 1,
+      in_flight: 0,
+      abandoned,
+    });
+    await core.depthSampler.sample();
+    expect(
+      core.metrics.gaugeValue("core_queue_depth", { queue: "outbox", state: "abandoned" }),
+    ).toBe(abandoned);
+
+    // The relay recovers exactly those rows, counts the recovery as a distinct
+    // outcome, and publishes them in the same pass.
+    const drained = await core.publisher.drainOnce();
+    expect(drained.reclaimed).toBe(abandoned);
+    expect(drained.published).toBe(abandoned);
+    expect(
+      core.metrics.counterValue("core_worker_outcomes_total", {
+        worker: "outbox_relay",
+        outcome: "reclaimed",
+      }),
+    ).toBe(abandoned);
+
+    // The retrying row was not touched by the recovery, and its retry budget was
+    // not charged for an attempt nobody observed failing.
+    const retried = await store.outbox.get(retriedId);
+    expect(retried!.status).toBe("pending");
+    expect(retried!.claimed_at).toBeNull();
+    expect(retried!.attempts).toBe(1);
+    expect(await store.outbox.counts()).toMatchObject({ retrying: 1, abandoned: 0 });
+  });
+
+  it("counts an abandoned inbound claim as reclaimed by the dispatcher", async () => {
+    const token = await serviceToken("wasla-market");
+    const reference = `mkt-${randomUUID()}`;
+    await core.router.handle({
+      method: "POST",
+      url: "/v1/events",
+      body: orderEvent(reference),
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    // A dispatcher claims the accepted event and dies before processing it.
+    const claimed = await store.inbound.claimDue(clock.now(), 100, 30_000);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.claimed_at).not.toBeNull();
+
+    // Inside the lease nothing may take it, and nothing is stuck yet.
+    expect(await store.inbound.claimDue(clock.now(), 100, 30_000)).toEqual([]);
+    expect(await store.inbound.counts()).toMatchObject({ in_flight: 1, abandoned: 0 });
+
+    clock.advance(31_000);
+    expect(await store.inbound.counts()).toMatchObject({ in_flight: 0, abandoned: 1 });
+
+    const drained = await core.dispatcher.drainOnce();
+    expect(drained.reclaimed).toBe(1);
+    expect(drained.processed).toBe(1);
+    expect(
+      core.metrics.counterValue("core_worker_outcomes_total", {
+        worker: "inbound_dispatcher",
+        outcome: "reclaimed",
+      }),
+    ).toBe(1);
+  });
+
   it("serves the exposition without touching the database or changing any state", async () => {
     const token = await serviceToken("wasla-market");
     const reference = `mkt-${randomUUID()}`;

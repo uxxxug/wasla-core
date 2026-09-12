@@ -127,7 +127,7 @@ describe.each(backends)("worker claims on $name", (backend) => {
     }
   });
 
-  it("returns an abandoned outbox claim when its lease expires", async () => {
+  it("returns an abandoned outbox claim when its lease expires, and counts it", async () => {
     await backend.truncate();
     const clock = new FixedClock();
     const { store, close } = await backend.open(clock);
@@ -135,15 +135,72 @@ describe.each(backends)("worker claims on $name", (backend) => {
       await store.outbox.append(event(0), NO_SCOPE);
       const claimed = await store.outbox.claimDue(clock.now(), ROWS, 30_000);
       expect(claimed).toHaveLength(1);
+      // The claim is on the row, which is what B-24 added: until now the only
+      // evidence a worker held this row was a `next_attempt_at` in the future,
+      // which a scheduled retry looks exactly like.
+      expect(claimed[0]!.claimed_at).not.toBeNull();
 
       // The worker died. Nothing marked it published or failed.
       clock.advance(29_000);
       expect(await store.outbox.claimDue(clock.now(), ROWS, 30_000)).toEqual([]);
+      expect(await store.outbox.reclaimExpired(clock.now())).toBe(0);
+
       clock.advance(2_000);
+      // The lease has run out. `claimDue` still refuses it — a claimed row is
+      // not up for grabs, it is *owed a recovery* — and the recovery is the
+      // countable event.
+      expect(await store.outbox.claimDue(clock.now(), ROWS, 30_000)).toEqual([]);
+      expect(await store.outbox.reclaimExpired(clock.now())).toBe(1);
+
+      // No message is lost: the row is pending, unclaimed and due again.
       const reclaimed = await store.outbox.claimDue(clock.now(), ROWS, 30_000);
-      // No message is lost: the row is still pending and comes back on its own.
       expect(reclaimed).toHaveLength(1);
       expect(reclaimed[0]!.status).toBe("pending");
+      // And `attempts` was not charged for an attempt nobody observed failing.
+      expect(reclaimed[0]!.attempts).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it("releases the claim on every acknowledgement, so a finished row never looks held", async () => {
+    // B-24. `claimed_at` is only meaningful while a worker holds the row. If an
+    // acknowledgement left it set, a published row would be counted as in flight
+    // for ever and `abandoned` would climb on a queue where nothing is wrong —
+    // the alarm this column exists to justify would be permanently on.
+    await backend.truncate();
+    const clock = new FixedClock();
+    const { store, close } = await backend.open(clock);
+    try {
+      for (let i = 0; i < 3; i++) await store.outbox.append(event(i), NO_SCOPE);
+      const claimed = await store.outbox.claimDue(clock.now(), ROWS, 30_000);
+      expect(claimed).toHaveLength(3);
+
+      await store.outbox.markPublished(claimed[0]!.event.event_id);
+      await store.outbox.markFailed(
+        claimed[1]!.event.event_id,
+        "transient",
+        new Date(clock.now().getTime() + 60_000),
+      );
+      await store.outbox.markDead(claimed[2]!.event.event_id, "gave up");
+
+      for (const row of claimed) {
+        const after = await store.outbox.get(row.event.event_id);
+        expect(after!.claimed_at, `${after!.status} still carries a claim`).toBeNull();
+      }
+      // Nothing is in flight and nothing is stuck: one published, one waiting on
+      // a retry it asked for, one dead.
+      expect(await store.outbox.counts()).toMatchObject({
+        in_flight: 0,
+        abandoned: 0,
+        retrying: 1,
+        published: 1,
+        dead: 1,
+      });
+      // And after the failed row's backoff elapses it is claimable again, which
+      // is the difference between a released claim and a lease that never ended.
+      clock.advance(61_000);
+      expect(await store.outbox.claimDue(clock.now(), ROWS, 30_000)).toHaveLength(1);
     } finally {
       await close();
     }
@@ -210,6 +267,7 @@ describe.each(backends)("worker claims on $name", (backend) => {
           next_attempt_at: clock.now().toISOString(),
           created_at: clock.now().toISOString(),
           delivered_at: null,
+          claimed_at: null,
         });
       }
 

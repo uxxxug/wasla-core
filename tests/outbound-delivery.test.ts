@@ -31,14 +31,22 @@ const SECRET = "a".repeat(40);
 
 interface Backend {
   name: string;
-  open(): Promise<{ store: Persistence; close(): Promise<void> }>;
+  /**
+   * The clock is the test's, not the backend's. It used to be a fresh
+   * `FixedClock` per store, so the store and the app that polled it kept
+   * separate notions of `now`: advancing the test clock moved the worker forward
+   * and left the store behind. Nothing read the clock inside the store until
+   * B-24 made `counts()` cut claimed rows at a point in time, at which point a
+   * store on its own clock reports rows as being worked on for ever.
+   */
+  open(clock: FixedClock): Promise<{ store: Persistence; close(): Promise<void> }>;
 }
 
 const backends: Backend[] = [
   {
     name: "in-memory",
-    async open() {
-      return { store: memoryPersistence(new FixedClock()), async close() {} };
+    async open(clock) {
+      return { store: memoryPersistence(clock), async close() {} };
     },
   },
 ];
@@ -46,11 +54,11 @@ const backends: Backend[] = [
 if (url) {
   backends.push({
     name: "postgres",
-    async open() {
+    async open(clock) {
       const { Pool } = await import("pg");
       const pool = new Pool({ connectionString: url, max: 8 });
       return {
-        store: postgresPersistence(pool as never, new FixedClock()),
+        store: postgresPersistence(pool as never, clock),
         async close() {
           await pool.end();
         },
@@ -132,7 +140,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
   beforeEach(async () => {
     await truncate();
     clock = new FixedClock();
-    const opened = await backend.open();
+    const opened = await backend.open(clock);
     store = opened.store;
     close = opened.close;
   });
@@ -226,7 +234,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     expect(queued.every((d) => d.status === "pending")).toBe(true);
 
     const result = await core.deliveries.drainOnce();
-    expect(result).toEqual({ delivered: 2, failed: 0, dead: 0 });
+    expect(result).toEqual({ delivered: 2, failed: 0, dead: 0, reclaimed: 0 });
 
     const after = await store.delivery.forEvent(event.event_id);
     expect(after.every((d) => d.status === "delivered")).toBe(true);
@@ -274,6 +282,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
         next_attempt_at: clock.now().toISOString(),
         created_at: clock.now().toISOString(),
         delivered_at: null,
+        claimed_at: null,
       },
       undefined,
     );
@@ -288,7 +297,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0, reclaimed: 0 });
     const failed = (await store.delivery.forEvent(event.event_id))[0];
     expect(failed?.status).toBe("pending");
     expect(failed?.attempts).toBe(1);
@@ -298,12 +307,64 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     );
 
     // Still backing off: draining now must not attempt it again.
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0, reclaimed: 0 });
     expect(transport.sent).toHaveLength(1);
 
     clock.advance(2000);
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 0, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 0, dead: 0, reclaimed: 0 });
     expect((await store.delivery.forEvent(event.event_id))[0]?.status).toBe("delivered");
+  });
+
+  it("recovers a delivery whose worker died, without confusing it with a backoff", async () => {
+    // B-24. A delivery worker that dies mid-request leaves a row nobody will
+    // acknowledge. Until `claimed_at` existed that row was indistinguishable from
+    // one backing off after a 503: both pending, both with a `next_attempt_at` in
+    // the future. So a partner outage and a crash-looping worker produced the
+    // same numbers, and the only honest thing an operator could say was "some
+    // deliveries are late".
+    const transport = new ScriptedTransport([{ status: 200 }]);
+    const core = app(transport);
+    await subscribe(core);
+    const event = await emit();
+    await core.publisher.drainOnce();
+
+    // The worker claims the delivery and dies. Nothing was sent.
+    const claimed = await store.delivery.claimDue(clock.now(), 10, 30_000);
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0]!.claimed_at).not.toBeNull();
+    expect(transport.sent).toHaveLength(0);
+
+    // Inside the lease the row is neither available nor stuck.
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 0,
+      failed: 0,
+      dead: 0,
+      reclaimed: 0,
+    });
+    expect(await store.delivery.counts()).toMatchObject({ in_flight: 1, abandoned: 0 });
+
+    // Once the lease runs out it is stuck, countably, and the next drain
+    // recovers it and sends it.
+    clock.advance(31_000);
+    expect(await store.delivery.counts()).toMatchObject({ in_flight: 0, abandoned: 1 });
+    expect(await core.deliveries.drainOnce()).toEqual({
+      delivered: 1,
+      failed: 0,
+      dead: 0,
+      reclaimed: 1,
+    });
+    expect(transport.sent).toHaveLength(1);
+
+    const delivered = (await store.delivery.forEvent(event.event_id))[0];
+    expect(delivered?.status).toBe("delivered");
+    // One attempt, not two: the abandoned claim was never charged as one, so a
+    // rolling restart cannot walk a healthy delivery to its attempt limit.
+    expect(delivered?.attempts).toBe(1);
+    expect(delivered?.claimed_at).toBeNull();
+    // And `delivered_at` is the clock, not the lease it happened to be holding
+    // — the memory backend used to stamp it from `next_attempt_at`, which after
+    // B-22 put it one whole lease into the future, and only on that backend (B-12).
+    expect(delivered?.delivered_at).toBe(clock.now().toISOString());
   });
 
   it("stops immediately when the receiver rejected the payload", async () => {
@@ -313,7 +374,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1, reclaimed: 0 });
     const dead = (await store.delivery.forEvent(event.event_id))[0];
     expect(dead?.status).toBe("dead");
     expect(dead?.attempts).toBe(1);
@@ -332,7 +393,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
 
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 1, dead: 0, reclaimed: 0 });
     const pending = (await store.delivery.forEvent(event.event_id))[0];
     expect(pending?.status).toBe("pending");
     expect(pending?.last_status).toBeNull();
@@ -367,7 +428,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
     await core.publisher.drainOnce();
     expect(await store.delivery.forEvent(event.event_id)).toHaveLength(0);
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 0, reclaimed: 0 });
     expect(transport.sent).toHaveLength(0);
   });
 
@@ -383,7 +444,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     const event = await emit();
 
     await core.publisher.drainOnce();
-    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 1, dead: 0 });
+    expect(await core.deliveries.drainOnce()).toEqual({ delivered: 1, failed: 1, dead: 0, reclaimed: 0 });
 
     const rows = await store.delivery.forEvent(event.event_id);
     const moveRow = rows.find((d) => d.subscription_id === move.subscription_id);
@@ -433,7 +494,7 @@ describe.each(backends)("outbound delivery on $name", (backend) => {
     try {
       // No secret means no signature; sending unsigned would be worse than
       // not sending at all, and waiting cannot bring the subscription back.
-      expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1 });
+      expect(await core.deliveries.drainOnce()).toEqual({ delivered: 0, failed: 0, dead: 1, reclaimed: 0 });
     } finally {
       store.delivery.getSubscription = originalGet;
     }
