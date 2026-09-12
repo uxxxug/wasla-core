@@ -95,17 +95,34 @@ export class PgOutbox implements OutboxStore {
   }
 
   /**
-   * Claims pending rows that are due. `for update skip locked` is what lets a
-   * second relay run concurrently without publishing the same event twice.
+   * Leases up to `limit` due records.
+   *
+   * The lease is the fix for blocker B-22. Before it, this method only *read*
+   * due rows — on Postgres with `for update skip locked` in its own implicit
+   * transaction, so the locks were gone the moment the statement returned, and
+   * two workers polling together both received the same rows and both did the
+   * work. Measured on a real database: two pools claiming five due rows each
+   * got five rows each, all five shared.
+   *
+   * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
+   * is not due again until then and a second worker's identical query does not
+   * see it. `next_attempt_at` doubles as the lease expiry rather than a new
+   * column, so an abandoned claim comes back by the same clock that schedules
+   * retries — one timer, one truth. A worker that dies mid-attempt costs one
+   * lease of delay, which is the same trade every retry in CORE already makes.
    */
-  async claimDue(now: Date, limit: number): Promise<OutboxRecord[]> {
+  async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
-      `select ${COLUMNS} from outbox
-       where status = 'pending' and next_attempt_at <= $1
-       order by next_attempt_at, created_at
-       limit $2
-       for update skip locked`,
-      [iso(now), limit],
+      `update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
+       where event_id in (
+         select event_id from outbox
+         where status = 'pending' and next_attempt_at <= $1
+         order by next_attempt_at, created_at
+         limit $2
+         for update skip locked
+       )
+       returning ${COLUMNS}`,
+      [iso(now), limit, String(leaseMs)],
     );
     return result.rows.map(toRecord);
   }

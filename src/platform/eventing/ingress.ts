@@ -36,7 +36,8 @@ export interface InboundEventStore {
    */
   accept(event: EventEnvelope, scope?: TransactionScope): Promise<boolean>;
   get(eventId: string): Promise<InboundRecord | undefined>;
-  claimDue(now: Date, limit: number): Promise<InboundRecord[]>;
+  /** Leases due records so two dispatchers cannot claim the same work (B-22). */
+  claimDue(now: Date, limit: number, leaseMs?: number): Promise<InboundRecord[]>;
   markProcessed(eventId: string): Promise<void>;
   markFailed(eventId: string, error: string, nextAttemptAt: Date): Promise<void>;
   markDead(eventId: string, error: string): Promise<void>;
@@ -68,11 +69,35 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     return this.records.get(eventId);
   }
 
-  async claimDue(now: Date, limit: number): Promise<InboundRecord[]> {
-    return [...this.records.values()]
+  /**
+   * Leases up to `limit` due records.
+   *
+   * The lease is the fix for blocker B-22. Before it, this method only *read*
+   * due rows — on Postgres with `for update skip locked` in its own implicit
+   * transaction, so the locks were gone the moment the statement returned, and
+   * two workers polling together both received the same rows and both did the
+   * work. Measured on a real database: two pools claiming five due rows each
+   * got five rows each, all five shared.
+   *
+   * Claiming now writes: `next_attempt_at` moves out by the lease, so the row
+   * is not due again until then and a second worker's identical query does not
+   * see it. `next_attempt_at` doubles as the lease expiry rather than a new
+   * column, so an abandoned claim comes back by the same clock that schedules
+   * retries — one timer, one truth. A worker that dies mid-attempt costs one
+   * lease of delay, which is the same trade every retry in CORE already makes.
+   */
+  async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
+    const due = [...this.records.values()]
       .filter((r) => r.status === "pending" && new Date(r.next_attempt_at) <= now)
       .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
       .slice(0, limit);
+    for (const record of due) {
+      this.records.set(record.event.event_id, {
+        ...record,
+        next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
+      });
+    }
+    return due;
   }
 
   async markProcessed(eventId: string): Promise<void> {
