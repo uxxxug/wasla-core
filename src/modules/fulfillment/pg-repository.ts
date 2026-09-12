@@ -1,7 +1,7 @@
 import { iso, isoRequired, runner, type Queryable } from "../../platform/persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../../platform/persistence/transaction.js";
 import type { Fulfillment, FulfillmentStatus, SettlementState } from "./domain.js";
-import type { FulfillmentRepository } from "./service.js";
+import type { ConditionalWrite, FulfillmentRepository, InsertOutcome } from "./service.js";
 
 interface FulfillmentRow {
   fulfillment_id: string;
@@ -66,6 +66,38 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     );
   }
 
+  /**
+   * Insert unless the order reference is already taken, decided by the unique
+   * index rather than by a prior read.
+   *
+   * `on conflict do nothing` is what makes this safe under concurrency: a second
+   * transaction inserting the same order reference blocks on the uncommitted
+   * index entry and, once the first commits, affects zero rows instead of
+   * raising. The caller learns it created nothing and publishes nothing.
+   */
+  async insertIfAbsent(
+    fulfillment: Fulfillment,
+    scope: TransactionScope = NO_SCOPE,
+  ): Promise<InsertOutcome> {
+    const result = await runner(this.pool, scope).query(
+      `insert into fulfillment (${COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       on conflict do nothing`,
+      [
+        fulfillment.fulfillment_id,
+        fulfillment.organization_id,
+        fulfillment.market_order_reference,
+        fulfillment.move_job_reference,
+        fulfillment.payment_authorization_id,
+        fulfillment.status,
+        fulfillment.settlement_state,
+        fulfillment.created_at,
+        fulfillment.completed_at,
+        fulfillment.closure_reason,
+      ],
+    );
+    return result.rowCount === 1 ? "inserted" : "duplicate_order_reference";
+  }
+
   async update(fulfillment: Fulfillment, scope: TransactionScope = NO_SCOPE): Promise<void> {
     await runner(this.pool, scope).query(
       `update fulfillment
@@ -82,6 +114,45 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.closure_reason,
       ],
     );
+  }
+
+  /**
+   * The transition write. Identical to `update` plus `and status = any($8)`,
+   * and that predicate is the entire fix for B-21.
+   *
+   * Under READ COMMITTED two transitions of the same row serialise on the row
+   * lock: the second `update` waits for the first to commit and then re-evaluates
+   * its `where` clause against the committed row. A row that has left `expected`
+   * no longer matches, so the statement affects zero rows and this returns
+   * `stale` — the losing caller learns it changed nothing while it can still
+   * abort, instead of overwriting a closure that already published its event.
+   *
+   * `rowCount` is the report, not an inferred success: `update ... where` with no
+   * match is not an error in SQL, which is exactly why the previous unconditional
+   * version could not tell a first closure from a second one.
+   */
+  async updateIfStatusIn(
+    fulfillment: Fulfillment,
+    expected: readonly FulfillmentStatus[],
+    scope: TransactionScope = NO_SCOPE,
+  ): Promise<ConditionalWrite> {
+    const result = await runner(this.pool, scope).query(
+      `update fulfillment
+       set move_job_reference = $2, payment_authorization_id = $3, status = $4,
+           settlement_state = $5, completed_at = $6, closure_reason = $7
+       where fulfillment_id = $1 and status = any($8::text[])`,
+      [
+        fulfillment.fulfillment_id,
+        fulfillment.move_job_reference,
+        fulfillment.payment_authorization_id,
+        fulfillment.status,
+        fulfillment.settlement_state,
+        fulfillment.completed_at,
+        fulfillment.closure_reason,
+        [...expected],
+      ],
+    );
+    return result.rowCount === 1 ? "applied" : "stale";
   }
 
   async get(fulfillmentId: string): Promise<Fulfillment | undefined> {

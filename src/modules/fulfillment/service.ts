@@ -29,14 +29,76 @@ import {
   financialDisposition,
   isClosed,
   isFinanciallyConsistent,
+  OPEN_STATUSES,
   requiresFinancialDecision,
 } from "./domain.js";
 
 const PRODUCER = "wasla-core";
 
+/**
+ * Outcome of a write that is only allowed to apply while the row still holds an
+ * expected status.
+ *
+ * `applied` means this caller performed the transition. `stale` means the row
+ * had already left the expected set, so this caller performed nothing at all —
+ * it is a fact about the write, not an error, and the caller decides what it
+ * means. Two values, no third reading: an adapter that cannot distinguish them
+ * cannot implement this port.
+ */
+export type ConditionalWrite = "applied" | "stale";
+
+/**
+ * Outcome of an insert guarded by the uniqueness of the order reference.
+ *
+ * `duplicate_order_reference` means another transaction already holds a
+ * fulfillment for this MARKET order — the same shape of answer as `stale`, for
+ * the one transition that creates a row instead of moving one.
+ */
+export type InsertOutcome = "inserted" | "duplicate_order_reference";
+
 export interface FulfillmentRepository {
+  /**
+   * Unconditional insert. Fails when the order reference is already taken; both
+   * backends must refuse, so the in-memory store cannot certify a duplicate the
+   * database would reject.
+   */
   insert(fulfillment: Fulfillment, scope: TransactionScope): Promise<void>;
+  /**
+   * Insert unless a fulfillment for this order reference already exists.
+   *
+   * Must be decided by the store itself in one statement (Postgres: `on
+   * conflict do nothing`), never by a read followed by a write: two concurrent
+   * intakes of the same order both pass a prior read and only the store can
+   * serialise them.
+   */
+  insertIfAbsent(fulfillment: Fulfillment, scope: TransactionScope): Promise<InsertOutcome>;
+  /**
+   * Unconditional update. For writes that record information without moving the
+   * lifecycle — a job reference kept for traceability, a reconciliation fix.
+   * Never for a transition: see `updateIfStatusIn`.
+   */
   update(fulfillment: Fulfillment, scope: TransactionScope): Promise<void>;
+  /**
+   * Update only while the stored status is still one of `expected`, and report
+   * whether that was the case.
+   *
+   * This is the whole of B-21. A transition implemented as "read, decide,
+   * update" is not a transition under concurrency: both callers read the open
+   * row, both decide, and both updates apply, so both commit a closure and both
+   * publish a closure event. The condition must be evaluated by the store as
+   * part of the write — in Postgres the second update blocks on the row lock and
+   * re-evaluates its predicate after the first commits, which is what makes the
+   * loser observable as `stale` instead of overwriting the winner.
+   *
+   * The status is compared, not a version column: the status IS the thing being
+   * guarded, and a separate version would let a row be closed twice with the
+   * version agreeing.
+   */
+  updateIfStatusIn(
+    fulfillment: Fulfillment,
+    expected: readonly FulfillmentStatus[],
+    scope: TransactionScope,
+  ): Promise<ConditionalWrite>;
   get(fulfillmentId: string): Promise<Fulfillment | undefined>;
   findByOrderReference(orderReference: string): Promise<Fulfillment | undefined>;
   /** Used by reconciliation reads only; a Postgres adapter must filter in SQL. */
@@ -46,18 +108,61 @@ export interface FulfillmentRepository {
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   private rows = new Map<string, Fulfillment>();
   async insert(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
+    // `market_order_reference` is UNIQUE in the schema since migration 0002.
+    // Enforced here too: a memory store more permissive than the database
+    // certifies a bug rather than catching it.
+    if (this.byOrderReference(fulfillment.market_order_reference)) {
+      throw new Error("duplicate key value violates unique constraint on market_order_reference");
+    }
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
+  }
+  async insertIfAbsent(
+    fulfillment: Fulfillment,
+    scope?: TransactionScope,
+  ): Promise<InsertOutcome> {
+    if (this.byOrderReference(fulfillment.market_order_reference)) {
+      return "duplicate_order_reference";
+    }
+    journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
+    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    return "inserted";
   }
   async update(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
+  /**
+   * The in-memory counterpart of the conditional update.
+   *
+   * The read and the write are one indivisible step here because nothing can be
+   * interleaved between them: a mutation staged on a unit of work runs to
+   * completion before any other resumes, so this is the same guarantee the
+   * database gives through its row lock, not a weaker imitation of it. The two
+   * backends must agree; a store that lets a second closure through would make
+   * the in-memory suite pass on a defect Postgres refuses.
+   */
+  async updateIfStatusIn(
+    fulfillment: Fulfillment,
+    expected: readonly FulfillmentStatus[],
+    scope?: TransactionScope,
+  ): Promise<ConditionalWrite> {
+    const stored = this.rows.get(fulfillment.fulfillment_id);
+    if (!stored || !expected.includes(stored.status)) return "stale";
+    journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
+    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    return "applied";
+  }
+  private byOrderReference(orderReference: string): Fulfillment | undefined {
+    return [...this.rows.values()].find(
+      (item) => item.market_order_reference === orderReference,
+    );
+  }
   async get(fulfillmentId: string): Promise<Fulfillment | undefined> {
     return this.rows.get(fulfillmentId);
   }
   async findByOrderReference(orderReference: string): Promise<Fulfillment | undefined> {
-    return [...this.rows.values()].find((item) => item.market_order_reference === orderReference);
+    return this.byOrderReference(orderReference);
   }
   async all(): Promise<readonly Fulfillment[]> {
     return [...this.rows.values()];
@@ -132,6 +237,31 @@ interface SettlementOutcome {
   captured_minor: number | null;
 }
 
+/**
+ * Thrown by a staged transition whose conditional write found the row already
+ * moved, to abort the transaction it is part of.
+ *
+ * It is an internal control signal, never surfaced: the caller catches it,
+ * re-reads the committed row and answers from the winner. Aborting is the point.
+ * The losing transaction has by then already staged its money settlement and its
+ * outbox append, and only a rollback removes all of them together — which is why
+ * the check cannot live before the transaction, where there is nothing to abort.
+ */
+class TransitionLost extends Error {
+  constructor(readonly fulfillmentId: string) {
+    super(`fulfillment ${fulfillmentId} was transitioned concurrently`);
+    this.name = "TransitionLost";
+  }
+}
+
+/** Thrown by a staged intake whose insert found the order already coordinated. */
+class IntakeLost extends Error {
+  constructor(readonly orderReference: string) {
+    super(`order ${orderReference} was taken up concurrently`);
+    this.name = "IntakeLost";
+  }
+}
+
 export class FulfillmentService {
   constructor(
     private readonly repo: FulfillmentRepository,
@@ -145,6 +275,108 @@ export class FulfillmentService {
   /** Boundary, outbox and audit log — the three things a commit needs. */
   private get tx() {
     return { boundary: this.boundary, outbox: this.outbox, audit: this.audit };
+  }
+
+  /**
+   * Stages a lifecycle transition so that the row write, the money settlement,
+   * the audit entry and the outbox append share one fate.
+   *
+   * The conditional write is staged, not performed inline, because the commit
+   * point is where the transaction still can be abandoned: a `stale` answer
+   * throws, `withTransaction` unwinds, and the money mutation staged before it
+   * plus the outbox row staged after it are both gone. Nothing partial survives
+   * and no event was ever appended, on either backend.
+   */
+  private stageTransition(
+    uow: UnitOfWork,
+    next: Fulfillment,
+    expected: readonly FulfillmentStatus[],
+  ): void {
+    uow.stage(async (scope) => {
+      const write = await this.repo.updateIfStatusIn(next, expected, scope);
+      if (write === "stale") throw new TransitionLost(next.fulfillment_id);
+    });
+  }
+
+  /**
+   * Runs a transition and, if another transaction got there first, answers from
+   * the row that actually committed.
+   *
+   * `whenLost` receives the winner and applies the same rule the path applies to
+   * a fulfillment that was already in that state when the command arrived: the
+   * concurrent case and the sequential repeat are the same question, so they must
+   * not be allowed to give different answers.
+   */
+  private async transition(
+    body: (uow: UnitOfWork) => Promise<Fulfillment>,
+    whenLost: (winner: Fulfillment) => Fulfillment | Promise<Fulfillment>,
+  ): Promise<Fulfillment> {
+    try {
+      return await withTransaction(this.tx, body);
+    } catch (err) {
+      if (!(err instanceof TransitionLost)) throw err;
+      return await whenLost(await this.require(err.fulfillmentId));
+    }
+  }
+
+  /**
+   * Stages the creation of a fulfillment so that two intakes of the same MARKET
+   * order cannot both create one.
+   *
+   * The prior `findByOrderReference` is a fast path, not the guard: two intakes
+   * of the same order both read "absent" before either writes. The unique index
+   * decides, and the loser aborts before its event reaches the outbox — which
+   * matters most on the refusal path, where the row is born closed and carries a
+   * closure event with it.
+   */
+  private stageIntake(uow: UnitOfWork, fulfillment: Fulfillment): void {
+    uow.stage(async (scope) => {
+      const write = await this.repo.insertIfAbsent(fulfillment, scope);
+      if (write === "duplicate_order_reference") {
+        throw new IntakeLost(fulfillment.market_order_reference);
+      }
+    });
+  }
+
+  /** Runs an intake and, if another transaction created the row, returns that row. */
+  private async intake(
+    body: (uow: UnitOfWork) => Promise<Fulfillment>,
+  ): Promise<Fulfillment> {
+    try {
+      return await withTransaction(this.tx, body);
+    } catch (err) {
+      if (!(err instanceof IntakeLost)) throw err;
+      const winner = await this.repo.findByOrderReference(err.orderReference);
+      // Unreachable unless the winning transaction was itself rolled back after
+      // ours saw its index entry, in which case the order genuinely has no
+      // fulfillment and the caller should retry rather than be told it has one.
+      if (!winner) throw conflict("fulfillment for this order is not readable yet");
+      return winner;
+    }
+  }
+
+  /**
+   * What a rejection sees when the fulfillment is already closed — whether it was
+   * closed before this command arrived or a moment after it started.
+   */
+  private rejectionOn(closed: Fulfillment): Fulfillment {
+    if (closed.status === "failed") return closed;
+    throw conflict("fulfillment is already closed");
+  }
+
+  /** What a cancellation sees when the fulfillment is already closed. */
+  private cancellationOn(closed: Fulfillment): Fulfillment {
+    if (closed.status === "cancelled") return closed;
+    throw conflict("fulfillment is already closed");
+  }
+
+  /** What a completion sees when the fulfillment is already closed. */
+  private completionOn(closed: Fulfillment, jobId: string): Fulfillment {
+    if (closed.status === "cancelled") throw conflict("fulfillment was cancelled");
+    if (closed.move_job_reference !== jobId) {
+      throw conflict("fulfillment already closed by another job");
+    }
+    return closed;
   }
 
   /**
@@ -191,7 +423,7 @@ export class FulfillmentService {
       // A refused order must not leave money parked: a hold that is still
       // authorized (for example an expired one awaiting the sweep) is released
       // as part of the refusal.
-      return withTransaction(this.tx, async (uow) => {
+      return this.intake(async (uow) => {
         const outcome: SettlementOutcome =
           hold.settlement === "held"
             ? await this.release(uow, fulfillment, `refused:${hold.reason}`, event.correlation_id)
@@ -203,7 +435,7 @@ export class FulfillmentService {
           completed_at: this.clock.now().toISOString(),
           closure_reason: hold.reason,
         };
-        uow.stage((scope) => this.repo.insert(refused, scope));
+        this.stageIntake(uow, refused);
         uow.emit(
           this.closureEvent(refused, event.correlation_id, event.event_id, outcome.captured_minor),
         );
@@ -212,8 +444,8 @@ export class FulfillmentService {
       });
     }
 
-    await withTransaction(this.tx, async (uow) => {
-      uow.stage((scope) => this.repo.insert(fulfillment, scope));
+    return this.intake(async (uow) => {
+      this.stageIntake(uow, fulfillment);
       uow.emit(
         makeEvent({
           event_type: "core.fulfillment.created",
@@ -233,8 +465,8 @@ export class FulfillmentService {
         }),
       );
       uow.audit(this.auditEntry("fulfillment.created", fulfillment, event.correlation_id));
+      return fulfillment;
     });
-    return fulfillment;
   }
 
   /**
@@ -260,31 +492,19 @@ export class FulfillmentService {
       throw invalid("move.job.accepted payload is incomplete");
     }
     const current = await this.require(payload.fulfillment_id);
-    if (current.status === "cancelled") {
-      if (current.move_job_reference === payload.job_id) return current;
-      const traced: Fulfillment = { ...current, move_job_reference: payload.job_id };
-      await withTransaction(this.tx, async (uow) => {
-        uow.stage((scope) => this.repo.update(traced, scope));
-        uow.audit(this.auditEntry("fulfillment.acceptance_after_cancellation", traced, event.correlation_id));
-      });
-      return traced;
-    }
-    if (isClosed(current.status)) {
-      throw conflict("fulfillment is already closed");
-    }
-    if (current.status === "dispatched") {
-      if (current.move_job_reference !== payload.job_id) {
-        throw conflict("fulfillment already dispatched to another job");
-      }
-      return current;
+    if (isClosed(current.status) || current.status === "dispatched") {
+      return await this.acceptanceOn(current, payload.job_id, event.correlation_id);
     }
     const updated: Fulfillment = {
       ...current,
       move_job_reference: payload.job_id,
       status: "dispatched",
     };
-    await withTransaction(this.tx, async (uow) => {
-      uow.stage((scope) => this.repo.update(updated, scope));
+    // Conditional like every other transition: two acceptances of the same job
+    // arriving together would otherwise both publish `core.fulfillment.dispatched`
+    // for one assignment. Not a closure, but the same defect, so the same guard.
+    return await this.transition(async (uow) => {
+      this.stageTransition(uow, updated, ["coordinating"]);
       uow.emit(
         makeEvent({
           event_type: "core.fulfillment.dispatched",
@@ -304,8 +524,41 @@ export class FulfillmentService {
         }),
       );
       uow.audit(this.auditEntry("fulfillment.dispatched", updated, event.correlation_id));
+      return updated;
+    }, (winner) => this.acceptanceOn(winner, payload.job_id!, event.correlation_id));
+  }
+
+  /**
+   * What an acceptance sees when the fulfillment has already moved on — read
+   * before the transition, or read back after losing the race to one.
+   *
+   * A cancellation stays authoritative: the job reference is still recorded, for
+   * an operator tracing which MOVE job was created for work CORE had already
+   * called off, and no dispatch event is published.
+   */
+  private async acceptanceOn(
+    current: Fulfillment,
+    jobId: string,
+    correlationId: string,
+  ): Promise<Fulfillment> {
+    if (current.status === "dispatched") {
+      if (current.move_job_reference !== jobId) {
+        throw conflict("fulfillment already dispatched to another job");
+      }
+      return current;
+    }
+    if (current.status !== "cancelled") throw conflict("fulfillment is already closed");
+    if (current.move_job_reference === jobId) return current;
+    const traced: Fulfillment = { ...current, move_job_reference: jobId };
+    await withTransaction(this.tx, async (uow) => {
+      // Unconditional on purpose: this records a reference, it does not move the
+      // lifecycle, and it must land on a row that is already closed.
+      uow.stage((scope) => this.repo.update(traced, scope));
+      uow.audit(
+        this.auditEntry("fulfillment.acceptance_after_cancellation", traced, correlationId),
+      );
     });
-    return updated;
+    return traced;
   }
 
   /** MOVE could not create an operational job — the request fails and money is released. */
@@ -318,28 +571,30 @@ export class FulfillmentService {
       throw invalid("move.job.rejected payload is incomplete");
     }
     const current = await this.require(payload.fulfillment_id);
-    if (current.status === "failed") return current;
-    if (isClosed(current.status)) throw conflict("fulfillment is already closed");
+    if (isClosed(current.status)) return this.rejectionOn(current);
     // One transaction: the release and the closure commit together or not at
     // all, so MOVE's rejection can never leave a refunded hold on an open
     // fulfillment, or an open hold on a failed one.
-    return withTransaction(this.tx, async (uow) => {
-      const outcome = await this.release(
-        uow,
-        current,
-        `move_rejected:${payload.reason}`,
-        event.correlation_id,
-      );
-      return this.closeWithin(
-        uow,
-        current,
-        "failed",
-        payload.reason!,
-        outcome,
-        event.correlation_id,
-        event.event_id,
-      );
-    });
+    return this.transition(
+      async (uow) => {
+        const outcome = await this.release(
+          uow,
+          current,
+          `move_rejected:${payload.reason}`,
+          event.correlation_id,
+        );
+        return this.closeWithin(
+          uow,
+          current,
+          "failed",
+          payload.reason!,
+          outcome,
+          event.correlation_id,
+          event.event_id,
+        );
+      },
+      (winner) => this.rejectionOn(winner),
+    );
   }
 
   /**
@@ -357,19 +612,13 @@ export class FulfillmentService {
       throw invalid("move.job.completed payload is incomplete");
     }
     const current = await this.require(payload.fulfillment_id);
-    if (isClosed(current.status)) {
-      if (current.status === "cancelled") throw conflict("fulfillment was cancelled");
-      if (current.move_job_reference !== payload.job_id) {
-        throw conflict("fulfillment already closed by another job");
-      }
-      return current;
-    }
+    if (isClosed(current.status)) return this.completionOn(current, payload.job_id);
 
     // One transaction for the settlement and the closure. Before B-11 the
     // capture committed on its own and the fulfillment row was updated
     // afterwards, so a failure in between left money captured against a
     // fulfillment still recorded as dispatched and held.
-    return withTransaction(this.tx, async (uow) => {
+    return this.transition(async (uow) => {
       let outcome: FulfillmentStatus = payload.outcome === "completed" ? "completed" : "failed";
       let reason: string | null = payload.outcome === "completed" ? null : "move_execution_failed";
       let settled: SettlementOutcome;
@@ -393,13 +642,13 @@ export class FulfillmentService {
         completed_at: payload.completed_at!,
         closure_reason: reason,
       };
-      uow.stage((scope) => this.repo.update(closed, scope));
+      this.stageTransition(uow, closed, OPEN_STATUSES);
       uow.emit(
         this.closureEvent(closed, event.correlation_id, event.event_id, settled.captured_minor),
       );
       uow.audit(this.auditEntry("fulfillment.closed", closed, event.correlation_id));
       return closed;
-    });
+    }, (winner) => this.completionOn(winner, payload.job_id!));
   }
 
   /** MARKET (or an operator) cancels before execution closes. Idempotent. */
@@ -410,26 +659,28 @@ export class FulfillmentService {
   }): Promise<Fulfillment> {
     const current = await this.require(input.fulfillment_id);
     if (!input.reason.trim()) throw invalid("reason is required");
-    if (current.status === "cancelled") return current;
-    if (isClosed(current.status)) throw conflict("fulfillment is already closed");
+    if (isClosed(current.status)) return this.cancellationOn(current);
     const reason = input.reason.trim();
-    return withTransaction(this.tx, async (uow) => {
-      const outcome = await this.release(
-        uow,
-        current,
-        `cancelled:${reason}`,
-        input.correlation_id,
-      );
-      return this.closeWithin(
-        uow,
-        current,
-        "cancelled",
-        reason,
-        outcome,
-        input.correlation_id,
-        null,
-      );
-    });
+    return this.transition(
+      async (uow) => {
+        const outcome = await this.release(
+          uow,
+          current,
+          `cancelled:${reason}`,
+          input.correlation_id,
+        );
+        return this.closeWithin(
+          uow,
+          current,
+          "cancelled",
+          reason,
+          outcome,
+          input.correlation_id,
+          null,
+        );
+      },
+      (winner) => this.cancellationOn(winner),
+    );
   }
 
   /**
@@ -499,7 +750,7 @@ export class FulfillmentService {
       completed_at: this.clock.now().toISOString(),
       closure_reason: reason,
     };
-    uow.stage((scope) => this.repo.update(closed, scope));
+    this.stageTransition(uow, closed, OPEN_STATUSES);
     uow.emit(this.closureEvent(closed, correlationId, causationId, settled.captured_minor));
     uow.audit(this.auditEntry(status === "cancelled" ? "fulfillment.cancelled" : "fulfillment.closed", closed, correlationId));
     return closed;
@@ -741,7 +992,12 @@ export class FulfillmentService {
         captured_minor: authorization.captured_minor,
       };
     }
-    return { usable: true, settlement: "held", reason: null, captured_minor: authorization.captured_minor };
+    return {
+      usable: true,
+      settlement: "held",
+      reason: null,
+      captured_minor: authorization.captured_minor,
+    };
   }
 
   /**
