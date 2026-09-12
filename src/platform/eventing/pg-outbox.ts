@@ -3,6 +3,7 @@ import { iso, isoRequired, runner, type Queryable } from "../persistence/postgre
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import type { OutboxRecord, OutboxStatus, OutboxStore } from "./outbox.js";
+import { tallyRows } from "./queue-counts.js";
 
 interface OutboxRow {
   event_id: string;
@@ -156,6 +157,16 @@ export class PgOutbox implements OutboxStore {
       `select ${COLUMNS} from outbox order by created_at, event_id`,
     );
     return result.rows.map(toRecord);
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: OutboxStatus; total: string; retrying: string }>(
+      `select status,
+              count(*) as total,
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+       from outbox group by status`,
+    );
+    return tallyRows(result.rows, ["pending", "published", "dead"]);
   }
 
   async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {

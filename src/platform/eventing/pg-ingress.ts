@@ -3,6 +3,7 @@ import { iso, isoRequired, runner, type Queryable } from "../persistence/postgre
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import type { InboundEventStore, InboundRecord, InboundStatus } from "./ingress.js";
+import { tallyRows } from "./queue-counts.js";
 
 interface InboundRow {
   event_id: string;
@@ -151,6 +152,16 @@ export class PgInboundEventStore implements InboundEventStore {
        where event_id = $1`,
       [eventId, error],
     );
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: InboundStatus; total: string; retrying: string }>(
+      `select status,
+              count(*) as total,
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+       from inbound_event group by status`,
+    );
+    return tallyRows(result.rows, ["pending", "processed", "dead"]);
   }
 
   async byStatus(status: InboundStatus): Promise<InboundRecord[]> {

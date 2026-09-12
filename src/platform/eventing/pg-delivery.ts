@@ -1,6 +1,7 @@
 import { iso, isoRequired, runner, type Queryable } from "../persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
+import { tallyRows } from "./queue-counts.js";
 import type {
   DeliveryStatus,
   DeliveryStore,
@@ -219,6 +220,16 @@ export class PgDeliveryStore implements DeliveryStore {
        where delivery_id = $1`,
       [deliveryId, error, status],
     );
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: DeliveryStatus; total: string; retrying: string }>(
+      `select status,
+              count(*) as total,
+              count(*) filter (where status = 'pending' and attempts > 0) as retrying
+       from event_delivery group by status`,
+    );
+    return tallyRows(result.rows, ["pending", "delivered", "dead"]);
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {

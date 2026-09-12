@@ -1,6 +1,7 @@
 import type { Clock } from "../clock.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { tallyByStatus } from "./queue-counts.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
 
@@ -29,6 +30,17 @@ export interface OutboxStore {
   markDead(eventId: string, error: string): Promise<void>;
   all(): Promise<OutboxRecord[]>;
   byStatus(status: OutboxStatus): Promise<OutboxRecord[]>;
+  /**
+   * Row counts by status, plus `retrying` (pending with an attempt already
+   * spent). One aggregate query rather than a list, because the caller is a
+   * gauge sampler and fetching every pending row to take its `length` is how a
+   * readiness probe becomes a table scan.
+   *
+   * `retrying` is derived here, at read time, from the same rows: it is not a
+   * status any row carries and must never become a second store competing with
+   * the queue for the truth.
+   */
+  counts(): Promise<Record<string, number>>;
 }
 
 export class InMemoryOutbox implements OutboxStore {
@@ -129,5 +141,9 @@ export class InMemoryOutbox implements OutboxStore {
 
   async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {
     return (await this.all()).filter((r: OutboxRecord) => r.status === status);
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    return tallyByStatus([...this.records.values()]);
   }
 }

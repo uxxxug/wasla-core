@@ -1,8 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Clock } from "../clock.js";
 import { invalid } from "../errors.js";
+import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
+import { tallyByStatus } from "./queue-counts.js";
 
 export interface EventSubscription {
   subscription_id: string;
@@ -62,6 +64,17 @@ export interface DeliveryStore {
   ): Promise<void>;
   markDead(deliveryId: string, error: string, status: number | null): Promise<void>;
   byStatus(status: DeliveryStatus): Promise<EventDelivery[]>;
+  /**
+   * Row counts by status, plus `retrying` (pending with an attempt already
+   * spent). One aggregate query rather than a list, because the caller is a
+   * gauge sampler and fetching every pending row to take its `length` is how a
+   * readiness probe becomes a table scan.
+   *
+   * `retrying` is derived here, at read time, from the same rows: it is not a
+   * status any row carries and must never become a second store competing with
+   * the queue for the truth.
+   */
+  counts(): Promise<Record<string, number>>;
   forEvent(eventId: string): Promise<EventDelivery[]>;
   all(): Promise<EventDelivery[]>;
 }
@@ -205,6 +218,10 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       last_error: error,
       last_status: status,
     });
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    return tallyByStatus([...this.deliveries.values()], ["pending", "delivered", "dead"]);
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
@@ -381,14 +398,17 @@ export class DeliveryWorker {
     private readonly maxAttempts = 8,
     private readonly baseBackoffMs = 1000,
     private readonly timeoutMs = 5000,
+    private readonly metrics: WorkerMetrics = NO_WORKER_METRICS,
   ) {}
 
   async drainOnce(limit = 100): Promise<DeliveryWorkerResult> {
     const now = this.clock.now();
     const due = await this.store.claimDue(now, limit);
     const result: DeliveryWorkerResult = { delivered: 0, failed: 0, dead: 0 };
+    this.metrics.claimed(due.length);
 
     for (const delivery of due) {
+      const stop = this.metrics.startItem();
       const subscription = await this.store.getSubscription(delivery.subscription_id);
       const record = await this.outbox.get(delivery.event_id);
       const event = record?.event;
@@ -401,6 +421,8 @@ export class DeliveryWorker {
           null,
         );
         result.dead += 1;
+        this.metrics.outcome("failed_permanent");
+        stop();
         continue;
       }
 
@@ -422,6 +444,8 @@ export class DeliveryWorker {
       if (isSuccess(response.status)) {
         await this.store.markDelivered(delivery.delivery_id, response.status as number);
         result.delivered += 1;
+        this.metrics.outcome("completed");
+        stop();
         continue;
       }
 
@@ -432,9 +456,11 @@ export class DeliveryWorker {
         // answer, so stop and leave the row for an operator to see.
         await this.store.markDead(delivery.delivery_id, reason, response.status);
         result.dead += 1;
+        this.metrics.outcome("failed_permanent");
       } else if (attempts >= this.maxAttempts) {
         await this.store.markDead(delivery.delivery_id, reason, response.status);
         result.dead += 1;
+        this.metrics.outcome("failed_permanent");
       } else {
         await this.store.markFailed(
           delivery.delivery_id,
@@ -443,7 +469,9 @@ export class DeliveryWorker {
           new Date(now.getTime() + this.baseBackoffMs * 2 ** delivery.attempts),
         );
         result.failed += 1;
+        this.metrics.outcome("retried");
       }
+      stop();
     }
     return result;
   }

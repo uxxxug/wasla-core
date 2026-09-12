@@ -7,6 +7,7 @@ import {
 } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import { isValidEnvelope } from "./envelope.js";
+import { tallyByStatus } from "./queue-counts.js";
 
 export type InboundStatus = "pending" | "processed" | "dead";
 
@@ -43,6 +44,17 @@ export interface InboundEventStore {
   markDead(eventId: string, error: string): Promise<void>;
   byStatus(status: InboundStatus): Promise<InboundRecord[]>;
   all(): Promise<InboundRecord[]>;
+  /**
+   * Row counts by status, plus `retrying` (pending with an attempt already
+   * spent). One aggregate query rather than a list, because the caller is a
+   * gauge sampler and fetching every pending row to take its `length` is how a
+   * readiness probe becomes a table scan.
+   *
+   * `retrying` is derived here, at read time, from the same rows: it is not a
+   * status any row carries and must never become a second store competing with
+   * the queue for the truth.
+   */
+  counts(): Promise<Record<string, number>>;
 }
 
 export class InMemoryInboundEventStore implements InboundEventStore {
@@ -134,6 +146,10 @@ export class InMemoryInboundEventStore implements InboundEventStore {
 
   async all(): Promise<InboundRecord[]> {
     return [...this.records.values()];
+  }
+
+  async counts(): Promise<Record<string, number>> {
+    return tallyByStatus([...this.records.values()], ["pending", "processed", "dead"]);
   }
 }
 
