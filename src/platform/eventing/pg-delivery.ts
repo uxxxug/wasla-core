@@ -10,6 +10,7 @@ import type {
 } from "./delivery.js";
 import { newClaimToken, type Fence } from "./fencing.js";
 import type { ReclaimOutcome } from "./reclaim.js";
+import type { DeliveryRevivalSelection } from "./revival.js";
 
 interface SubscriptionRow {
   subscription_id: string;
@@ -325,6 +326,65 @@ export class PgDeliveryStore implements DeliveryStore {
       [status],
     );
     return result.rows.map(toDelivery);
+  }
+
+  /**
+   * See `DeliveryStore.selectDead`. Bound parameters only, and `status = 'dead'`
+   * is fixed rather than selectable, for the reasons on `PgOutbox.selectDead`.
+   */
+  async selectDead(selection: DeliveryRevivalSelection): Promise<EventDelivery[]> {
+    const values: unknown[] = [];
+    const bind = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    const where: string[] = ["status = 'dead'"];
+    if (selection.delivery_ids) {
+      where.push(`delivery_id = any(${bind(selection.delivery_ids)}::text[])`);
+    }
+    if (selection.event_ids) where.push(`event_id = any(${bind(selection.event_ids)}::uuid[])`);
+    if (selection.subscription_id !== undefined) {
+      where.push(`subscription_id = ${bind(selection.subscription_id)}`);
+    }
+    if (selection.created_from !== undefined) {
+      where.push(`created_at >= ${bind(selection.created_from)}::timestamptz`);
+    }
+    if (selection.created_to !== undefined) {
+      where.push(`created_at <= ${bind(selection.created_to)}::timestamptz`);
+    }
+    if (selection.after) {
+      where.push(
+        `(created_at, delivery_id) > (${bind(selection.after.created_at)}::timestamptz, ${bind(
+          selection.after.delivery_id,
+        )}::text)`,
+      );
+    }
+    const result = await this.pool.query<DeliveryRow>(
+      `select ${DEL_SELECT_COLUMNS} from event_delivery where ${where.join(" and ")}
+       order by created_at, delivery_id
+       limit ${bind(selection.limit)}`,
+      values,
+    );
+    return result.rows.map(toDelivery);
+  }
+
+  /**
+   * See `DeliveryStore.revive`. One statement with the status in the `where`
+   * clause, so two concurrent revivals cannot both claim to have done it.
+   */
+  async revive(deliveryId: string, now: Date): Promise<boolean> {
+    const result = await this.pool.query<{ delivery_id: string }>(
+      `update event_delivery
+          set status = 'pending',
+              next_attempt_at = $2,
+              claimed_at = null,
+              claim_token = null,
+              reclaims = 0
+        where delivery_id = $1 and status = 'dead'
+        returning delivery_id`,
+      [deliveryId, now],
+    );
+    return result.rows.length === 1;
   }
 
   async forEvent(eventId: string): Promise<EventDelivery[]> {

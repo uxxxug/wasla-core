@@ -4,6 +4,11 @@ import type { EventEnvelope } from "./envelope.js";
 import { isFenced, newClaimToken, type Fence } from "./fencing.js";
 import { tallyByStatus } from "./queue-counts.js";
 import {
+  compareRevivalPosition,
+  matchesOutboxRevival,
+  type OutboxRevivalSelection,
+} from "./revival.js";
+import {
   reclaimedError,
   reclaimExhausted,
   reclaimExhaustedError,
@@ -97,6 +102,30 @@ export interface OutboxStore {
   markDead(eventId: string, fence: Fence, error: string): Promise<boolean>;
   all(): Promise<OutboxRecord[]>;
   byStatus(status: OutboxStatus): Promise<OutboxRecord[]>;
+  /**
+   * A scoped page of **dead** rows, in `(occurred_at, event_id)` order (B-27).
+   *
+   * Separate from `byStatus("dead")`, which takes no filter, no limit and no
+   * cursor: this one backs an operator command that must be describable in a
+   * sentence before it runs and bounded when it does. The status is fixed rather
+   * than a parameter, because the only rows revival may ever look at are dead
+   * ones and a queue whose live rows an operator can page through invites exactly
+   * the request that should never be made.
+   */
+  selectDead(selection: OutboxRevivalSelection): Promise<OutboxRecord[]>;
+  /**
+   * Returns one dead row to the pending pool so the relay publishes it again
+   * (B-27). False when the row is not dead — it was revived by a concurrent run,
+   * or never died at all.
+   *
+   * The transition is matched on `status = 'dead'`, so this is a transition and
+   * not an overwrite: it can never resurrect a `published` row, which would
+   * republish an event every subscriber already received. `reclaims` goes back to
+   * zero, `attempts` and `last_error` are left exactly as they are, and the row
+   * becomes due immediately — see `revival.ts` for why each of those is the way it
+   * is.
+   */
+  revive(eventId: string, now: Date): Promise<boolean>;
   /**
    * Row counts by status, plus `retrying` (pending with an attempt already
    * spent). One aggregate query rather than a list, because the caller is a
@@ -304,6 +333,50 @@ export class InMemoryOutbox implements OutboxStore {
 
   async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {
     return (await this.all()).filter((r: OutboxRecord) => r.status === status);
+  }
+
+  /** See `OutboxStore.selectDead`. */
+  async selectDead(selection: OutboxRevivalSelection): Promise<OutboxRecord[]> {
+    return [...this.records.values()]
+      .filter((record) =>
+        matchesOutboxRevival(
+          {
+            status: record.status,
+            event_id: record.event.event_id,
+            event_type: record.event.event_type,
+            producer: record.event.producer,
+            entity_type: record.event.entity_type,
+            entity_id: record.event.entity_id,
+            occurred_at: record.event.occurred_at,
+          },
+          selection,
+        ),
+      )
+      .sort((a, b) =>
+        compareRevivalPosition(
+          { primary: a.event.occurred_at, secondary: a.event.event_id },
+          { primary: b.event.occurred_at, secondary: b.event.event_id },
+        ),
+      )
+      .slice(0, selection.limit);
+  }
+
+  /** See `OutboxStore.revive`. */
+  async revive(eventId: string, now: Date): Promise<boolean> {
+    const record = this.records.get(eventId);
+    // Read and write with no await between them, like the acknowledgements above:
+    // Postgres does this in one statement and the memory backend must not be the
+    // permissive one (B-12).
+    if (!record || record.status !== "dead") return false;
+    this.records.set(eventId, {
+      ...record,
+      status: "pending",
+      next_attempt_at: now.toISOString(),
+      claimed_at: null,
+      claim_token: null,
+      reclaims: 0,
+    });
+    return true;
   }
 
   async counts(): Promise<Record<string, number>> {

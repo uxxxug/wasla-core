@@ -5,6 +5,7 @@ import type { EventEnvelope } from "./envelope.js";
 import { newClaimToken, type Fence } from "./fencing.js";
 import type { OutboxRecord, OutboxStatus, OutboxStore } from "./outbox.js";
 import { tallyRows, type CountRow } from "./queue-counts.js";
+import type { OutboxRevivalSelection } from "./revival.js";
 import type { ReclaimOutcome } from "./reclaim.js";
 
 interface OutboxRow {
@@ -287,5 +288,84 @@ export class PgOutbox implements OutboxStore {
       [status],
     );
     return result.rows.map(toRecord);
+  }
+
+  /**
+   * See `OutboxStore.selectDead`.
+   *
+   * Every filter is a bound parameter, never interpolated text. This query is
+   * built from an operator's command line, so concatenation here would be an
+   * injection point in a tool that runs with the widest privileges CORE has —
+   * the same rule, for the same reason, as the replay `select`.
+   *
+   * No index is added. Reviving a dead row is a rare hand-run action, and
+   * `outbox_due_idx` is partial on `status = 'pending'` so it cannot serve this
+   * anyway; adding an index for the dead set would slow every relay write to
+   * speed up an operation performed by a person a few times a year.
+   */
+  async selectDead(selection: OutboxRevivalSelection): Promise<OutboxRecord[]> {
+    const values: unknown[] = [];
+    const bind = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    // Not a parameter and not part of the selection type: revival looks at dead
+    // rows and at nothing else.
+    const where: string[] = ["status = 'dead'"];
+    if (selection.event_ids) where.push(`event_id = any(${bind(selection.event_ids)}::uuid[])`);
+    if (selection.event_types) {
+      where.push(`event_type = any(${bind(selection.event_types)}::text[])`);
+    }
+    if (selection.producer !== undefined) where.push(`producer = ${bind(selection.producer)}`);
+    if (selection.entity_type !== undefined) {
+      where.push(`entity_type = ${bind(selection.entity_type)}`);
+    }
+    if (selection.entity_id !== undefined) where.push(`entity_id = ${bind(selection.entity_id)}`);
+    if (selection.occurred_from !== undefined) {
+      where.push(`occurred_at >= ${bind(selection.occurred_from)}::timestamptz`);
+    }
+    if (selection.occurred_to !== undefined) {
+      where.push(`occurred_at <= ${bind(selection.occurred_to)}::timestamptz`);
+    }
+    if (selection.after) {
+      // Row-value comparison, so the cursor is strictly after the last position in
+      // exactly the order the rows come back in. Comparing the columns separately
+      // would skip or repeat every row sharing an `occurred_at`.
+      where.push(
+        `(occurred_at, event_id) > (${bind(selection.after.occurred_at)}::timestamptz, ${bind(
+          selection.after.event_id,
+        )}::uuid)`,
+      );
+    }
+    const result = await this.pool.query<OutboxRow>(
+      `select ${SELECT_COLUMNS} from outbox where ${where.join(" and ")}
+       order by occurred_at, event_id
+       limit ${bind(selection.limit)}`,
+      values,
+    );
+    return result.rows.map(toRecord);
+  }
+
+  /**
+   * See `OutboxStore.revive`.
+   *
+   * One statement, and `status = 'dead'` is in the `where` clause rather than
+   * checked first: a read-then-write would let two concurrent revivals both
+   * believe they resurrected the row and both report so. `returning event_id`
+   * with a one-row check is the same shape the fenced acknowledgements use.
+   */
+  async revive(eventId: string, now: Date): Promise<boolean> {
+    const result = await this.pool.query<{ event_id: string }>(
+      `update outbox
+          set status = 'pending',
+              next_attempt_at = $2,
+              claimed_at = null,
+              claim_token = null,
+              reclaims = 0
+        where event_id = $1 and status = 'dead'
+        returning event_id`,
+      [eventId, now],
+    );
+    return result.rows.length === 1;
   }
 }

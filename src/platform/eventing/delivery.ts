@@ -7,6 +7,11 @@ import type { EventEnvelope } from "./envelope.js";
 import { isFenced, newClaimToken, type Fence } from "./fencing.js";
 import { tallyByStatus } from "./queue-counts.js";
 import {
+  compareRevivalPosition,
+  matchesDeliveryRevival,
+  type DeliveryRevivalSelection,
+} from "./revival.js";
+import {
   DEFAULT_MAX_RECLAIMS,
   reclaimedError,
   reclaimExhausted,
@@ -130,6 +135,21 @@ export interface DeliveryStore {
     status: number | null,
   ): Promise<boolean>;
   byStatus(status: DeliveryStatus): Promise<EventDelivery[]>;
+  /**
+   * A scoped page of **dead** deliveries, in `(created_at, delivery_id)` order
+   * (B-27). Filtered, bounded and resumable, for the same reasons as
+   * `OutboxStore.selectDead`.
+   */
+  selectDead(selection: DeliveryRevivalSelection): Promise<EventDelivery[]>;
+  /**
+   * Returns one dead delivery to the pending pool so the worker POSTs it again
+   * (B-27). False when the row is not dead.
+   *
+   * `delivered_at` is not touched, and cannot be: it is null on a dead row, and
+   * `event_delivery_delivered_at_check` ties it to `status = 'delivered'`, so the
+   * database itself refuses a revival that tried to claim a delivery had happened.
+   */
+  revive(deliveryId: string, now: Date): Promise<boolean>;
   /**
    * Row counts by status, plus `retrying` (pending with an attempt already
    * spent). One aggregate query rather than a list, because the caller is a
@@ -377,6 +397,34 @@ export class InMemoryDeliveryStore implements DeliveryStore {
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
     return [...this.deliveries.values()].filter((d) => d.status === status);
+  }
+
+  /** See `DeliveryStore.selectDead`. */
+  async selectDead(selection: DeliveryRevivalSelection): Promise<EventDelivery[]> {
+    return [...this.deliveries.values()]
+      .filter((delivery) => matchesDeliveryRevival(delivery, selection))
+      .sort((a, b) =>
+        compareRevivalPosition(
+          { primary: a.created_at, secondary: a.delivery_id },
+          { primary: b.created_at, secondary: b.delivery_id },
+        ),
+      )
+      .slice(0, selection.limit);
+  }
+
+  /** See `DeliveryStore.revive`. */
+  async revive(deliveryId: string, now: Date): Promise<boolean> {
+    const delivery = this.deliveries.get(deliveryId);
+    if (!delivery || delivery.status !== "dead") return false;
+    this.deliveries.set(deliveryId, {
+      ...delivery,
+      status: "pending",
+      next_attempt_at: now.toISOString(),
+      claimed_at: null,
+      claim_token: null,
+      reclaims: 0,
+    });
+    return true;
   }
 
   async forEvent(eventId: string): Promise<EventDelivery[]> {
