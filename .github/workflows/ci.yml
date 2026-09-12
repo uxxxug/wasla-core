@@ -9,7 +9,12 @@ permissions:
   contents: read
 
 jobs:
+  # The dependency-free pass. Kept as its own job, deliberately: it is the only
+  # thing that proves the in-memory backend is genuinely self-sufficient, which is
+  # what makes `npm test` runnable by somebody who has just cloned the repository.
+  # Folding it into the database job would have removed that proof entirely.
   verify:
+    name: Verify without a database
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,3 +56,68 @@ jobs:
             echo "Potential secret committed"; exit 1
           fi
           echo "No secret patterns found."
+
+  # The pass that was missing. Until this job existed, every Postgres adapter,
+  # every trigger, every check constraint and every live-schema assertion was
+  # skipped in the only place that gates a merge: roughly 300 assertions passed
+  # locally on whoever happened to run them and were never enforced. A test that
+  # never runs where it counts is documentation.
+  database:
+    name: Verify against PostgreSQL
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to a major version rather than `latest`, so a server upgrade is a
+        # commit somebody reviews instead of a Tuesday when the gate changes
+        # meaning by itself.
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: core
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/core
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      # Applied here as well as by the suite's per-worker setup, because this step
+      # is the one that fails loudly and on its own line when a migration is
+      # broken. Discovering that inside a test run means reading a stack trace to
+      # find out that the schema, not the code, is what refused.
+      - name: Apply migrations
+        run: node scripts/db-migrate.mjs up
+
+      - name: Migration status
+        run: node scripts/db-migrate.mjs status
+
+      - name: Tests against PostgreSQL
+        run: npm test
+
+      # Rollbacks are asserted here rather than trusted. `check-migrations.mjs`
+      # only proves that a `.down.sql` exists; this proves the newest one runs
+      # against a real schema and that the forward migration re-applies
+      # afterwards. A rollback nobody has executed is a plan, not a rollback.
+      - name: Roll the newest migration back and forward
+        run: |
+          node scripts/db-migrate.mjs down
+          node scripts/db-migrate.mjs up
+          node scripts/db-migrate.mjs status
