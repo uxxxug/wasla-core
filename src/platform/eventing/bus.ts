@@ -13,6 +13,16 @@ export interface Subscription {
 export interface EventBus {
   subscribe(consumer: string, eventType: string, handler: EventHandler): void;
   publish(event: EventEnvelope): Promise<void>;
+  /**
+   * Which consumers a publish of this type would reach.
+   *
+   * Exposed for two operations that have to reason about delivery without
+   * performing it: a dry-run reports the consumers an event *would* reach, and a
+   * deliberate re-apply has to know whose inbox entries it is about to clear.
+   * Both would otherwise need their own copy of the subscription table, and a
+   * second copy of "who consumes what" is a second answer waiting to disagree.
+   */
+  consumersFor(eventType: string): readonly string[];
 }
 
 export interface DeadLetter {
@@ -38,6 +48,12 @@ export class LocalEventBus implements EventBus {
 
   subscribe(consumer: string, eventType: string, handler: EventHandler): void {
     this.subs.push({ consumer, event_type: eventType, handler });
+  }
+
+  consumersFor(eventType: string): readonly string[] {
+    return [
+      ...new Set(this.subs.filter((sub) => sub.event_type === eventType).map((sub) => sub.consumer)),
+    ];
   }
 
   /**

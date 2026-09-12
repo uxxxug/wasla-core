@@ -2,7 +2,12 @@ import type { Clock } from "../clock.js";
 import { iso, isoRequired, runner, type Queryable } from "../persistence/postgres.js";
 import { NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
-import type { InboundEventStore, InboundRecord, InboundStatus } from "./ingress.js";
+import type {
+  InboundEventStore,
+  InboundRecord,
+  InboundSelection,
+  InboundStatus,
+} from "./ingress.js";
 import { tallyRows } from "./queue-counts.js";
 
 interface InboundRow {
@@ -20,6 +25,7 @@ interface InboundRow {
   attempts: number;
   last_error: string | null;
   next_attempt_at: Date;
+  received_at: Date;
 }
 
 function toRecord(row: InboundRow): InboundRecord {
@@ -41,11 +47,13 @@ function toRecord(row: InboundRow): InboundRecord {
     attempts: row.attempts,
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
+    received_at: isoRequired(row.received_at),
   };
 }
 
 const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlation_id,
-  causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at`;
+  causation_id, entity_type, entity_id, payload, status, attempts, last_error, next_attempt_at,
+  received_at`;
 
 /**
  * Durable ingress store on Postgres.
@@ -65,7 +73,7 @@ export class PgInboundEventStore implements InboundEventStore {
 
   async accept(event: EventEnvelope, scope: TransactionScope = NO_SCOPE): Promise<boolean> {
     const result = await runner(this.pool, scope).query(
-      `insert into inbound_event (${COLUMNS}, received_at)
+      `insert into inbound_event (${COLUMNS})
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',0,null,$11,$11)
        on conflict (event_id) do nothing`,
       [
@@ -175,6 +183,65 @@ export class PgInboundEventStore implements InboundEventStore {
   async all(): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
       `select ${COLUMNS} from inbound_event order by received_at`,
+    );
+    return result.rows.map(toRecord);
+  }
+
+  /**
+   * A scoped slice of the history, in `(received_at, event_id)` order.
+   *
+   * Every filter is a parameter, never interpolated text: this query is built
+   * from an operator's arguments, so string concatenation here would be an
+   * injection point in the one tool that runs with the widest privileges CORE
+   * has. The `where` clause grows by predicate, and each predicate is `$n`.
+   *
+   * No index is added for it. A scoped replay is a rare operator action, not a
+   * request path, and `inbound_event_producer_idx (producer, received_at desc)`
+   * already covers the common "what did this producer send" narrowing; adding
+   * indexes for the rest would slow every ingress write to speed up an operation
+   * that runs by hand.
+   */
+  async select(selection: InboundSelection): Promise<InboundRecord[]> {
+    const where: string[] = [];
+    const values: unknown[] = [];
+    const bind = (value: unknown): string => {
+      values.push(value);
+      return `$${values.length}`;
+    };
+    if (selection.event_ids) where.push(`event_id = any(${bind(selection.event_ids)}::uuid[])`);
+    if (selection.event_types) where.push(`event_type = any(${bind(selection.event_types)}::text[])`);
+    if (selection.producer !== undefined) where.push(`producer = ${bind(selection.producer)}`);
+    if (selection.statuses) where.push(`status = any(${bind(selection.statuses)}::text[])`);
+    if (selection.received_from !== undefined) {
+      where.push(`received_at >= ${bind(selection.received_from)}::timestamptz`);
+    }
+    if (selection.received_to !== undefined) {
+      where.push(`received_at <= ${bind(selection.received_to)}::timestamptz`);
+    }
+    if (selection.occurred_from !== undefined) {
+      where.push(`occurred_at >= ${bind(selection.occurred_from)}::timestamptz`);
+    }
+    if (selection.occurred_to !== undefined) {
+      where.push(`occurred_at <= ${bind(selection.occurred_to)}::timestamptz`);
+    }
+    if (selection.after) {
+      // Row-value comparison, so the cursor is strictly after the last position
+      // in exactly the same order the rows are returned in. Comparing the two
+      // columns separately would either skip rows sharing a timestamp or repeat
+      // them, which is the difference between a resumable replay and a replay
+      // that quietly loses an event on resume.
+      where.push(
+        `(received_at, event_id) > (${bind(selection.after.received_at)}::timestamptz, ${bind(
+          selection.after.event_id,
+        )}::uuid)`,
+      );
+    }
+    const clause = where.length > 0 ? `where ${where.join(" and ")}` : "";
+    const result = await this.pool.query<InboundRow>(
+      `select ${COLUMNS} from inbound_event ${clause}
+       order by received_at, event_id
+       limit ${bind(selection.limit)}`,
+      values,
     );
     return result.rows.map(toRecord);
   }

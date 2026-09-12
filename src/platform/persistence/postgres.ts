@@ -77,6 +77,48 @@ export class PgTransactionBoundary implements TransactionBoundary {
   }
 }
 
+/**
+ * A `Queryable` on which writing is impossible.
+ *
+ * Every statement runs inside `begin transaction read only`, so a write is
+ * refused **by the database** with SQLSTATE 25006, not by a flag in application
+ * code that a later edit could forget to check. That distinction is the whole
+ * point: a dry-run that merely avoids calling the handlers is a promise, and a
+ * dry-run whose connection cannot write is a proof. It is also why this is not
+ * `PgTransactionBoundary` with an extra option — the guarantee has to hold for
+ * statements issued outside any unit of work too, which is most reads.
+ *
+ * Read-only is per transaction rather than per session so the same pool is
+ * shared with everything else: no second connection string, no second set of
+ * credentials, and nothing to configure in the database for the guarantee to
+ * hold.
+ */
+export class ReadOnlyQueryable implements Queryable {
+  constructor(private readonly pool: Pool) {}
+
+  async query<R extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values?: readonly unknown[],
+  ): Promise<QueryResult<R>> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin transaction read only");
+      const result = await client.query<R>(text, values as unknown[] | undefined);
+      await client.query("commit");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("rollback");
+      } catch {
+        // The original error is the useful one.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}
+
 /** Timestamps cross the boundary as ISO strings, never as `Date`. */
 export function iso(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
