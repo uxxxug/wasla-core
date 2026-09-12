@@ -81,8 +81,22 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is mid-change in the working tree. `uxxxug/wasla-core` is the working
-remote, pushes are fast-forward, and CI runs and passes there.
+**Reserved scope — reputation and trust signals in CORE (ADR 0015), branch
+`reputation-adr-0015`.** This repository has no reservation mechanism other than
+this section, so the reservation is this entry, committed and pushed before any
+implementation file was touched. Nobody else may open `src/modules/reputation/`,
+migration `0018`, `contracts/events/core.reputation.*`,
+`contracts/events/market.review.*` or the reputation rows of
+`docs/event-catalog.md` / `docs/data-ownership.md` while it stands. Chosen
+because it is the only capability on the ownership list that is still
+unimplemented *and* not waiting on a decision CORE does not own: ADR 0015
+already places reputation in CORE and review content in MARKET, and `README.md`
+names reputation as the one remaining gap. The "Remaining, in dependency order"
+table omits reputation entirely — a gap in this document, not in the ownership
+list, and it is corrected in the same cycle that closes the capability.
+
+`uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
+and passes there.
 
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
