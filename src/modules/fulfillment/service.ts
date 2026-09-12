@@ -213,6 +213,16 @@ export interface FulfillmentPaymentPort {
 
 interface HoldInspection {
   usable: boolean;
+  /**
+   * Whether CORE actually holds this authorization.
+   *
+   * False only when the declared reference resolves to nothing. It exists
+   * because `fulfillment.payment_authorization_id` is a foreign key: a row
+   * referencing a hold CORE does not have cannot be stored at all, so the
+   * reference has to be dropped from the row and kept in the audit trail
+   * instead of being written and rejected by the database.
+   */
+  known: boolean;
   settlement: SettlementState;
   reason: string | null;
   /**
@@ -411,7 +421,11 @@ export class FulfillmentService {
       organization_id: payload.organization_id,
       market_order_reference: payload.order_id,
       move_job_reference: null,
-      payment_authorization_id: authorizationId,
+      // A reference CORE cannot resolve is not stored: the column is a foreign
+      // key to `payment_authorization`, so a row naming a hold that does not
+      // exist is refused by the database and the refusal itself could never be
+      // recorded. The declared reference survives on the audit entry below.
+      payment_authorization_id: hold.known ? authorizationId : null,
       status: "coordinating",
       settlement_state: hold.settlement,
       created_at: this.clock.now().toISOString(),
@@ -439,7 +453,15 @@ export class FulfillmentService {
         uow.emit(
           this.closureEvent(refused, event.correlation_id, event.event_id, outcome.captured_minor),
         );
-        uow.audit(this.auditEntry("fulfillment.refused", refused, event.correlation_id));
+        uow.audit(
+          this.auditEntry("fulfillment.refused", refused, event.correlation_id, {
+            refusal_reason: hold.reason,
+            // Deliberately not named *authorization*: the audit scrubber redacts
+            // such keys, and this is the only place the reference MARKET declared
+            // survives once the row cannot hold it.
+            ...(hold.known ? {} : { unresolved_hold_reference: authorizationId }),
+          }),
+        );
         return refused;
       });
     }
@@ -934,10 +956,10 @@ export class FulfillmentService {
    */
   private async inspectHold(authorizationId: string | null): Promise<HoldInspection> {
     if (!authorizationId) {
-      return { usable: true, settlement: "none", reason: null, captured_minor: null };
+      return { usable: true, known: true, settlement: "none", reason: null, captured_minor: null };
     }
     if (!this.payments?.getAuthorization) {
-      return { usable: true, settlement: "held", reason: null, captured_minor: null };
+      return { usable: true, known: true, settlement: "held", reason: null, captured_minor: null };
     }
     let authorization: { status: string; captured_minor: number; expires_at: string | null };
     try {
@@ -945,6 +967,7 @@ export class FulfillmentService {
     } catch {
       return {
         usable: false,
+        known: false,
         settlement: "none",
         reason: "payment_hold_not_found",
         captured_minor: null,
@@ -955,6 +978,7 @@ export class FulfillmentService {
       // order is refused and the mismatch is surfaced for reconciliation.
       return {
         usable: false,
+        known: true,
         settlement: "unsettled",
         reason: "payment_hold_already_captured",
         captured_minor: authorization.captured_minor,
@@ -968,6 +992,7 @@ export class FulfillmentService {
       // otherwise.
       return {
         usable: false,
+        known: true,
         settlement: "partially_captured",
         reason: "payment_hold_partially_captured",
         captured_minor: authorization.captured_minor,
@@ -976,6 +1001,7 @@ export class FulfillmentService {
     if (authorization.status !== "authorized") {
       return {
         usable: false,
+        known: true,
         settlement: "released",
         reason: "payment_hold_not_authorized",
         captured_minor: authorization.captured_minor,
@@ -987,6 +1013,7 @@ export class FulfillmentService {
     ) {
       return {
         usable: false,
+        known: true,
         settlement: "held",
         reason: "payment_hold_expired",
         captured_minor: authorization.captured_minor,
@@ -994,6 +1021,7 @@ export class FulfillmentService {
     }
     return {
       usable: true,
+      known: true,
       settlement: "held",
       reason: null,
       captured_minor: authorization.captured_minor,
@@ -1011,6 +1039,7 @@ export class FulfillmentService {
     action: string,
     fulfillment: Fulfillment,
     correlationId: string,
+    extra: Record<string, unknown> = {},
   ): PendingAuditEntry {
     return {
       actor_type: "service",
@@ -1022,6 +1051,7 @@ export class FulfillmentService {
       metadata: {
         status: fulfillment.status,
         settlement_state: fulfillment.settlement_state,
+        ...extra,
       },
     };
   }
