@@ -34,14 +34,21 @@ package, no cross-database access.
 | HTTP surface with correlation ids, canonical errors, structured logs, health/readiness | implemented, 8 tests |
 | Append-only audit trail with metadata scrubbing | implemented |
 | Executable architecture governance | implemented, 4 tests |
-| Wallet, balanced append-only ledger, payment authorization/capture/expiry | implemented, 9 tests, running on Postgres |
-| Fulfillment coordination via MARKET/MOVE events | implemented on local bus, 18 tests; production transport unproven |
+| Wallet, balanced append-only ledger, payment authorization/capture/expiry | implemented, running on Postgres |
+| Fulfillment coordination via MARKET/MOVE events | implemented on local bus; production transport unproven |
 | Execution/money consistency: `settlement_state`, hold verification at intake, reconciliation read | implemented, covered by the fulfillment settlement tests |
-| Subscriptions, reputation, notifications | **not implemented** |
+| Subscriptions: periods, collection, past-due, renewal sweep, cancellation, expiry | implemented |
+| Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
+| Reputation | **not implemented** |
 
-100 tests pass in the dependency-free default run, and the same gates run in
-CI on the working remote. With `DATABASE_URL` set that becomes **155**, because
-the database-backed files stop being skipped.
+**326 tests** pass in the dependency-free default run, and the same gates run in
+CI on the working remote. With `DATABASE_URL` set that becomes **572**, because
+the database-backed files stop being skipped and the dual-backend suites run
+their Postgres half.
+
+Per-area test counts used to be listed in the table above and were wrong within
+two cycles of being written, so they are no longer kept there — the suite is the
+authority, and `ROADMAP.md` records the verified figure per cycle.
 
 Persistence is real. Every repository port — identity, organization,
 geography, money, fulfillment — has a Postgres adapter, as do the outbox, the
@@ -59,8 +66,8 @@ Two test files are worth knowing about:
   real database — so foreign keys, check constraints and the deferred ledger
   balance trigger all get a chance to refuse what a `Map` would have accepted.
 
-Migrations `0001`–`0006` are applied and verified on real instances (managed
-17.6 and local 18.4) with the full rollback chain exercised.
+All **13** migrations are applied and verified on real instances (managed 17.6 and
+local 18.4) with the full rollback chain exercised.
 
 ### Working against a database
 

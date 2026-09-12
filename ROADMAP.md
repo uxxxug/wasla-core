@@ -1,8 +1,8 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-12
-**Last milestone:** Milestone 6 — event normalisation and historical replay tooling. CORE can now read an envelope it accepted months ago under today's contract, refuse it loudly if it cannot be read safely, choose a narrow and reviewable set of stored events, rehearse the run on a connection that is **physically unable to write**, apply it through the ordinary event bus with no replay-specific privileges anywhere, stop at the first failure with a report that names the event and where to resume, and be asked afterwards what happened — from the existing audit trail, with no new table. Normalisation exposed and fixed two live defects: a consumer that accepted `move.job.rejected` payloads with no contract-required `rejected_at`, and a `move.job.completed` payload carrying a key the contract forbids. 551 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` 551 passed / 33 files; `npm test` without a database 314 passed / 43 skipped; governance, contract, migration and roadmap gates passing. Financial safety, dry-run zero-mutation, cross-process concurrency and failure/resume are asserted on **real PostgreSQL 18.6**, including a falsifiable read-only proof (SQLSTATE 25006). **No migration in this cycle** — replay needed no schema change, and B-24 was deliberately left alone. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
+**Last milestone:** Contract cycle — every fulfillment lifecycle event now names its tenant, and the success path now states the amount that moved. Two defects that made CORE's own events insufficient for the consumers they exist for: `core.fulfillment.dispatched/completed/cancelled` carried no `organization_id`, which forced the notification registry to refuse a tenant-scoped recipient outright (B-23) and forced MARKET and MOVE to call CORE back before they could route a closure; and `FulfillmentPaymentPort.captureWithin` answered `Promise<unknown>`, so the one closure a payer had certainly paid for published `captured_minor: null` while a cancellation after a partial capture published a real figure — exactly backwards. Both fixed inside CORE with no architecture change and no new module. **B-23 resolved.** 572 tests pass with `DATABASE_URL` set.
+**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **572 passed / 34 files**; `npm test` without a database 326 passed / 43 skipped; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all 13 migrations applied. Both fixes are falsifiable and were checked by mutation: removing the tenant from `closureEvent()` fails 10 tests, and reverting the captured amount to `null` fails 6 — across both backends. **No migration in this cycle**: neither fix needed a schema change, and B-24 was again deliberately left alone. One pre-existing flake persists: `tests/migration-0011-lifecycle.test.ts` times out in its teardown hook under full-suite contention and passes in isolation; its assertions pass in both cases.
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -162,7 +162,7 @@ Nothing.
 | B-20 | What is owed when work fails after part of the hold was already captured | CORE records the truth and stops. A `failed`/`cancelled` fulfillment holding `settlement_state = 'partially_captured'` derives `financial_disposition = 'decision_required'`, both closure events carry `financial_decision_required: true` with the observed `captured_minor`, and `GET /v1/fulfillments/reconciliation/pending-financial-decision` lists exactly these cases apart from CORE defects. CORE does **not** refund, retain, split, or mark the operation settled. `MoneyService.refund` is exactly-once, so whichever answer is chosen is executable the day it exists | Five separate owner decisions, listed under "B-20 as a contract gap" in the 2026-09-12 (second) cycle: who states the executed amount, who decides whether partial work earns partial settlement, who authorises a refund, whether a cancellation fee exists, and which system sends the final disposition |
 | B-21 | **Resolved.** Two overlapping closures both committed, because the closing `update` named the row and not its version, so the loser overwrote the winner's terminal row and published a second closure event. `updateIfStatusIn` / `insertIfAbsent` return `applied` \| `stale` and the service treats `stale` as "somebody else closed it", so one closure produces one closure event. Money was never wrong; only the events were multi-valued | resolved | — |
 | B-22 | **Found and resolved in the Milestone 4 cycle.** A claim was a read, not a write. `PgOutbox.claimDue`, `PgInboundEventStore.claimDue` and `PgDeliveryStore.claimDue` each ran one `select … order by … limit … for update skip locked` statement, which in its own implicit transaction releases the row locks the moment it returns. Measured before the fix: two pools claiming five due outbox rows received **five rows each, all five shared**. In production that is two signed POSTs to a partner's webhook and two runs of the same inbound event. The in-memory doubles marked nothing at all, so they could not fail a test either (B-12 again, in a different module). All six implementations now claim by writing the lease in the same statement — `update … set next_attempt_at = now + lease where id in (select … for update skip locked) returning …` — with `claimDue(now, limit, leaseMs = 30_000)`. No schema change: the lease rides on `next_attempt_at`, so an abandoned claim returns on the same clock that schedules retries. `attempts` is deliberately not incremented for the three pre-existing workers, which would have changed their backoff under cover of a concurrency fix. Proven by `tests/worker-claim-atomicity.test.ts`, which fails when the claiming write is removed | resolved | — |
-| B-23 | Closure event payloads carry no `organization_id`, so a tenant-scoped recipient for them is unmatchable | Of the notifiable events only `core.subscription.*` (owner_type/owner_id) and `core.fulfillment.created` carry a tenant. `core.fulfillment.dispatched`, `.completed` and `.cancelled` do not, so a recipient registered for one *scoped to an organization* could never match and would silently notify nobody. Rather than change a published event contract inside a notification milestone, `NotificationRecipientRegistry.register` **refuses** a non-null `organization_id` for those types (HTTP 400) — a loud refusal instead of a quiet silence. Consequence: closure notifications can only be registered platform-wide today | Widening the three closure payloads with `organization_id`, which is a versioned contract change MOVE and MARKET consume, so it belongs in a contract cycle and not in this one |
+| B-23 | **Resolved.** The three closure/dispatch payloads carried no `organization_id`, so a tenant-scoped notification recipient for them could never match and had to be refused outright (HTTP 400), and MARKET/MOVE could not route a closure without calling CORE back. CORE owns tenancy and is the only system that can state it, so the omission was CORE's to fix. `core.fulfillment.dispatched`, `.completed` and `.cancelled` now carry a **required** `organization_id`, read from the fulfillment row rather than from any prior event — which is what makes it correct on the intake-refusal path, where the row is created and closed in one transaction and no `created` event is ever published. `TENANT_SCOPED_EVENT_TYPES` widened accordingly; the registry's refusal is unchanged and still guards `core.*` events that genuinely name no organization (`core.payment.captured`). Proven by `tests/fulfillment-lifecycle-contract.test.ts`, which also validates emitted payloads against the published schemas, and by an end-to-end fan-out test in `tests/notifications.test.ts` showing two tenants watching one event type and only the right one being messaged | resolved | — |
 | B-24 | Lease expiry is indistinguishable from a scheduled retry for three of the four workers, so `core_worker_outcomes_total{outcome="reclaimed"}` can only be reported for notifications | The B-22 fix made every claim write a lease, but for the outbox relay, the inbound dispatcher and the delivery worker the lease rides on `next_attempt_at`, which is also the retry-schedule field. When such a row becomes claimable again nothing records whether a worker died holding it or it was simply due, so an expired lease cannot be counted for those three. Only `PgNotificationStore` can, because it has a separate `reclaimExpired` and a `claim_token`. Operationally the gap is visible only indirectly, as claims exceeding completions + retries + permanent failures | A `processing` status or a `claimed_at` column on `outbox`, `inbound_event` and `event_delivery` — a schema change to the eventing tables with a rollback path and a decision about existing rows, so it belongs in its own cycle rather than being smuggled into an observability one |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
@@ -2669,3 +2669,166 @@ contract cycle with MOVE and MARKET; a live channel adapter has no provider
 credential and the port keeps it a one-file change; **milestone 9** is blocked on
 B-5 and B-6. Contract expansion was also deliberately not chosen: adding event
 types would widen the surface before the existing one is operationally trustworthy.
+
+---
+
+## Cycle 2026-09-12 (third) — the events CORE publishes are now self-sufficient
+
+Chosen after reading the code rather than this file. The previous cycle nominated
+B-24 as next, and B-24 is genuinely CORE-only; it was **not** taken, for a stated
+reason: it is a schema cycle on three eventing tables with a decision about
+pre-existing rows, and two defects were sitting in front of it that cost
+consumers something today, needed no migration, and were provably CORE's alone to
+fix. B-24 remains the next task and its argument from last cycle stands unaltered.
+
+Baseline verified before any edit, because the instruction was not to trust this
+document: `tsc --noEmit` clean, 551 tests passing on real PostgreSQL 18.4, all 13
+migrations applied. The roadmap's claim of 551 was accurate. The audit also
+confirmed that the lifecycle (coordinating → dispatched → completed/failed/
+cancelled), the B-21 single-closure conditional writes, the B-11 shared unit of
+work across money and state, hold verification at intake, `financialDisposition`
+and the three reconciliation reads are all genuinely present and correct — the
+gaps found were not in the lifecycle, they were in what the lifecycle *tells
+anybody*.
+
+### Defect 1 — a closure event that does not name its tenant (B-23)
+
+CORE owns tenancy. It is the only system in WASLA that can state which
+organization a fulfillment belongs to. And it was publishing dispatch and closure
+events that named the fulfillment, the order, the job and the money, and not the
+organization.
+
+The visible cost was in notifications: `organizationScope()` reads
+`organization_id` off the payload and `recipientsFor(type, organizationId)`
+narrows by it, so a recipient scoped to a tenant for one of these types matched
+nothing and would have notified nobody, for ever, silently. The previous cycle
+handled that honestly but narrowly — `register` **refused** the registration with
+HTTP 400 rather than storing something inert. A loud refusal beats quiet silence,
+but the refusal was a symptom being managed, not the defect. The invisible cost
+was larger: MARKET and MOVE could not route, filter or authorize a closure without
+calling CORE back for a fact CORE already had.
+
+Fixed by adding a **required** `organization_id` to `core.fulfillment.dispatched`,
+`.completed` and `.cancelled` (`.created` already carried one). Three details
+matter more than the field itself:
+
+- The value is read from **the fulfillment row**, not from an earlier event or a
+  service field. That is what makes the intake-refusal path correct: when a
+  `market.order.created` names a hold that does not exist, the fulfillment is
+  created and closed in one transaction and the *only* event ever published is
+  the closure. A tenant sourced from a prior `created` event would have been
+  absent exactly there. `tests/fulfillment-lifecycle-contract.test.ts` pins that
+  path specifically, and pins a two-tenant interleaving that any cached or
+  service-level tenant would pass the single-tenant tests and fail.
+- `TENANT_SCOPED_EVENT_TYPES` was widened, and deliberately left **explicit**
+  rather than derived from the schemas. The list asserts a property of each
+  published payload; deriving it would start permitting a tenant scope the moment
+  some unrelated event grew an `organization_id` for its own reasons.
+- The registry's refusal is **kept**, unchanged, and still tested — against
+  `core.payment.captured`, which names an authorization and a wallet and no
+  organization. The guard was never wrong; only its example was.
+
+### Defect 2 — the amount was reported for failure and withheld for success
+
+`FulfillmentPaymentPort.captureWithin` was typed `Promise<unknown>`. `settle()`
+called it, discarded the answer and published `captured_minor: null`. So
+`core.fulfillment.completed` — the closure where money had certainly and finally
+moved — was the only closure event carrying no figure, while
+`core.fulfillment.cancelled` after a partial capture carried one. A consumer
+reconciling CORE's events could see what was kept when work failed and not what
+was charged when work succeeded.
+
+The root cause was a type, not an oversight: `MoneyService.captureWithin` returns
+a `LedgerTransaction`, and a transaction is **one capture leg**. The figure the
+event needs is the authorization's running total. A hold of 6 000 part-captured
+2 500 out of band and then closed by CORE for the 3 500 remainder has a last leg
+of 3 500 and a total of 6 000 — publishing the leg would have been a true number
+about the wrong thing, understating what the payer paid by 2 500.
+
+So `MoneyService` gained `captureHoldWithin`, returning the `PaymentAuthorization`
+and mirroring the existing `voidWithin`; `captureWithin` keeps its signature and
+its behaviour, and both now share one private implementation, so no existing
+caller changed. The fulfillment port method was retyped to
+`captureHoldWithin(...): Promise<{ status, captured_minor }>` — the same shape the
+release path already used, which is the point: the two closure paths now report
+money the same way instead of one of them reporting nothing.
+
+`settle()` derives the settlement state (`captured` when the hold is fully
+captured, `partially_captured` otherwise) rather than hardcoding `captured`. Today
+only the first branch is reachable, because `settle()` captures the whole
+remaining hold; it is written as a derivation because a hardcoded `captured`
+would silently misreport the day a partial-settlement policy exists (B-20).
+
+`captured_minor` stays **optional** on both closure schemas. An order with no hold
+completes without it, and absence means "CORE observed no amount" — turning that
+into `0` would convert having nothing to say into a positive claim that nothing
+moved. There is a test asserting exactly that it is absent, not zero.
+
+### Verification
+
+- 551 → **572** tests. New file `tests/fulfillment-lifecycle-contract.test.ts`
+  (19 tests, both backends) plus a tenant fan-out test in `tests/notifications.test.ts`.
+- The new tests validate emitted payloads against the **published JSON Schemas**
+  read from `contracts/`, for required fields and for `additionalProperties`, so a
+  payload and its contract can no longer drift apart by hand — which is how the
+  `move.job.rejected` consumer came to accept a payload its own contract forbade
+  last cycle.
+- Falsifiability checked by mutation, not assumed: replacing the tenant spread in
+  `closureEvent()` with `{}` fails **10** tests; reverting the settle path to
+  `captured_minor: null` fails **6**. Both across both backends.
+- Four tests that pinned the old behaviour were updated rather than deleted, and
+  each carries a comment saying which guarantee replaced what it used to assert.
+
+### Corrections to this repository's own documentation
+
+`README.md` was materially wrong and is fixed. It claimed "Subscriptions,
+reputation, notifications — **not implemented**" when subscriptions and
+notifications are both implemented and tested, and it cited 100/155 tests against
+an actual 326/572 and migrations `0001`–`0006` against an actual 13. Per-area test
+counts have been removed from that table rather than corrected: they were wrong
+within two cycles of being written, and the suite is the authority.
+`docs/event-catalog.md`, `docs/settlement.md` and `docs/notifications.md` were
+updated in the same push as the code they describe.
+
+### External dependencies — one new, for the other repositories' agents
+
+**New, and it needs action outside CORE.** `organization_id` is an additive field,
+but a consumer validating `core.fulfillment.dispatched`, `.completed` or
+`.cancelled` with `additionalProperties: false` against a copy of the schema taken
+before this change **will now reject valid CORE events**. MOVE and MARKET should
+refresh the three schemas from `contracts/events/`. No version bump was made: the
+payloads remain v1, since a required addition that consumers must accept is
+indistinguishable in effect from a compatible one for any consumer that does not
+validate strictly, and bumping would have forced every consumer to migrate for a
+field most of them will simply ignore. If either repository's agent judges a v2
+necessary for its own validator, that is a contract conversation, not a CORE
+decision to take alone.
+
+Second, smaller: events **persisted before this commit** have no
+`organization_id`. Replay and history readers must treat its absence as unknown
+rather than as an error or as a tenantless event — on replay such events fan out
+to platform-wide recipients only.
+
+**B-24** untouched again: no `claimed_at`, no `processing` status, no migration.
+**B-20** untouched and unchanged — this cycle reports the amount more honestly and
+still refuses to decide what is owed. **D-6**, **D-7**, **D-8** unchanged.
+**B-2…B-6** and **B-14…B-19** still need answers CORE does not own.
+
+### Next task, and why it is still this one
+
+**B-24 — make a claim countable and an abandoned lease recoverable.** Unchanged
+from last cycle and now the largest remaining CORE-only correctness gap with
+nothing in front of it. The lease for the outbox relay, the inbound dispatcher and
+the delivery worker rides on `next_attempt_at`, which is also the retry-schedule
+field, so a row held by a dead process is indistinguishable from a row waiting to
+be retried: lease expiry is uncountable, and an operator cannot ask what is stuck.
+It needs a `claimed_at` column or a `processing` status on `outbox`,
+`inbound_event` and `event_delivery`, a rollback path, and a stated decision about
+rows existing when the migration runs.
+
+Not chosen next: **B-14…B-19** and **B-20** need owner decisions; **milestone 9**
+is blocked on B-5/B-6; a live channel adapter has no provider credential and the
+port keeps it a one-file change. Contract *expansion* is still deliberately not
+chosen — this cycle completed two existing contracts rather than adding any new
+event type, and the existing surface should be operationally trustworthy before it
+grows.
