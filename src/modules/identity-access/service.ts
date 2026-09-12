@@ -9,6 +9,7 @@ import { withTransaction } from "../../platform/eventing/unit-of-work.js";
 import {
   type ChannelType,
   type Identity,
+  type IdentityLink,
   type Membership,
   type Permission,
   type Principal,
@@ -236,6 +237,23 @@ export class IdentityService {
       permissions: [...permissionsForRoles(roles)],
       service_name: principal.service_name,
     };
+  }
+
+  /**
+   * The channel links held for an identity.
+   *
+   * Published so that another module can ask "where can this identity be
+   * reached" without reading identity's tables (ADR 0017). Added for the
+   * notification module's `ChannelDirectory`, which needs a verified address and
+   * must not be given a way to look one up behind this service's back.
+   *
+   * Returns the links as they are, including unverified ones: whether an
+   * unverified link may be used is the caller's decision to justify, and this
+   * service filtering silently would hide it.
+   */
+  async channelLinks(identityId: string): Promise<IdentityLink[]> {
+    assertId("identity_id", identityId);
+    return await this.repo.listLinksForIdentity(identityId);
   }
 
   async grantMembership(input: {

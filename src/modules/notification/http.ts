@@ -1,0 +1,112 @@
+import { invalid } from "../../platform/errors.js";
+import type { Router } from "../../platform/http/router.js";
+import { requirePrincipal } from "../identity-access/http.js";
+import type { IdentityService } from "../identity-access/service.js";
+import type { NotificationStatus } from "./domain.js";
+import type { NotificationReadService, NotificationRecipientRegistry } from "./service.js";
+
+const str = (input: Record<string, unknown>, key: string): string => {
+  const value = input[key];
+  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
+  return value;
+};
+
+const STATUSES: readonly NotificationStatus[] = [
+  "pending",
+  "processing",
+  "accepted",
+  "delivered",
+  "failed",
+];
+
+/**
+ * Four routes, and no more.
+ *
+ * Configuration needs create, list and deactivate. Observability needs one list
+ * with filters and the counts an operator actually watches, which is why there
+ * is no `/pending`, `/failed` or `/retrying` endpoint: those are the same
+ * question with a different filter, and a separate path per status is how one
+ * concept ends up with five sources of truth that drift.
+ *
+ * Nothing here duplicates `/v1/event-deliveries/undelivered`. That answers "has
+ * a subscribing system received this event"; these answer "has a person been
+ * told". Folding them together would report a webhook as if it were a message
+ * to somebody's phone.
+ */
+export function registerNotificationRoutes(
+  router: Router,
+  recipients: NotificationRecipientRegistry,
+  reads: NotificationReadService,
+  identity: IdentityService,
+): void {
+  // Operator-only. Deciding that a person is messaged about a tenant's events is
+  // an infrastructure decision with a privacy consequence, not a tenant setting.
+  router.post("/v1/notification-recipients", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
+    const input = (ctx.body ?? {}) as Record<string, unknown>;
+    const organizationId = input["organization_id"];
+    if (organizationId !== null && organizationId !== undefined && typeof organizationId !== "string") {
+      throw invalid("organization_id must be a string or null");
+    }
+    const created = await recipients.register({
+      // Absent and explicit null mean the same thing: platform-wide.
+      organization_id: typeof organizationId === "string" ? organizationId : null,
+      event_type: str(input, "event_type"),
+      identity_id: str(input, "identity_id"),
+      channel: str(input, "channel"),
+      correlation_id: str(input, "correlation_id"),
+    });
+    return { status: 201, body: created };
+  });
+
+  router.get("/v1/notification-recipients", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
+    const organizationId = ctx.query.get("organization_id") ?? undefined;
+    const items = await recipients.list(organizationId);
+    return { status: 200, body: { count: items.length, items } };
+  });
+
+  // Stops future events queueing for this recipient. Notifications already
+  // queued stay queued: they describe something that already happened, and
+  // dropping them silently is worse than sending them late.
+  router.post("/v1/notification-recipients/:recipient_id/deactivate", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.write");
+    const input = (ctx.body ?? {}) as Record<string, unknown>;
+    const updated = await recipients.setActive(
+      ctx.params["recipient_id"] ?? "",
+      false,
+      str(input, "correlation_id"),
+    );
+    return { status: 200, body: updated };
+  });
+
+  /**
+   * The operator surface: what has been sent, what is stuck, and why.
+   *
+   * `summary` carries the counts including the derived `retrying`, so the common
+   * question ("is anything piling up") is one request and not five.
+   */
+  router.get("/v1/notifications", async (ctx) => {
+    await requirePrincipal(ctx, identity, "organization.read");
+    const status = ctx.query.get("status") ?? undefined;
+    if (status !== undefined && !STATUSES.includes(status as NotificationStatus)) {
+      throw invalid(`status must be one of ${STATUSES.join(", ")}`);
+    }
+    const organizationId = ctx.query.get("organization_id") ?? undefined;
+    const limitRaw = ctx.query.get("limit") ?? undefined;
+    const limit = limitRaw === undefined ? 100 : Number(limitRaw);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw invalid("limit must be an integer between 1 and 500");
+    }
+    const items = await reads.list({
+      ...(organizationId === undefined ? {} : { organization_id: organizationId }),
+      ...(status === undefined ? {} : { status: status as NotificationStatus }),
+      limit,
+    });
+    const summary = await reads.counts(organizationId);
+    // Bodies and addresses are personal data, but they are also what an operator
+    // needs to answer "what were they told". The route is operator-scoped for
+    // that reason; the audit trail and the logs still never carry either.
+    return { status: 200, body: { count: items.length, summary, items } };
+  });
+}

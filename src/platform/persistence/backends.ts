@@ -18,6 +18,9 @@ import { PgGeographyRepository } from "../../modules/geography/pg-repository.js"
 import { InMemoryIdentityRepository } from "../../modules/identity-access/memory-repository.js";
 import type { IdentityRepository } from "../../modules/identity-access/ports.js";
 import { PgIdentityRepository } from "../../modules/identity-access/pg-repository.js";
+import { InMemoryNotificationStore } from "../../modules/notification/repository.js";
+import type { NotificationStore } from "../../modules/notification/repository.js";
+import { PgNotificationStore } from "../../modules/notification/pg-repository.js";
 import { InMemoryMoneyRepository } from "../../modules/money/repository.js";
 import type { MoneyRepository } from "../../modules/money/repository.js";
 import { PgMoneyRepository } from "../../modules/money/pg-repository.js";
@@ -47,6 +50,8 @@ export interface Persistence {
   inbox: InboxStore;
   inbound: InboundEventStore;
   delivery: DeliveryStore;
+  /** Notifications to people, as opposed to `delivery`, which is to systems. */
+  notification: NotificationStore;
   boundary: TransactionBoundary;
   identity: IdentityRepository;
   organization: OrganizationRepository;
@@ -71,6 +76,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     inbox: new InMemoryInbox(),
     inbound: new InMemoryInboundEventStore(clock),
     delivery: new InMemoryDeliveryStore(),
+    notification: new InMemoryNotificationStore(),
     boundary: new InMemoryTransactionBoundary(),
     identity: new InMemoryIdentityRepository(),
     organization: new InMemoryOrganizationRepository(),
@@ -97,6 +103,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     inbox: new PgInbox(pool, clock),
     inbound: new PgInboundEventStore(pool, clock),
     delivery: new PgDeliveryStore(pool, clock),
+    notification: new PgNotificationStore(pool),
     boundary: new PgTransactionBoundary(pool as never),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),

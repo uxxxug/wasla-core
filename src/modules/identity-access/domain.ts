@@ -24,7 +24,18 @@ export interface Identity {
   legacy_id: string | null;
 }
 
-export type ChannelType = "telegram" | "phone" | "email" | "web" | "partner_api";
+/**
+ * The channels an identity can be linked on, as a runtime list.
+ *
+ * A list rather than a bare union so other code can check membership and, more
+ * importantly, so a test can compare it against the notification module's
+ * `RECEIVABLE_CHANNELS`. Those two lists are deliberately different — `web` and
+ * `partner_api` are ways in with no address to answer on — and a difference that
+ * only exists in two hand-written unions drifts silently.
+ */
+export const CHANNEL_TYPES = ["telegram", "phone", "email", "web", "partner_api"] as const;
+
+export type ChannelType = (typeof CHANNEL_TYPES)[number];
 
 export interface IdentityLink {
   identity_link_id: string;

@@ -1,8 +1,25 @@
 import type { Clock } from "../clock.js";
 import type { TransactionBoundary } from "../persistence/transaction.js";
 import type { EventBus } from "./bus.js";
-import type { DeliveryFanOut } from "./delivery.js";
+import type { EventEnvelope } from "./envelope.js";
 import type { OutboxStore } from "./outbox.js";
+import type { TransactionScope } from "../persistence/transaction.js";
+
+/**
+ * Anything that turns one published event into durable follow-on work.
+ *
+ * Structural on purpose, and declared here rather than imported: `DeliveryFanOut`
+ * (webhooks to systems) and the notification module's fan-out (messages to
+ * people) both satisfy it, and the relay must not know which is which. Declaring
+ * it in the platform keeps the dependency pointing inwards — a module implements
+ * a platform interface, the platform never imports a module (ADR 0017).
+ *
+ * Every implementation runs on the relay's scope, so its writes commit with
+ * `markPublished` or not at all.
+ */
+export interface EventFanOut {
+  queueFor(event: EventEnvelope, scope: TransactionScope): Promise<unknown>;
+}
 
 export interface PublisherResult {
   published: number;
@@ -22,12 +39,19 @@ export class OutboxPublisher {
     private readonly maxAttempts = 5,
     private readonly baseBackoffMs = 1000,
     /**
-     * Outbound fan-out, optional so the eventing tests can run the relay with
-     * no notion of external subscribers at all.
+     * Outbound fan-outs, optional so the eventing tests can run the relay with
+     * no notion of external subscribers at all. A list because there is more
+     * than one kind of follow-on work — deliveries to systems and notifications
+     * to people — and they must all commit with `markPublished` rather than one
+     * of them being run afterwards on its own.
      */
-    private readonly fanOut?: DeliveryFanOut,
+    fanOut?: EventFanOut | readonly EventFanOut[],
     private readonly boundary?: TransactionBoundary,
-  ) {}
+  ) {
+    this.fanOuts = fanOut === undefined ? [] : Array.isArray(fanOut) ? [...fanOut] : [fanOut as EventFanOut];
+  }
+
+  private readonly fanOuts: readonly EventFanOut[];
 
   async drainOnce(limit = 100): Promise<PublisherResult> {
     const now = this.clock.now();
@@ -43,10 +67,10 @@ export class OutboxPublisher {
         // dual-write problem the outbox exists to prevent, moved one step
         // downstream. Re-running the fan-out is free: the delivery rows are
         // unique per (event, subscription).
-        if (this.fanOut && this.boundary) {
-          const fanOut = this.fanOut;
+        if (this.fanOuts.length > 0 && this.boundary) {
+          const fanOuts = this.fanOuts;
           await this.boundary.run(async (scope) => {
-            await fanOut.queueFor(record.event, scope);
+            for (const fanOut of fanOuts) await fanOut.queueFor(record.event, scope);
             await this.outbox.markPublished(record.event.event_id, scope);
           });
         } else {

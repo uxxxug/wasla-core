@@ -1,9 +1,10 @@
 import { invalid, unauthenticated } from "../../platform/errors.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
+import { CHANNEL_TYPES } from "./domain.js";
 import type { ChannelType, Permission, Role } from "./domain.js";
 import type { AuthenticatedPrincipal, IdentityService } from "./service.js";
 
-const CHANNELS: readonly ChannelType[] = ["telegram", "phone", "email", "web", "partner_api"];
+const CHANNELS: readonly ChannelType[] = CHANNEL_TYPES;
 const ROLES: readonly Role[] = [
   "platform_admin",
   "org_admin",

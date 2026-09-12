@@ -30,6 +30,15 @@ import { GeographyService } from "./modules/geography/service.js";
 import { registerGeographyRoutes } from "./modules/geography/http.js";
 import { SubscriptionService } from "./modules/subscription/service.js";
 import { registerSubscriptionRoutes } from "./modules/subscription/http.js";
+import {
+  NotificationDispatcher,
+  NotificationFanOut,
+  NotificationReadService,
+  NotificationRecipientRegistry,
+} from "./modules/notification/service.js";
+import { IdentityChannelDirectory } from "./modules/notification/identity-directory.js";
+import { registerNotificationRoutes } from "./modules/notification/http.js";
+import type { NotificationChannel } from "./modules/notification/ports.js";
 
 export interface CoreApp {
   router: Router;
@@ -41,6 +50,20 @@ export interface CoreApp {
   dispatcher: InboundDispatcher;
   subscriptions: SubscriptionRegistry;
   deliveries: DeliveryWorker;
+  /**
+   * Notifications to people. Named apart from `subscriptions`/`deliveries` on
+   * purpose: those reach systems over signed HTTP, these reach a person on a
+   * channel, and one bundle holding both must not let them answer to one name.
+   */
+  notificationRecipients: NotificationRecipientRegistry;
+  notifications: NotificationReadService;
+  notificationDispatcher: NotificationDispatcher;
+  /**
+   * Exposed because a redelivered event is a case worth testing directly: the
+   * relay already calls it, and asserting that a second call queues nothing
+   * needs the same object the relay uses, not a copy of it.
+   */
+  notificationFanOut: NotificationFanOut;
   audit: AuditLog;
   identity: IdentityService;
   organization: OrganizationService;
@@ -64,7 +87,18 @@ export interface CoreApp {
  * imports another module's internals, only its published service interface.
  */
 export function createCoreApp(
-  options: { clock?: Clock; persistence?: Persistence; transport?: EventTransport } = {},
+  options: {
+    clock?: Clock;
+    persistence?: Persistence;
+    transport?: EventTransport;
+    /**
+     * Channel adapters. Empty by default: CORE ships no provider, and a fake
+     * that quietly accepted everything would let the system report deliveries
+     * that never happened. With none wired, notifications queue, retry and end
+     * as `failed` with `channel_adapter_not_configured` — visible, not silent.
+     */
+    channels?: readonly NotificationChannel[];
+  } = {},
 ): CoreApp {
   const clock = options.clock ?? systemClock;
   // One bundle, never a mix: see `Persistence` for why selecting adapters
@@ -75,8 +109,31 @@ export function createCoreApp(
   // Outbound: the relay queues one delivery row per interested subscriber in
   // the same transaction that marks the event published, and the worker sends
   // them. See `DeliveryFanOut` for why those two are one transaction.
+  // Built before the relay because the notification fan-out resolves addresses
+  // through identity's published service.
+  const identity = new IdentityService(store.identity, outbox, boundary, audit, clock);
   const fanOut = new DeliveryFanOut(store.delivery, clock, newId);
-  const publisher = new OutboxPublisher(outbox, bus, clock, 5, 1000, fanOut, boundary);
+  // Addresses come from identity links through a port, never from a table this
+  // module reads itself (ADR 0016, ADR 0017).
+  const channelDirectory = new IdentityChannelDirectory(identity);
+  const notificationFanOut = new NotificationFanOut(
+    store.notification,
+    channelDirectory,
+    clock,
+    newId,
+  );
+  // Both fan-outs run inside the relay's transaction, so an event is never
+  // marked published without the work it owes: a webhook row for every
+  // subscriber and a notification row for every recipient.
+  const publisher = new OutboxPublisher(
+    outbox,
+    bus,
+    clock,
+    5,
+    1000,
+    [fanOut, notificationFanOut],
+    boundary,
+  );
   const subscriptions = new SubscriptionRegistry(store.delivery, clock, newId);
   const deliveries = new DeliveryWorker(
     store.delivery,
@@ -91,7 +148,6 @@ export function createCoreApp(
   );
   const dispatcher = new InboundDispatcher(store.inbound, bus, clock);
 
-  const identity = new IdentityService(store.identity, outbox, boundary, audit, clock);
   const organization = new OrganizationService(store.organization, audit, clock, boundary);
   const money = new MoneyService(store.money, outbox, boundary, audit, clock);
   const geography = new GeographyService(store.geography, audit, boundary);
@@ -127,6 +183,20 @@ export function createCoreApp(
     await fulfillment.consumeMoveCompletion(event);
   });
 
+  const notificationRecipients = new NotificationRecipientRegistry(
+    store.notification,
+    channelDirectory,
+    audit,
+    clock,
+    newId,
+  );
+  const notifications = new NotificationReadService(store.notification);
+  const notificationDispatcher = new NotificationDispatcher(
+    store.notification,
+    options.channels ?? [],
+    clock,
+  );
+
   const router = new Router();
   router.get("/health", () => ({ status: 200, body: { status: "ok" } }));
   router.get("/ready", async () => ({
@@ -145,6 +215,7 @@ export function createCoreApp(
   registerDeliveryRoutes(router, subscriptions, identity);
   registerGeographyRoutes(router, geography, identity);
   registerSubscriptionRoutes(router, billing, identity);
+  registerNotificationRoutes(router, notificationRecipients, notifications, identity);
 
   return {
     router,
@@ -156,6 +227,10 @@ export function createCoreApp(
     dispatcher,
     subscriptions,
     deliveries,
+    notificationRecipients,
+    notifications,
+    notificationDispatcher,
+    notificationFanOut,
     audit,
     identity,
     organization,
