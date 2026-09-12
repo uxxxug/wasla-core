@@ -60,6 +60,27 @@ export function isClosed(status: FulfillmentStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+/** Every status a fulfillment can hold, in lifecycle order. */
+export const ALL_STATUSES: readonly FulfillmentStatus[] = [
+  "coordinating",
+  "dispatched",
+  "completed",
+  "failed",
+  "cancelled",
+];
+
+/**
+ * The statuses from which a fulfillment can still be closed.
+ *
+ * Derived from `isClosed` rather than listed a second time: a status added to
+ * the union and forgotten here would silently widen or narrow the guard on
+ * every terminal transition, which is the guard that makes a closure
+ * single-valued (B-21).
+ */
+export const OPEN_STATUSES: readonly FulfillmentStatus[] = ALL_STATUSES.filter(
+  (status) => !isClosed(status),
+);
+
 /**
  * What CORE can say about the money behind a fulfillment, derived from the two
  * states and never stored.
