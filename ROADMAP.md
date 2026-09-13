@@ -5195,5 +5195,11 @@ is reported FAIL in the combined run while its single test is reported passed,
 and it passes standalone. It is recorded rather than hidden, and CI is the
 judgment.
 
-**CI verdict: pending — this line is replaced with the real result after the
-push.**
+**CI verdict: green.** Run 34747601744 on `1ac20cb`, both jobs successful.
+*Verify without a database*: 595 passed / 114 skipped across 45 files, plus the
+cluster file skipped. *Verify against PostgreSQL* (`postgres:16` built from the
+19 migrations): 1124 passed across 47 files and 1 passed in the cluster file —
+1125 in total, matching the local measurement exactly. Notably,
+`tests/migration-0011-lifecycle.test.ts` passed in CI in the same combined run
+where it is reported FAIL locally, which keeps that oddity a local-environment
+observation rather than a defect in the file.
