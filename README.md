@@ -41,11 +41,11 @@ package, no cross-database access.
 | Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
 | Reputation: append-only signals, exactly-once ingestion, retraction marker, standing derived on every read | implemented; no producer publishes `market.review.*` yet, and weighting/decay/thresholds are undecided (B-31…B-34) |
 
-**550 tests** pass in the dependency-free default run and **1015** with
+**557 tests** pass in the dependency-free default run and **1026** with
 `DATABASE_URL` set, because the database-backed files stop being skipped and the
-dual-backend suites run their Postgres half. (The line has read 385/687 and then
-529/976; the counts are updated rather than removed, and the earlier pairs are
-kept in this parenthesis so the growth stays auditable.)
+dual-backend suites run their Postgres half. (The line has read 385/687, then
+529/976, then 550/1015; the counts are updated rather than removed, and the
+earlier pairs are kept in this parenthesis so the growth stays auditable.)
 
 **Both numbers are now produced by CI, on every push.** They were not until the
 CI database cycle: the workflow set no `DATABASE_URL`, so roughly 300 assertions

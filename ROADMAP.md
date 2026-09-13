@@ -81,40 +81,18 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved: `ON DELETE` and delete-path parity (branch `delete-path-parity`,
-milestone 17).** The four parity cycles each closed a family of rules about
-rows that *exist*. All four left the same hole, and each recorded it as a
-"not done" rather than fixing it: the reference backend does not model
-referential actions, and the delete halves of the four append-only triggers are
-unreachable rather than enforced. Unreachable is a fact about today's ports, not
-a property of the design, and nothing in the repository holds it true.
-
-Measured before reserving, from `pg_constraint` and the source rather than from
-the documents: of the 30 foreign keys, **29 are `ON DELETE NO ACTION`** and
-exactly one — `plan_grant_plan_id_fkey` — is **`ON DELETE CASCADE`**; all 30 are
-`ON UPDATE NO ACTION`. **15 of the 32 tables are a foreign-key parent**, so a
-delete there either orphans a child or cascades. And in the whole of `src/`
-there are **three** places a row is removed: `pg-inbox`/`inbox` releasing a
-claim, the rate-limit counter pruning old windows, and
-`InMemoryTransactionBoundary` unwinding a write on rollback. `inbox` and
-`rate_limit_counter` are neither a parent nor a child of any key and carry no
-trigger; the rollback path is not a delete a caller can reach.
-
-So the claim the four cycles rested on is true today. What is missing is
-anything that keeps it true: a migration can add `ON DELETE SET NULL` tomorrow,
-or a store can grow a `deleteUsage`, and every exemption that said "no caller
-can express this" would quietly become false while the suite stayed green.
-
-Scope: the referential action of all 30 keys declared once and checked against
-`confdeltype`/`confupdtype` at run time, so a migration that adds a cascade or a
-`SET NULL` the reference backend does not model fails; an inventory of the three
-delete paths with, for each, the reason it is safe — no referential structure and
-no trigger on the table it touches — asserted against the catalog rather than
-stated; and a source-and-port gate that fails when a new delete appears anywhere
-else, which is what converts the four cycles' "unreachable" from a claim into an
-enforced invariant. Adding a delete path CORE has no requirement for is
-explicitly **not** in scope: the append-only tables are append-only by design,
-and the cycle's job is to make that design enforced, not to weaken it.
+Nothing is reserved. The delete-path parity cycle that held this slot is
+finished and recorded below, which closes the delete half of the four parity
+families B-12 named, and with it B-12 itself. It does not close parity as a
+subject: measuring the schema for this cycle turned up a family B-12 never
+named, column shape, recorded below as milestone 18. Re-measured before writing this: of the items
+above, milestones 2…9 wait on environments and producers outside CORE,
+B-14…B-20 and B-30…B-34 are policy decisions that are not CORE's to make,
+B-35/ADR 0010 still has no ADR text in the repository, and B-36 is a plan
+limitation. The next actionable item is therefore **milestone 18, column-level
+parity**: 270 columns, **212 `NOT NULL`** and **49 with a default**, against a
+reference backend that enforces nullability only where a text rule happens to
+mention it. Nothing is holding it.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -150,7 +128,8 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 | 15 | Referential-integrity parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The third and last large family of B-12. The schema declares **30 foreign keys** across 20 child tables and exactly **one** — `usage_record_period_id_fkey` — was restated anywhere in `src/`, so the reference backend accepted a fulfillment in no tenant, a membership for no principal, a session for a principal nobody created, a notification addressed to a recipient row that was never inserted, and a webhook delivery of an envelope the outbox never recorded. `src/platform/persistence/reference-keys.ts` declares one rule per referencing column (name, child column, parent table, nullability, because `MATCH SIMPLE` makes a null reference satisfy the key) and `putRow` now calls `assertReferences` on every reference write, refusing with Postgres' own wording. Parents are found through a bundle-scoped registry that reads the stores' **live** maps, so no row is copied and no second source of truth exists. `tests/fk-parity.test.ts` probes 29 of the 30 on both backends (**63 assertions**), records the thirtieth as exempt with its reason, and holds four gates: coverage against `pg_constraint` at run time, a declaration gate comparing every rule's child column, parent table and nullability with the catalog, an assertion that the bundle resolved every parent the rules read — the design's single fail-open path, measured rather than trusted — and a reason for every exemption. Enforcement immediately falsified six passing suites: **29 failures**, all `fulfillment_organization_id_fkey` or `membership_organization_id_fkey`, because those fixtures had never created the tenant they wrote into. Fixed in the fixtures (`seedTenant`, `coreWithTenants`), not by relaxing the rule. A second finding: `session`, `plan_grant` and `usage_record` were still writing with a bare `map.set`, so the previous cycle's claim that `putRow` is the only reference write path held for 25 of 28 tables and their five `CHECK`s were duplicated inline; all three now go through `putRow` and their rules are declared in `ROW_RULES`. `docs/foreign-key-parity.md` records the inventory, the six nullable columns and what null means in each, the one weakening, the exemption, and a stale fixture comment claiming `organization` has a country foreign key when the catalog shows none |
 | 16 | Trigger-invariant parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The fourth and last family of B-12. The schema installs **12 triggers**, measured from `pg_trigger`; five were named anywhere in `src/`. Two were enforced by no reference store at all: `subscription_currency_check` (a plan priced in one currency billed against a wallet in another, and a subscription to a plan that was never offered) lived only in `SubscriptionService`, and `ledger_transaction_balance` only in `MoneyService` — so a caller reaching the stores directly could post entries summing to -1 and the reference backend accepted money appearing from nowhere. `src/platform/persistence/transition-rules.ts` declares the immediate triggers as transition rules over (operation, previous row, next row) and `putRow` applies them after the checks and the foreign keys, the order Postgres uses; the four `DEFERRABLE INITIALLY DEFERRED` constraint triggers stay on the transaction journal, because a write-time refusal would reject a legal sequence. The same file carries `TRIGGER_INVENTORY`, which names all twelve exactly once as immediate, deferred (naming the store that defers it) or exempt with a reason. `tests/trigger-parity.test.ts` holds **39 assertions** with a database: a refusal probe per reachable trigger on both backends asserting Postgres' own words, an outcome probe for the one path both backends narrow away before it can fire, three exemptions that assert the absent port operations rather than claiming unreachability in prose, and five gates — coverage against `pg_trigger` at run time, a timing gate reading `tgdeferrable`/`tginitdeferred`, `unresolvedReads() === []`, a reason per exemption, and agreement between the inventory and the rules. `docs/trigger-parity.md` records the inventory, the two gaps, and the four places the backends still differ |
-| 17 | `ON DELETE` and delete-path parity | **Not started; the next actionable item** | What the four parity cycles deliberately left: the reference backend does not model cascades, and no reference store deletes a row outside a transaction rollback, so the delete halves of the four append-only triggers and the one `ON DELETE CASCADE` key (`plan_grant_plan_id_fkey`) are unreachable rather than enforced. Today that is recorded as exemptions whose absent port operations the suite asserts, which is honest but is not parity. The cycle would decide whether CORE's ports get a delete path at all — the append-only tables argue no — and if any do, model the cascade and probe it on both backends |
+| 17 | `ON DELETE` and delete-path parity | **Complete, and self-enforcing from here** | The fifth parity cycle, the last of the four families B-12 named, and the only one where nothing in the code was wrong. All four earlier cycles ended with the same admission — the reference backend models no referential action, and the delete halves of the four append-only triggers are *unreachable* rather than enforced — and nothing in the repository kept that true: a migration adding `ON DELETE SET NULL`, or a store growing a `deleteUsage`, would have turned every "no caller can express this write" exemption false while the suite stayed green. Measured from `pg_constraint` and the source rather than the documents: **30 foreign keys, 29 `ON DELETE NO ACTION`**, exactly one `ON DELETE CASCADE` (`plan_grant_plan_id_fkey`), **no** non-default `ON UPDATE`, **15 of 32 tables are a foreign-key parent**, and **three** places in `src/` remove a row — the inbox releasing a claim, the rate-limit counter pruning closed windows, and the in-memory boundary unwinding a rollback. `src/platform/persistence/delete-actions.ts` declares the action of all 30 keys (`NO ACTION` is modelled by construction: the database refuses a delete that would orphan a child, and in memory there is no delete to refuse) and the one cascade as **`modelled: false`** with its reason, plus the three delete paths with the reason each is safe. `tests/delete-parity.test.ts` holds **11 assertions** with a database: an action for every key, unmodelled-means-unreachable, no port that deletes an unmodelled parent, row removal only where declared (scanning for `delete from`, `truncate`, `.delete(` and `.clear(` — the last two appear nowhere in `src/` and are scanned for anyway), every removal-shaped port operation classified as deleting a row or releasing a lease (the four `reclaimExpired` methods are `UPDATE`s and say so), the declarations read against `confdeltype`/`confupdtype` at run time, the deletable tables checked against `pg_constraint` and `pg_trigger`, and two outcome probes on both backends for the one delete a caller can reach. No delete path was added: the append-only tables are append-only by design, and the cycle's job was to make that enforced rather than to weaken it so a cascade becomes observable. `docs/delete-path-parity.md` records the inventory, the five falsifications, and the four things the cycle does not claim |
+| 18 | Column-level parity: `NOT NULL`, defaults and types | **Not started; the next actionable item** | The family the five parity cycles never touched. Measured from `pg_attribute` while closing milestone 17: **270 columns, 212 `NOT NULL`, 49 with a default**, and 11 distinct types including `character(3)` for currency and `character(2)` for country. The reference backend enforces nullability only where a `ROW_RULES` text rule happens to mention it, enforces no type at all — a number where Postgres wants `text`, a 4-letter currency where the column is `character(3)` — and applies no default, so a row the database would have completed is stored incomplete in memory. The cycle would declare the column shape once, apply it in `putRow` before the checks (the order Postgres uses), probe the refusals on both backends with Postgres' own wording, and gate the declaration against the catalog |
 
 ### What was claimed complete and actually is
 
@@ -4714,3 +4693,128 @@ cycle's claim worth anything: the coverage gate and the timing gate ran there
 too, against the `pg_trigger` of a database CI created from the 19 migrations,
 so the inventory in `docs/trigger-parity.md` is checked against the schema CI
 builds and not only the one on this machine.
+
+## Cycle 2026-09-13 (fifth) — `ON DELETE` and delete-path parity
+
+### Why this was next
+
+Nothing above it in the dependency order was actionable, and re-measuring said
+so rather than the documents: milestones 2…9 wait on environments and producers
+outside CORE, B-14…B-20 and B-30…B-34 are policy decisions that are not CORE's
+to make, B-35/ADR 0010 has no ADR text in the repository, and B-36 is a plan
+limitation. Milestone 17 was the one item with no external dependency.
+
+It was also the one item the four previous cycles had each written down and
+then left. (It closes B-12, which named four families. It does not close parity
+as a subject: the measurement below turned up a fifth family B-12 never named,
+recorded as milestone 18 rather than folded into this cycle.) Uniqueness, checks, foreign keys and triggers are all rules about
+rows that *exist*; all four ended with the same sentence in their "what this
+cycle did not do", and the fifth was the sentence itself.
+
+### Measured first
+
+From `pg_constraint`, `pg_attribute` and the source, before touching anything:
+
+| Question | Answer |
+|---|---|
+| Foreign keys | **30** |
+| `ON DELETE NO ACTION` | **29** |
+| `ON DELETE CASCADE` | **1** — `plan_grant_plan_id_fkey` |
+| Non-default `ON UPDATE` | **0** |
+| Tables that are a foreign-key parent | **15 of 32** |
+| Places in `src/` that remove a row | **3** |
+
+The three are the inbox releasing a consumer's claim, the rate-limit counter
+pruning closed windows, and `InMemoryTransactionBoundary` unwinding a write on
+rollback. `inbox` and `rate_limit_counter` are neither the parent nor the child
+of any key and carry no trigger; the rollback path is not a delete a caller can
+reach.
+
+### So nothing was broken — and that was the problem
+
+The claim the four cycles rested on was true. What was missing was anything that
+kept it true. An exemption re-measured only when a human remembers to is a
+comment, not a guarantee, and the four cycles had accumulated seven of them
+resting on "no caller can express this write".
+
+So this cycle adds no behaviour. It adds the thing that makes the previous four
+cycles' honesty survive the next migration.
+
+### Proven, not assumed
+
+`src/platform/persistence/delete-actions.ts` declares two things and nothing
+else: the `ON DELETE`/`ON UPDATE` action of all 30 keys, and the three delete
+paths with the reason each is safe. `NO ACTION` is declared as modelled because
+the reference backend models it by construction — `NO ACTION` *is* a refusal,
+and in memory there is no delete to refuse. The single cascade is declared
+`modelled: false`, because declaring it modelled would be the more dangerous
+mistake: it would read as done.
+
+`tests/delete-parity.test.ts` holds the declarations to the world:
+
+| Gate | Fails on |
+|---|---|
+| An action for every key | A key with no action, or an action for a key that does not exist |
+| Unmodelled means unreachable | An unmodelled action with no reason, or whose parent table a delete path now touches |
+| No delete of an unmodelled parent | A port growing `deletePlan`/`removePlan`/`purgePlan` |
+| Removal only where declared | Any `src/**/*.ts` containing `delete from`, `truncate`, `.delete(` or `.clear(` that `DELETE_PATHS` does not name, and any declared file that no longer removes a row |
+| Every removal-shaped operation classified | A new `release`/`prune`/`forget`/`evict`/`purge`-shaped port method until somebody says whether it deletes a row or releases a lease |
+| Against the live schema | A declaration disagreeing with `confdeltype`/`confupdtype`; a delete path on a table that has gained a key in either direction or a trigger |
+
+`clear` and `truncate` appear nowhere in `src/` and are scanned for anyway: a
+gate that only catches the delete somebody has already written is not a gate.
+Four ports expose `reclaimExpired`, which sounds like a delete and is an
+`UPDATE`; each is now recorded as a lease release with the reason the row itself
+must survive — an outbox envelope is the record of what CORE published, an
+inbound event is what replay reads, a delivery's attempt history is the evidence
+B-27 revival works on.
+
+Two outcome probes run on both backends for the one delete a caller can reach:
+releasing a claim lets the next attempt claim the same event and sets `seen`
+back to false, and releasing a claim that does not exist is a no-op rather than
+an error — delivery is at-least-once and `release` is called from failure paths,
+so Postgres deletes zero rows and the reference backend must not throw where
+Postgres shrugs.
+
+Every gate was broken on purpose first: a key declared `ON DELETE SET NULL`
+against the catalog, the cascade declared modelled, a `plan` entry added to the
+delete paths, an `inbox.purgeEverything` added to the memory store, and
+`InMemoryInboxStore.release` made a no-op. Five changes, eleven distinct
+failures, including the "would pass vacuously" guard and the stale-declaration
+half of the source gate. Restored, all green.
+
+### Measured after
+
+| Measurement | Before | After |
+|---|---|---|
+| `npm test` with `DATABASE_URL` | 1015 in 42 files | **1026 in 43 files** |
+| `npm test` without one | 550 passed / 54 skipped | **557 passed / 56 skipped** |
+| Migration lifecycle | 1 passed with a database | unchanged |
+| `tests/delete-parity.test.ts` | — | **11 with a database, 7 passed / 2 skipped without** |
+
+Typecheck clean; governance, contracts (26 event schemas, 17 emitted types),
+migrations (19 forward, all with rollbacks) and the roadmap gate all pass. The
+previous pairs — 385/687, 529/976, 550/1015 — stay in the README parenthesis, as
+before: counts are updated by addition, never by erasure.
+
+### What this cycle did not do
+
+- **It added no delete path.** Audit entries, ledger entries, usage records and
+  reputation signals are append-only by design and the schema has triggers
+  saying so. Adding a delete so that a cascade could be observed would weaken
+  the design to make a test prettier.
+- **It did not model the cascade.** `plan_grant_plan_id_fkey` is now unmodelled
+  *and enforced as unreachable* — a weaker claim honestly checked, rather than a
+  stronger one asserted.
+- **It cannot catch a delete assembled at run time.** The source gate reads
+  `src/**/*.ts`. Every query in this repository is a literal in a `.ts` file,
+  and the gate's reach is exactly that fact.
+- **It says nothing about columns.** 270 columns, 212 `NOT NULL`, 49 with a
+  default, and a reference backend that enforces nullability only where a text
+  rule happens to mention it and types not at all. Recorded as milestone 18,
+  the next actionable item, rather than folded in here.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Recorded in the commit that follows the push, from the run's own log archive
+rather than from a local run.
