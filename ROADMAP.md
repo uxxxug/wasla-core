@@ -81,11 +81,28 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The uniqueness-parity cycle closed: all 24 uniqueness rules
-the schema declares are now measured against both backends by
-`tests/uniqueness-parity.test.ts`, the reference stores refuse every row Postgres
-refuses, and a coverage check reads the live schema so a new uniqueness rule
-cannot ship without a parity case. See the cycle section at the end of this file.
+**Reserved: check-constraint parity between the reference backend and Postgres
+(branch `check-constraint-parity`).** The uniqueness cycle closed 24 rules of one
+kind. Measured now, the same way: the live schema declares **100 `CHECK`
+constraints** and only **31** are restated by name anywhere in `src/`. The
+remaining 69 are the same defect class B-12 names — an in-memory backend that
+accepts a row Postgres refuses — and they cover: ~25 closed vocabularies
+(`status`, `channel`, `kind`, `owner_type`, `rate_class`), six format rules
+(`^[A-Z]{3}$` currency, `^[A-Z]{2}$` country, `core.%` event type), six
+non-empty-string rules, ten numeric bounds (positive amounts, non-negative
+reclaims, latitude/longitude, radius ≤ 500km), and roughly twenty
+field-presence couplings that are the load-bearing ones: every worker's
+`claimed_at`/`claim_token`/`status` triple, `notification`'s five
+status/timestamp pairings, `identity_merged_requires_canonical`,
+`fulfillment_execution_after_cancellation_check`. A vocabulary is a TypeScript
+union today, which is compile-time only: a value arriving from an HTTP body or an
+external event payload reaches the reference store unchecked. Scope: one
+declarative rules table naming every schema `CHECK`, called from every
+reference-store write; probes for each on both backends; and a coverage check
+reading `pg_constraint` so a new `CHECK` cannot ship without parity. Vocabularies
+stay single-source: the runtime array and the domain union are asserted equal at
+typecheck time in both directions, so drift is a compile error rather than a
+silent gap.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
