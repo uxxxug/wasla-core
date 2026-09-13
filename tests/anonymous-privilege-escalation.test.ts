@@ -39,6 +39,7 @@
  * B-39 is answered, this case is the one that must be changed, on purpose.
  */
 import { describe, expect, it } from "vitest";
+import { loadContract } from "./support/openapi.js";
 import { createCoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
@@ -83,18 +84,83 @@ async function outsider(core: Awaited<ReturnType<typeof fixture>>["core"], refer
   return (created.body as { principal_id: string }).principal_id;
 }
 
+/**
+ * Statuses this file has actually seen `POST /v1/memberships` return, filled in by
+ * the cases below and cross-checked against the contract at the end. Written this
+ * way because the first version of this gate was falsified successfully: deleting
+ * `"401"` and then `"403"` from the operation broke nothing in the whole suite,
+ * since the refusals of this route are reached by no other test and the milestone
+ * 27/28 gates only compare headers for statuses they observe. A refusal nothing
+ * documents is the defect this milestone is about, one layer up.
+ */
+const observed = new Set<number>();
+
+async function membershipCall(
+  core: Awaited<ReturnType<typeof fixture>>["core"],
+  headers: Record<string, string>,
+  body: unknown,
+) {
+  const response = await core.router.handle({
+    method: "POST",
+    url: "/v1/memberships",
+    headers,
+    body,
+  });
+  observed.add(response.status);
+  return response;
+}
+
 describe("anonymous privilege escalation", () => {
   it("refuses an unauthenticated membership grant", async () => {
     const { core, organizationId } = await fixture();
     const principalId = await outsider(core, "+966500000001");
-    const granted = await core.router.handle({
-      method: "POST",
-      url: "/v1/memberships",
-      headers: {},
-      body: { principal_id: principalId, organization_id: organizationId, roles: ["org_admin"] },
+    const granted = await membershipCall(core, {}, {
+      principal_id: principalId,
+      organization_id: organizationId,
+      roles: ["org_admin"],
     });
     expect(granted.status).toBe(401);
     expect((granted.body as { code: string }).code).toBe("unauthenticated");
+  });
+
+  /**
+   * The case that makes the permission's *identity* measurable rather than only
+   * its presence. Without it, changing the required permission from
+   * `organization.write` to `organization.read` passed every other case here — an
+   * outsider holds neither, and an org_admin holds neither outside its own tenant,
+   * so nothing in the file could tell the two apart. An `org_member` of the victim
+   * organization holds `organization.read` and not `organization.write`, which is
+   * exactly the gap the weaker permission would open: any colleague could promote
+   * themselves to administrator.
+   */
+  it("refuses a grant from an org_member of the very organization", async () => {
+    const { core, organizationId, adminToken } = await fixture();
+    const member = await outsider(core, "+966500000007");
+    const admitted = await membershipCall(
+      core,
+      { authorization: `Bearer ${adminToken}` },
+      { principal_id: member, organization_id: organizationId, roles: ["org_member"] },
+    );
+    expect(admitted.status).toBe(201);
+    const session = await core.identity.issueSession({
+      principal_id: member,
+      channel_type: "phone",
+      correlation_id: "escalation-test",
+    });
+    // Premise: this principal really can read the organization, so a 403 below is
+    // about `organization.write` and not about having no access at all.
+    const read = await core.router.handle({
+      method: "GET",
+      url: `/v1/organizations/${organizationId}`,
+      headers: { authorization: `Bearer ${session.token}` },
+    });
+    expect(read.status).toBe(200);
+    const selfPromotion = await membershipCall(
+      core,
+      { authorization: `Bearer ${session.token}` },
+      { principal_id: member, organization_id: organizationId, roles: ["org_admin"] },
+    );
+    expect(selfPromotion.status).toBe(403);
   });
 
   it("refuses a membership grant from a principal without organization.write", async () => {
@@ -106,24 +172,22 @@ describe("anonymous privilege escalation", () => {
       channel_type: "phone",
       correlation_id: "escalation-test",
     });
-    const granted = await core.router.handle({
-      method: "POST",
-      url: "/v1/memberships",
-      headers: { authorization: `Bearer ${session.token}` },
-      body: { principal_id: principalId, organization_id: organizationId, roles: ["org_admin"] },
-    });
+    const granted = await membershipCall(
+      core,
+      { authorization: `Bearer ${session.token}` },
+      { principal_id: principalId, organization_id: organizationId, roles: ["org_admin"] },
+    );
     expect(granted.status).toBe(403);
   });
 
   it("still lets an administrator add a member to their own organization", async () => {
     const { core, organizationId, adminToken } = await fixture();
     const principalId = await outsider(core, "+966500000003");
-    const granted = await core.router.handle({
-      method: "POST",
-      url: "/v1/memberships",
-      headers: { authorization: `Bearer ${adminToken}` },
-      body: { principal_id: principalId, organization_id: organizationId, roles: ["org_member"] },
-    });
+    const granted = await membershipCall(
+      core,
+      { authorization: `Bearer ${adminToken}` },
+      { principal_id: principalId, organization_id: organizationId, roles: ["org_member"] },
+    );
     expect(granted.status).toBe(201);
     expect((granted.body as { roles: string[] }).roles).toEqual(["org_member"]);
   });
@@ -158,23 +222,21 @@ describe("anonymous privilege escalation", () => {
       country_code: "SA",
       correlation_id: "escalation-test",
     });
-    const crossTenant = await core.router.handle({
-      method: "POST",
-      url: "/v1/memberships",
-      headers: { authorization: `Bearer ${orgAdminSession.token}` },
-      body: { principal_id: principalId, organization_id: third.organization_id, roles: ["org_admin"] },
-    });
+    const crossTenant = await membershipCall(
+      core,
+      { authorization: `Bearer ${orgAdminSession.token}` },
+      { principal_id: principalId, organization_id: third.organization_id, roles: ["org_admin"] },
+    );
     expect(crossTenant.status).toBe(403);
   });
 
   it("the whole escalation chain now stops at the grant", async () => {
     const { core, organizationId } = await fixture();
     const principalId = await outsider(core, "+966500000006");
-    const granted = await core.router.handle({
-      method: "POST",
-      url: "/v1/memberships",
-      headers: {},
-      body: { principal_id: principalId, organization_id: organizationId, roles: ["org_admin"] },
+    const granted = await membershipCall(core, {}, {
+      principal_id: principalId,
+      organization_id: organizationId,
+      roles: ["org_admin"],
     });
     expect(granted.status).toBe(401);
     // The token the outsider can still obtain for their own principal (B-39) holds
@@ -228,5 +290,23 @@ describe("anonymous privilege escalation", () => {
       headers: { authorization: `Bearer ${impersonated}` },
     });
     expect(read.status).toBe(200);
+  });
+
+  /**
+   * Runs last, and asserts against what the cases above actually saw rather than
+   * against a list written here, so a case that stops reaching a refusal cannot
+   * leave a stale expectation passing.
+   */
+  it("documents every status this route was measured returning", () => {
+    const operation = loadContract().operations.find(
+      (candidate) => candidate.method === "POST" && candidate.path === "/v1/memberships",
+    );
+    expect(operation, "the contract must describe POST /v1/memberships").toBeDefined();
+    const documented = [...operation!.responses.keys()];
+    expect(observed.size).toBeGreaterThanOrEqual(3);
+    expect([...observed].sort()).toEqual([201, 401, 403]);
+    for (const status of observed) {
+      expect(documented, `POST /v1/memberships must document ${status}`).toContain(String(status));
+    }
   });
 });
