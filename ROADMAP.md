@@ -81,9 +81,41 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The check-constraint parity cycle below closed the second
-and larger half of B-12; the next item is chosen from "Remaining, in dependency
-order".
+**Reserved: referential-integrity parity between the reference backend and
+Postgres (branch `foreign-key-parity`).** The uniqueness cycle closed 24 rules of
+one kind and the check-constraint cycle closed 100 of another. Measured before
+reserving, the same way: the live schema declares **30 `FOREIGN KEY`
+constraints** across 20 child tables, and exactly **one** of them —
+`usage_record_period_id_fkey` — is restated anywhere in `src/`. The other 29 are
+Postgres-only, which is B-12 in its third and last large family: the reference
+backend accepts a child row naming a parent that does not exist. That is not a
+cosmetic gap. `fulfillment.organization_id` with no organization is a
+fulfillment in no tenant; `membership.principal_id` with no principal is an
+access grant to nobody; `notification.recipient_id` with no recipient is a
+message addressed to a row that was never created; `event_delivery.event_id`
+with no outbox row is a signed POST of an envelope CORE never recorded.
+
+A second, smaller finding came out of the same measurement and is reserved with
+it, because it is the mechanism the first one needs: three reference tables —
+`session`, `plan_grant`, `usage_record` — still write with a bare `map.set` and
+not through `putRow`, so the check-constraint cycle's claim that `putRow` is the
+only way a reference store writes a row was true of 25 tables and not of 28.
+Their five `CHECK` rules are restated inline in the subscription store instead of
+in `ROW_RULES`, which is a duplicated truth of exactly the kind that cycle
+existed to remove, and three of the 30 foreign keys belong to those tables, so
+they cannot be enforced until the writes go through one place.
+
+Scope: a declarative foreign-key table naming every schema FK; a
+bundle-scoped registry of the reference stores' own key maps so an existence
+check reads live rows rather than a copy that can go stale; enforcement inside
+`putRow`, so it applies to every reference write rather than the ones someone
+remembered; the three bypassing tables routed through `putRow` with their
+inline `CHECK`s moved into `ROW_RULES`; refusals quoting Postgres' own wording,
+`insert or update on table "x" violates foreign key constraint "y"`; a probe per
+FK on both backends; and a coverage gate reading `pg_constraint` at run time so a
+migration adding a foreign key cannot ship without parity. Exemptions, where a
+port gives no caller a way to name the parent, are recorded with a reason each
+rather than counted as covered.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
