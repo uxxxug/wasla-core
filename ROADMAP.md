@@ -5624,5 +5624,12 @@ the new strictness, which is itself a measurement: every request the suite makes
 was already made of declared properties, so these routes were strict in intent and
 loose only in enforcement.
 
-**CI verdict (the judgment, not the local run).** Recorded below once the pull
-request has run; a local green is not a verdict.
+**CI verdict (the judgment, not the local run).** PR #16, run 34775704136 on
+commit `c22989e`. *Verify without a database*: **674 passed / 147 skipped** across
+49 of 51 files, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1236 passed across 51
+files and 1 passed in the cluster file — 1237 in total**, none skipped. Both
+numbers match the local measurement on an embedded PostgreSQL 18.4 in `C` exactly,
+and both exceed the baseline by the 16 tests this cycle added. Every gate in
+`tests/http-body-declaration.test.ts` therefore passed in the environment that
+gates the merge, not only locally.
