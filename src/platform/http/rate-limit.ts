@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Clock } from "../clock.js";
 import { CoreError } from "../errors.js";
+import { putRow } from "../persistence/row-rules.js";
 
 /**
  * Ingress rate limiting (milestone 8).
@@ -173,21 +174,54 @@ export interface RateLimitWindowStore {
  * discovered later: the Postgres store exists because that difference matters,
  * and the memory store must not be wired into a multi-instance deployment.
  */
+/**
+ * One row of the `rate_limit_counter` table, as the table declares it.
+ *
+ * The reference limiter used to hold `{count, window_start}` under a composed
+ * string key, which modelled the primary key and left the table's other four
+ * columns and **all three of its `CHECK` constraints** — `subject_kind_ck`,
+ * `rate_class_ck`, `hits_ck` — unmodelled. Those three were recorded in
+ * `tests/check-parity.test.ts` as unprobeable *because there was no row*; the
+ * row is the fix, and the exemptions go with it (milestone 19).
+ */
+export interface RateLimitCounterRow {
+  subject_kind: SubjectKind;
+  subject_hash: string;
+  rate_class: RateClass;
+  window_start: string;
+  hits: number;
+  updated_at: string;
+}
+
 export class InMemoryRateLimitWindowStore implements RateLimitWindowStore {
-  private readonly windows = new Map<string, { count: number; window_start: number }>();
+  private readonly windows = new Map<string, RateLimitCounterRow>();
+
+  /** See `InMemoryInbox` for why the clock is optional and defaults this way. */
+  constructor(private readonly clock: Clock = { now: () => new Date() }) {}
 
   async hit(key: RateLimitKey, windowStart: Date): Promise<number> {
     const id = `${key.subject_kind}|${key.subject_hash}|${key.rate_class}|${windowStart.getTime()}`;
     const existing = this.windows.get(id);
-    const next = (existing?.count ?? 0) + 1;
-    this.windows.set(id, { count: next, window_start: windowStart.getTime() });
-    return next;
+    const hits = (existing?.hits ?? 0) + 1;
+    putRow("rate_limit_counter", this.windows, id, {
+      subject_kind: key.subject_kind,
+      subject_hash: key.subject_hash,
+      rate_class: key.rate_class,
+      window_start: windowStart.toISOString(),
+      hits,
+      // The database's `updated_at` is not a column default: the adapter writes
+      // it. Both backends now take it from the injected clock, so a test with a
+      // fixed clock does not get wall-clock rows from one backend and fixed
+      // rows from the other.
+      updated_at: this.clock.now().toISOString(),
+    });
+    return hits;
   }
 
   async prune(before: Date): Promise<number> {
     let removed = 0;
     for (const [id, entry] of this.windows) {
-      if (entry.window_start < before.getTime()) {
+      if (new Date(entry.window_start).getTime() < before.getTime()) {
         this.windows.delete(id);
         removed += 1;
       }

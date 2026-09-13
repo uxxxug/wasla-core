@@ -148,10 +148,12 @@ describe("column parity: the declaration", () => {
   });
 
   it("records a default without applying one", () => {
-    // 45 columns the database would fill. The reference backend fills none of
+    // 47 columns the database would fill. The reference backend fills none of
     // them, and this is the count that says so: if it drops, either a migration
-    // dropped a default or somebody started applying them here.
-    expect(defaultedColumns().length).toBe(45);
+    // dropped a default or somebody started applying them here. (45 when the
+    // gate covered the 28 ruled tables; `inbox.received_at` and
+    // `rate_limit_counter.hits` joined it in milestone 19.)
+    expect(defaultedColumns().length).toBe(47);
     expect(defaultedColumns()).toContain("outbox.created_at");
   });
 });
@@ -270,7 +272,9 @@ describe("column parity: where the reference backend is stricter, on purpose", (
 describe.skipIf(!url)("column parity against the live schema", () => {
   it("declares every column of every ruled table, with the schema's own type", async () => {
     const columns = await catalogColumns();
-    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(254);
+    // 263 = the 254 of the 28 originally ruled tables plus the 9 of `inbox` and
+    // `rate_limit_counter`, brought under the gate in milestone 19.
+    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(263);
     const problems: string[] = [];
     for (const column of columns) {
       const shapes = COLUMN_SHAPES[column.table] ?? [];
@@ -334,7 +338,8 @@ describe.skipIf(!url)("column parity against the live schema", () => {
     // The number the cycle opened with, kept as a measurement rather than a
     // memory: if a migration adds a nullable column this fails and the
     // declaration has to be extended before the count is updated.
-    expect(live).toBe(197);
+    // 206 = 197 + the 9 of the two runtime tables (every one of them NOT NULL).
+    expect(live).toBe(206);
   });
 
   it("raises the same message the database raises for the same bad value", async () => {

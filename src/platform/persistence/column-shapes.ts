@@ -203,6 +203,11 @@ export const COLUMN_SHAPES: Readonly<Record<string, readonly ColumnShape[]>> = {
     { column: "reclaims", type: "integer", notNull: true, databaseDefault: "0" },
     { column: "claim_token", type: "text", notNull: false },
   ],
+  inbox: [
+    { column: "consumer", type: "text", notNull: true },
+    { column: "event_id", type: "uuid", notNull: true },
+    { column: "received_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
+  ],
   ledger_entry: [
     { column: "entry_id", type: "uuid", notNull: true },
     { column: "transaction_id", type: "uuid", notNull: true },
@@ -332,6 +337,14 @@ export const COLUMN_SHAPES: Readonly<Record<string, readonly ColumnShape[]>> = {
     { column: "code", type: "text", notNull: true },
     { column: "name", type: "text", notNull: true },
     { column: "status", type: "text", notNull: true },
+  ],
+  rate_limit_counter: [
+    { column: "subject_kind", type: "text", notNull: true },
+    { column: "subject_hash", type: "text", notNull: true },
+    { column: "rate_class", type: "text", notNull: true },
+    { column: "window_start", type: "timestamptz", notNull: true },
+    { column: "hits", type: "bigint", notNull: true, databaseDefault: "0" },
+    { column: "updated_at", type: "timestamptz", notNull: true },
   ],
   reputation_signal: [
     { column: "reputation_signal_id", type: "uuid", notNull: true },
