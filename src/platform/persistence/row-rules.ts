@@ -20,6 +20,8 @@
  * at typecheck time, so drift is a compile error rather than a silent gap.
  */
 
+import { assertReferences, registryFor } from "./reference-keys.js";
+
 /** A row as its table sees it. Dotted paths reach into a nested record. */
 export type Row = Readonly<Record<string, unknown>>;
 
@@ -89,6 +91,25 @@ function notEmpty(field: string, constraint: string): CheckRule {
     holds: (row) => {
       const value = at(row, field);
       return isNull(value) || String(value) !== "";
+    },
+  };
+}
+
+/**
+ * `length(trim(column)) > 0` — stricter than `<> ''`, and a different rule.
+ *
+ * A separate helper rather than a flag on `notEmpty` because the schema writes
+ * both forms and means both: `principal.service_name <> ''` accepts a space,
+ * `length(trim(plan_grant.feature_key)) > 0` does not. One helper covering both
+ * would have to pick, and picking would make one of the two restatements wrong.
+ */
+function present(field: string, constraint: string): CheckRule {
+  return {
+    constraint,
+    fields: [field],
+    holds: (row) => {
+      const value = at(row, field);
+      return isNull(value) || String(value).trim().length > 0;
     },
   };
 }
@@ -380,6 +401,27 @@ export const ROW_RULES = {
   subscription_period: [
     vocabulary("status", VOCABULARIES.period_status, "subscription_period_status_check"),
   ],
+  plan_grant: [
+    present("feature_key", "plan_grant_feature_key_present"),
+    numeric("limit_value", "plan_grant_limit_non_negative", (v) => v >= 0, true),
+  ],
+  usage_record: [
+    present("feature_key", "usage_record_feature_key_present"),
+    // Zero usage is not usage; a row saying nothing happened still bills as a
+    // row that did.
+    numeric("quantity", "usage_record_quantity_positive", (v) => v > 0),
+    present("usage_reference", "usage_record_reference_present"),
+  ],
+  /**
+   * No `CHECK` in the schema, and an entry here anyway.
+   *
+   * `ROW_RULES` is the set of tables a reference store writes through `putRow`,
+   * and `putRow` is now also where foreign keys are enforced. `session` has one
+   * — `session_principal_id_fkey` — so it has to be writable through this path;
+   * an empty rule list is the honest way to say the table has no `CHECK` rather
+   * than that nobody looked.
+   */
+  session: [],
   reputation_signal: [
     vocabulary("signal_kind", VOCABULARIES.reputation_kind, "reputation_signal_kind_check"),
     vocabulary(
@@ -436,5 +478,10 @@ export function assertRow(table: RuledTable, row: Row): void {
  */
 export function putRow<T>(table: RuledTable, map: Map<string, T>, key: string, row: T): void {
   assertRow(table, row as unknown as Row);
+  // Foreign keys read another table, so they need the bundle the map belongs to
+  // rather than the row alone. Looked up from the map instead of passed in, so
+  // that adding referential enforcement changed no call site: every existing
+  // write got it, including the ones written before this cycle existed.
+  assertReferences(table, row as unknown as Row, registryFor(map));
   map.set(key, row);
 }

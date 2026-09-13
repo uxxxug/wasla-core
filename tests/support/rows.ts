@@ -64,6 +64,19 @@ export function organization(id: string, legacy: string | null = null) {
   };
 }
 
+/**
+ * The tenant a child row names.
+ *
+ * Five tables reference `organization`, and until the foreign-key parity cycle
+ * the reference backend accepted all five with no tenant row present — so the
+ * fixtures that used a fixed tenant id never created one. Postgres refused
+ * every one of those writes, which is why this helper exists rather than the
+ * rule being relaxed.
+ */
+export async function seedTenant(store: Persistence, organizationId: string): Promise<void> {
+  await store.organization.insert(organization(organizationId), NO_SCOPE);
+}
+
 export async function seedCountry(store: Persistence): Promise<void> {
   await store.geography.upsertCountry(
     { country_code: "SA", name: "Saudi Arabia", default_currency: "SAR", status: "active" },

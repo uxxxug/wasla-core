@@ -1,6 +1,6 @@
 import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
-import { createCoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
 import type { CoreApp } from "../src/app.js";
@@ -42,7 +42,7 @@ async function dispatched(core: CoreApp) {
 
 describe("fulfillment dispatch is an observable lifecycle transition", () => {
   it("publishes core.fulfillment.dispatched exactly once when MOVE accepts", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d1"));
 
     const accepted = acceptance(core, created.fulfillment_id, "job-1");
@@ -67,7 +67,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
   });
 
   it("keeps the MOVE job reference opaque in the dispatch event payload", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d2"));
     await core.fulfillment.consumeJobAccepted(acceptance(core, created.fulfillment_id, "job-2"));
 
@@ -78,7 +78,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
   });
 
   it("refuses a second, different job for an already dispatched fulfillment", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d3"));
     await core.fulfillment.consumeJobAccepted(acceptance(core, created.fulfillment_id, "job-3"));
 
@@ -89,7 +89,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
   });
 
   it("tolerates an acceptance that races a cancellation without dispatching", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d4"));
     await core.fulfillment.cancel({
       fulfillment_id: created.fulfillment_id,
@@ -108,7 +108,7 @@ describe("fulfillment dispatch is an observable lifecycle transition", () => {
   });
 
   it("still refuses an acceptance for a fulfillment that already completed", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const created = await core.fulfillment.consumeMarketOrder(order(core, "order-d5"));
     await core.fulfillment.consumeJobAccepted(acceptance(core, created.fulfillment_id, "job-6"));
     await core.fulfillment.consumeMoveCompletion(

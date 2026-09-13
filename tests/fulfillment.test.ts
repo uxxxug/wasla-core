@@ -1,12 +1,12 @@
 import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
-import { createCoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
 
 describe("fulfillment coordination", () => {
   it("turns a MARKET order event into one opaque fulfillment request", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const event = makeEvent({
       event_type: "market.order.created",
       version: 1,
@@ -27,7 +27,7 @@ describe("fulfillment coordination", () => {
   });
 
   it("closes fulfillment from a MOVE completion and informs MARKET", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1")]);
     const order = makeEvent({
       event_type: "market.order.created",
       version: 1,

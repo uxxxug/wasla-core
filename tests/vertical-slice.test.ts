@@ -1,6 +1,7 @@
 import { testId } from "./support/ids.js";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createCoreApp, type CoreApp } from "../src/app.js";
+import type { CoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { MarketSimulator, MoveSimulator } from "./support/product-simulators.js";
 
@@ -19,9 +20,12 @@ describe("WASLA vertical slice", () => {
 
   const ORG = testId("org-1");
 
-  beforeEach(() => {
+  beforeEach(async () => {
     clock = new FixedClock();
-    core = createCoreApp({ clock });
+    // The tenant exists: `fulfillment_organization_id_fkey` refuses a
+    // fulfillment in no tenant, and the slice is only a proof of the real path
+    // if the rows it writes are rows production would have accepted.
+    core = await coreWithTenants(clock, [ORG]);
     market = new MarketSimulator(core.bus, clock);
     move = new MoveSimulator(core.bus, clock);
     market.attach(core.bus);

@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   type TransactionBoundary,
@@ -19,6 +20,15 @@ export interface OrganizationRepository {
 
 export class InMemoryOrganizationRepository implements OrganizationRepository {
   private rows = new Map<string, Organization>();
+
+  /**
+   * `organization` is referenced by five tables — memberships, fulfillments,
+   * notifications, notification recipients and reputation signals — so this
+   * registration is what lets any of them be checked in memory.
+   */
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("organization", this.rows);
+  }
   /**
    * `organization_legacy_idx`: one row per (source_system, legacy_id) where a
    * legacy id exists. Two rows for one imported organization would split its

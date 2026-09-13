@@ -1,16 +1,23 @@
 import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
-import { createCoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 
-function app() {
+/**
+ * The two tenants these tests grant memberships in exist, because
+ * `membership_organization_id_fkey` says a membership in no tenant is not a
+ * membership. They did not before the foreign-key parity cycle: the reference
+ * backend accepted the row, so the suite asserted tenant isolation using a
+ * tenant Postgres would not have let it create.
+ */
+async function app() {
   const clock = new FixedClock();
-  return { ...createCoreApp({ clock }), clock };
+  return coreWithTenants(clock, [testId("org-1"), testId("org-2")]);
 }
 
 describe("identity registration", () => {
   it("creates an identity, principal and link, and emits exactly one event", async () => {
-    const core = app();
+    const core = await app();
     const result = await core.identity.registerIdentity({
       channel_type: "telegram",
       external_id: "tg-1001",
@@ -30,7 +37,7 @@ describe("identity registration", () => {
   });
 
   it("is idempotent for a repeated channel account and emits no second event", async () => {
-    const core = app();
+    const core = await app();
     const first = await core.identity.registerIdentity({
       channel_type: "telegram",
       external_id: "tg-1001",
@@ -49,7 +56,7 @@ describe("identity registration", () => {
   });
 
   it("never merges two identities automatically", async () => {
-    const core = app();
+    const core = await app();
     const a = await core.identity.registerIdentity({
       channel_type: "telegram",
       external_id: "tg-1",
@@ -68,7 +75,7 @@ describe("identity registration", () => {
   });
 
   it("rejects an empty external_id", async () => {
-    const core = app();
+    const core = await app();
     await expect(
       core.identity.registerIdentity({ channel_type: "web", external_id: "  ", correlation_id: "c" }),
     ).rejects.toThrow(/external_id/);
@@ -77,7 +84,7 @@ describe("identity registration", () => {
 
 describe("sessions and authentication", () => {
   it("issues a token that authenticates, and never stores it in plaintext", async () => {
-    const core = app();
+    const core = await app();
     const registered = await core.identity.registerIdentity({
       channel_type: "web",
       external_id: "u-1",
@@ -96,7 +103,7 @@ describe("sessions and authentication", () => {
   });
 
   it("rejects unknown, revoked and expired tokens", async () => {
-    const core = app();
+    const core = await app();
     const registered = await core.identity.registerIdentity({
       channel_type: "web",
       external_id: "u-2",
@@ -120,7 +127,7 @@ describe("sessions and authentication", () => {
 
 describe("authorization and tenant isolation", () => {
   it("grants only permissions implied by roles", async () => {
-    const core = app();
+    const core = await app();
     const registered = await core.identity.registerIdentity({
       channel_type: "web",
       external_id: "member",
@@ -144,7 +151,7 @@ describe("authorization and tenant isolation", () => {
   });
 
   it("blocks access to an organization the principal does not belong to", async () => {
-    const core = app();
+    const core = await app();
     const registered = await core.identity.registerIdentity({
       channel_type: "web",
       external_id: "admin-of-org-1",

@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   type TransactionScope,
@@ -26,6 +27,18 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   private regions = new Map<string, Region>();
   private cities = new Map<string, City>();
   private areas = new Map<string, ServiceArea>();
+
+  /**
+   * Geography is where the reference backend used to diverge most cheaply: a
+   * city naming a country nobody inserted still answered `getCity`, and the
+   * five keys registered here are the ones that make that impossible.
+   */
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("country", this.countries);
+    keys?.attach("region", this.regions);
+    keys?.attach("city", this.cities);
+    keys?.attach("service_area", this.areas);
+  }
 
   async upsertCountry(country: Country, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.countries, country.country_code);

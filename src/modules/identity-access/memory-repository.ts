@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   type TransactionScope,
@@ -17,6 +18,19 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   private principals = new Map<string, Principal>();
   private sessions = new Map<string, Session>();
   private memberships = new Map<string, Membership>();
+
+  /**
+   * `identity` and `principal` are parents of five keys between them, and the
+   * `session` registration is what made `session_principal_id_fkey` checkable
+   * at all: sessions used to be written with a bare `map.set`.
+   */
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("identity", this.identities);
+    keys?.attach("identity_link", this.links);
+    keys?.attach("principal", this.principals);
+    keys?.attach("session", this.sessions);
+    keys?.attach("membership", this.memberships);
+  }
 
   private linkKey(channelType: ChannelType, externalId: string) {
     return `${channelType}::${externalId}`;
@@ -117,7 +131,11 @@ export class InMemoryIdentityRepository implements IdentityRepository {
       }
     }
     journalMapWrite(_scope, this.sessions, session.session_id);
-    this.sessions.set(session.session_id, session);
+    // `session_principal_id_fkey`: a session is a set of rights, and one naming
+    // a principal that does not exist is a bearer token resolving to rights
+    // nobody was granted. Postgres has always refused it; until this cycle the
+    // reference store wrote sessions with a bare `map.set`, so it did not.
+    putRow("session", this.sessions, session.session_id, session);
   }
   async getSessionByTokenHash(tokenHash: string): Promise<Session | undefined> {
     return [...this.sessions.values()].find((s) => s.token_hash === tokenHash);
@@ -127,7 +145,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
   async updateSession(session: Session, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.sessions, session.session_id);
-    this.sessions.set(session.session_id, session);
+    putRow("session", this.sessions, session.session_id, session);
   }
 
   async insertMembership(membership: Membership, _scope?: TransactionScope): Promise<void> {
