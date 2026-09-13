@@ -4670,5 +4670,17 @@ the suites that assert it still pass.
 
 ### CI verdict for this cycle — read from the run, not assumed
 
-Recorded in the commit that follows the push, from `gh run view` and the run's
-own log archive rather than from a local run.
+Head `a61f4ba` on `trigger-parity`, run `34739885787` (pull request) and
+`34739883764` (push), [PR #7](https://github.com/uxxxug/wasla-core/pull/7):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 41s | **550 passed, 54 skipped** in 40 of 42 files, then the migration-lifecycle file **1 skipped** — the dependency-free pass still stands on its own, and typecheck, governance, contracts, migrations, roadmap freshness and the secret scan all ran |
+| `Verify against PostgreSQL` | **success**, 1m58s | **1015 passed in 42 files** with `DATABASE_URL` against `postgres:16`, then the migration-lifecycle pass **1 passed** — the newest migration rolled back and re-applied against a schema built from the migrations |
+
+The CI totals match the local ones exactly (1015 + 1, and 550 / 54), read from
+the run's own log archive rather than from a local run. That is what makes this
+cycle's claim worth anything: the coverage gate and the timing gate ran there
+too, against the `pg_trigger` of a database CI created from the 19 migrations,
+so the inventory in `docs/trigger-parity.md` is checked against the schema CI
+builds and not only the one on this machine.
