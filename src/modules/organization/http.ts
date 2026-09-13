@@ -25,7 +25,7 @@ export function registerOrganizationRoutes(
     return { status: 201, body: organization };
   });
 
-  router.get("/v1/organizations/:organization_id", async (ctx) => {
+  router.get("/v1/organizations/:organization_id", [], async (ctx) => {
     const organizationId = ctx.params["organization_id"]!;
     await requirePrincipal(ctx, identity, "organization.read", organizationId);
     return { status: 200, body: organizations.require(organizationId) };

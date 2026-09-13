@@ -1,5 +1,4 @@
 import type { Router } from "../../platform/http/router.js";
-import { requiredParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { Fulfillment } from "./domain.js";
@@ -27,8 +26,11 @@ export function registerFulfillmentRoutes(
   // Registered before the parameterised route so it is never read as an id.
   // Reconciliation read: execution state versus money state. An empty list is
   // the invariant CORE is expected to hold.
-  router.get("/v1/fulfillments/reconciliation/inconsistent", async (ctx) => {
-    const organizationId = requiredParam(ctx.query, "organization_id");
+  router.get(
+    "/v1/fulfillments/reconciliation/inconsistent",
+    [{ name: "organization_id", kind: "text", required: true }],
+    async (ctx) => {
+    const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listFinanciallyInconsistent(organizationId);
     return {
@@ -45,8 +47,11 @@ export function registerFulfillmentRoutes(
   // CORE defect — it is the queue waiting on the decision B-20 records as
   // unmade, and it is kept apart from the defect queue so an operator can tell
   // a business question from an incident.
-  router.get("/v1/fulfillments/reconciliation/pending-financial-decision", async (ctx) => {
-    const organizationId = requiredParam(ctx.query, "organization_id");
+  router.get(
+    "/v1/fulfillments/reconciliation/pending-financial-decision",
+    [{ name: "organization_id", kind: "text", required: true }],
+    async (ctx) => {
+    const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listPendingFinancialDecision(organizationId);
     return {
@@ -62,8 +67,11 @@ export function registerFulfillmentRoutes(
   // contradiction lives across two modules, so no read of the fulfillment table
   // alone can find it. Reporting only — what happens to work whose funding is
   // gone is a decision CORE has not been given.
-  router.get("/v1/fulfillments/reconciliation/stale-holds", async (ctx) => {
-    const organizationId = requiredParam(ctx.query, "organization_id");
+  router.get(
+    "/v1/fulfillments/reconciliation/stale-holds",
+    [{ name: "organization_id", kind: "text", required: true }],
+    async (ctx) => {
+    const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listStaleHolds(organizationId);
     return {
@@ -78,7 +86,7 @@ export function registerFulfillmentRoutes(
     };
   });
 
-  router.get("/v1/fulfillments/:fulfillment_id", async (ctx) => {
+  router.get("/v1/fulfillments/:fulfillment_id", [], async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);
     return { status: 200, body: withDisposition(fulfillment, record) };

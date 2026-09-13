@@ -1,6 +1,6 @@
 import { invalid } from "../../platform/errors.js";
+import type { Selection } from "../../platform/http/query.js";
 import type { Router } from "../../platform/http/router.js";
-import { limitParam, requiredParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import { isReputationSubjectType, type ReputationSubject } from "./domain.js";
@@ -17,9 +17,9 @@ import { MAX_SIGNAL_PAGE, type ReputationService } from "./service.js";
  */
 function subjectOf(ctx: {
   params: Record<string, string | undefined>;
-  query: URLSearchParams;
+  selection: Selection;
 }): ReputationSubject {
-  const organizationId = requiredParam(ctx.query, "organization_id");
+  const organizationId = ctx.selection.requiredText("organization_id");
   const subjectType = ctx.params["subject_type"] ?? "";
   if (!isReputationSubjectType(subjectType)) {
     throw invalid("subject_type must be identity or organization");
@@ -50,7 +50,10 @@ export function registerReputationRoutes(
 ): void {
   // The derived standing. Every number in the response is computed from the
   // signals at the moment of the read; none of it is stored.
-  router.get("/v1/reputation/:subject_type/:subject_id", async (ctx) => {
+  router.get(
+    "/v1/reputation/:subject_type/:subject_id",
+    [{ name: "organization_id", kind: "text", required: true }],
+    async (ctx) => {
     const subject = subjectOf(ctx);
     await requirePrincipal(ctx, identity, "reputation.read", subject.organization_id);
     return { status: 200, body: await reputation.standing(subject) };
@@ -58,10 +61,16 @@ export function registerReputationRoutes(
 
   // The signals behind the standing, so a support agent can see what a number is
   // made of instead of having to believe it.
-  router.get("/v1/reputation/:subject_type/:subject_id/signals", async (ctx) => {
+  router.get(
+    "/v1/reputation/:subject_type/:subject_id/signals",
+    [
+      { name: "organization_id", kind: "text", required: true },
+      { name: "limit", kind: "limit", default: 50, min: 1, max: MAX_SIGNAL_PAGE },
+    ],
+    async (ctx) => {
     const subject = subjectOf(ctx);
     await requirePrincipal(ctx, identity, "reputation.read", subject.organization_id);
-    const limit = limitParam(ctx.query, "limit", { default: 50, min: 1, max: MAX_SIGNAL_PAGE });
+    const limit = ctx.selection.number("limit");
     const items = await reputation.listSignals(subject, limit);
     return { status: 200, body: { count: items.length, items } };
   });

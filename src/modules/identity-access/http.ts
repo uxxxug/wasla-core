@@ -91,7 +91,7 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
   });
 
   // Verify the caller's own session. Returns principal, org membership and permissions.
-  router.get("/v1/sessions/current", async (ctx) => {
+  router.get("/v1/sessions/current", [], async (ctx) => {
     const actor = await identity.authenticate(bearer(ctx));
     return { status: 200, body: actor };
   });

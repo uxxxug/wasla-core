@@ -1,6 +1,5 @@
 import { invalid } from "../../platform/errors.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
-import { decimalParam, optionalParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { GeographyService } from "./service.js";
@@ -26,28 +25,35 @@ export function registerGeographyRoutes(
   identity: IdentityService,
 ): void {
   // Reference reads are open to any authenticated principal.
-  router.get("/v1/geography/countries", async (ctx) => {
+  router.get("/v1/geography/countries", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { countries: await geography.countries() } };
   });
 
-  router.get("/v1/geography/countries/:country_code/regions", async (ctx) => {
+  router.get("/v1/geography/countries/:country_code/regions", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { regions: await geography.regions(ctx.params["country_code"] ?? "") } };
   });
 
-  router.get("/v1/geography/regions/:region_id/cities", async (ctx) => {
+  router.get("/v1/geography/regions/:region_id/cities", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { cities: await geography.cities(ctx.params["region_id"] ?? "") } };
   });
 
-  router.get("/v1/geography/service-areas/resolve", async (ctx) => {
+  router.get(
+    "/v1/geography/service-areas/resolve",
+    [
+      { name: "latitude", kind: "decimal", required: true },
+      { name: "longitude", kind: "decimal", required: true },
+      { name: "country_code", kind: "text" },
+    ],
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const countryCode = optionalParam(ctx.query, "country_code");
+    const countryCode = ctx.selection.text("country_code");
     const matches = await geography.resolve(
       {
-        latitude: decimalParam(ctx.query, "latitude"),
-        longitude: decimalParam(ctx.query, "longitude"),
+        latitude: ctx.selection.number("latitude"),
+        longitude: ctx.selection.number("longitude"),
       },
       countryCode === undefined ? {} : { country_code: countryCode },
     );

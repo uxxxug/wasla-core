@@ -31,7 +31,7 @@ export function registerDeliveryRoutes(
     return { status: 201, body: created };
   });
 
-  router.get("/v1/event-subscriptions", async (ctx) => {
+  router.get("/v1/event-subscriptions", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const items = await registry.list();
     return { status: 200, body: { count: items.length, items } };
@@ -60,7 +60,7 @@ export function registerDeliveryRoutes(
 
   // What CORE has promised to deliver and has not. An empty list is the
   // invariant an operator should expect to see.
-  router.get("/v1/event-deliveries/undelivered", async (ctx) => {
+  router.get("/v1/event-deliveries/undelivered", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const items = await registry.undelivered();
     return { status: 200, body: { count: items.length, items } };
