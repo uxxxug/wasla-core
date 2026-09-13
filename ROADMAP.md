@@ -81,18 +81,48 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The delete-path parity cycle that held this slot is
-finished and recorded below, which closes the delete half of the four parity
-families B-12 named, and with it B-12 itself. It does not close parity as a
-subject: measuring the schema for this cycle turned up a family B-12 never
-named, column shape, recorded below as milestone 18. Re-measured before writing this: of the items
-above, milestones 2…9 wait on environments and producers outside CORE,
-B-14…B-20 and B-30…B-34 are policy decisions that are not CORE's to make,
-B-35/ADR 0010 still has no ADR text in the repository, and B-36 is a plan
-limitation. The next actionable item is therefore **milestone 18, column-level
-parity**: 270 columns, **212 `NOT NULL`** and **49 with a default**, against a
-reference backend that enforces nullability only where a text rule happens to
-mention it. Nothing is holding it.
+**Reserved: column-level parity — `NOT NULL`, defaults and types (branch
+`column-parity`, milestone 18).** The five parity cycles closed uniqueness,
+`CHECK`s, foreign keys, triggers and the delete path. All five are rules *about*
+values. None of them is about the shape of the column the value goes into, and
+that is the largest remaining way a row Postgres refuses is accepted in memory.
+
+Measured before reserving, from `pg_attribute` and from the rows the reference
+stores actually write — the second measured by instrumenting `putRow` and
+running the whole suite, not by reading the stores and guessing. Across the 28
+ruled tables: **254 columns, 197 `NOT NULL`, 45 with a database default**, in 11
+distinct types including `character(2)` for country codes, `character(3)` for
+currencies, `integer` and `bigint` for amounts and counters, `text[]` for roles
+and `jsonb` for payloads. The reference backend enforces **none** of this: it
+enforces nullability only where a `ROW_RULES` text rule happens to mention it,
+no type at all, and no length — so a currency of `"SARX"` in a `character(3)`
+column, a `1` where Postgres wants `text`, a `2.5` in an `integer`, an
+`amount_minor` past `int8`, and a `null` in any of the 197 `NOT NULL` columns are
+all stored happily in memory and refused by the database.
+
+The same measurement found two divergences that already exist, neither of them
+hypothetical: the memory outbox writes no `created_at` at all, where the column
+is `NOT NULL DEFAULT now()`, so a reference row is missing a value every
+Postgres row has; and the memory inbound-event row omits `processed_at` rather
+than storing null, so the two backends disagree about the shape of a row a
+handler reads. Both are default-reliance, which is the third thing this cycle
+has to settle: the reference backend applies no default, so a column the
+database would have completed has to be written by the store instead — anything
+else is a second source of truth for what a row contains.
+
+Scope: the column shape of all 28 ruled tables declared once, with the path each
+column takes in the reference row (`outbox` and `inbound_event` nest theirs
+under `event`), applied in `putRow` **before** the checks, which is the order
+Postgres uses — a `NOT NULL` violation is refused before a `CHECK` on the same
+column is ever evaluated — and applied in the two ruled tables that do not go
+through `putRow` (`audit_entry` writes through its own store, `ledger_entry`
+through the transaction that carries the entries). Refusals quote Postgres'
+wording. The declaration is gated against `pg_attribute` at run time for
+coverage, type, nullability and the presence of a default, and the two
+divergences above are fixed at the root rather than declared as exemptions.
+Adding a type system to the domain is **not** in scope: this is about what the
+column will hold, checked at the one place every reference write already passes
+through.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
