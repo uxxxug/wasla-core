@@ -1,6 +1,7 @@
 import { journalAppend, type TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
 import { newId } from "../ids.js";
+import { assertColumns } from "../persistence/column-shapes.js";
 import { assertRow, type Row } from "../persistence/row-rules.js";
 
 /**
@@ -50,6 +51,12 @@ export class InMemoryAuditLog implements AuditLog {
       audit_id: newId(),
       occurred_at: this.clock.now().toISOString(),
     };
+    // Columns before rules, as `putRow` does, because Postgres decides whether
+    // the value fits the column before it evaluates any CHECK. This log does
+    // not go through `putRow` (it is an append-only array, not a keyed map), so
+    // the column gate has to be called here or `audit_entry` is one of two
+    // ruled tables with no column enforcement at all.
+    assertColumns("audit_entry", full as unknown as Row);
     assertRow("audit_entry", full as unknown as Row);
     journalAppend(scope, this.log);
     this.log.push(full);

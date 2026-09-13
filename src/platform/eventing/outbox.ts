@@ -21,6 +21,22 @@ export type OutboxStatus = "pending" | "published" | "dead";
 
 export interface OutboxRecord {
   event: EventEnvelope;
+  /**
+   * When CORE recorded the envelope, by CORE's clock.
+   *
+   * The column has been `not null default now()` since the first migration and
+   * was surfaced by neither backend: the Postgres adapter inserted it and never
+   * selected it, and the reference store never wrote it at all — so a reference
+   * row was missing a value every database row had, and the two backends
+   * returned records of different shapes. Found by the column-parity gate
+   * (milestone 18), which refuses a row that leaves a defaulted column out
+   * rather than applying the default itself.
+   *
+   * Distinct from `event.occurred_at`, which is the producer's claim about when
+   * the thing happened; this is when CORE took custody of it, and it is what
+   * `claimDue` and every listing order by.
+   */
+  created_at: string;
   status: OutboxStatus;
   attempts: number;
   last_error: string | null;
@@ -164,13 +180,17 @@ export class InMemoryOutbox implements OutboxStore {
   async append(event: EventEnvelope, scope?: TransactionScope): Promise<void> {
     if (this.records.has(event.event_id)) return;
     journalMapWrite(scope, this.records, event.event_id);
+    const now = this.clock.now().toISOString();
     putRow("outbox", this.records, event.event_id, {
       event,
+      // Written rather than defaulted: the reference backend applies no
+      // database default, so the store is the one place the value comes from.
+      created_at: now,
       status: "pending",
       attempts: 0,
       reclaims: 0,
       last_error: null,
-      next_attempt_at: this.clock.now().toISOString(),
+      next_attempt_at: now,
       claimed_at: null,
       claim_token: null,
     });

@@ -28,6 +28,7 @@ interface InboundRow {
   last_error: string | null;
   next_attempt_at: Date;
   received_at: Date;
+  processed_at: Date | null;
   claimed_at: Date | null;
   reclaims: number;
   claim_token: string | null;
@@ -53,6 +54,7 @@ function toRecord(row: InboundRow): InboundRecord {
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
     received_at: isoRequired(row.received_at),
+    processed_at: iso(row.processed_at),
     claimed_at: iso(row.claimed_at),
     reclaims: row.reclaims,
     claim_token: row.claim_token,
@@ -69,7 +71,7 @@ const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlati
  * Everything a read returns, including the claim (B-24), its budget (B-25) and the
  * token that fences it (B-26).
  */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims, claim_token`;
+const SELECT_COLUMNS = `${COLUMNS}, processed_at, claimed_at, reclaims, claim_token`;
 
 /**
  * Durable ingress store on Postgres.

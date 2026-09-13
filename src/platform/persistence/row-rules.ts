@@ -20,6 +20,7 @@
  * at typecheck time, so drift is a compile error rather than a silent gap.
  */
 
+import { assertColumns } from "./column-shapes.js";
 import { assertReferences, registryFor } from "./reference-keys.js";
 import { assertTransition } from "./transition-rules.js";
 
@@ -478,6 +479,11 @@ export function assertRow(table: RuledTable, row: Row): void {
  * because the only way it stores a row is this function.
  */
 export function putRow<T>(table: RuledTable, map: Map<string, T>, key: string, row: T): void {
+  // The column before the value in it: Postgres raises a not-null or a type
+  // error before it evaluates a `CHECK` on the same column, so a refusal
+  // ordered the other way would quote a constraint name for a row the database
+  // would have rejected before reaching it.
+  assertColumns(table, row as unknown as Record<string, unknown>);
   assertRow(table, row as unknown as Row);
   // Foreign keys read another table, so they need the bundle the map belongs to
   // rather than the row alone. Looked up from the map instead of passed in, so
