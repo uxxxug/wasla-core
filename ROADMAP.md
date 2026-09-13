@@ -5774,5 +5774,12 @@ limit does, and CORE does not restate it. It governs nothing about response
 headers, and it does not address `content-type`, which CORE still ignores when
 parsing a JSON body. Full record in `docs/http-header-declaration.md`.
 
-**CI verdict (the judgment, not the local run).** Recorded here once the pull
-request has run; a local green is not a verdict.
+**CI verdict (the judgment, not the local run).** PR #17, run 34777041478 on
+commit `5fb959c`. *Verify without a database*: **689 passed / 147 skipped** across
+50 of 52 files, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1251 passed across 52
+files and 1 passed in the cluster file — 1252 in total**, none skipped. Both
+numbers match the local measurement on an embedded PostgreSQL 18.4 in `C`
+collation exactly, and both exceed the previous cycle's by the 15 tests this one
+added. Every assertion in `tests/http-header-declaration.test.ts` therefore passed
+in the environment that gates the merge, not only locally.
