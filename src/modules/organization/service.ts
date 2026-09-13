@@ -18,7 +18,25 @@ export interface OrganizationRepository {
 
 export class InMemoryOrganizationRepository implements OrganizationRepository {
   private rows = new Map<string, Organization>();
+  /**
+   * `organization_legacy_idx`: one row per (source_system, legacy_id) where a
+   * legacy id exists. Two rows for one imported organization would split its
+   * memberships and money across two ids that the source system considers one.
+   */
   async insert(organization: Organization, scope?: TransactionScope): Promise<void> {
+    if (organization.legacy_id !== null) {
+      for (const existing of this.rows.values()) {
+        if (existing.organization_id === organization.organization_id) continue;
+        if (
+          existing.legacy_id === organization.legacy_id &&
+          existing.source_system === organization.source_system
+        ) {
+          throw new Error(
+            'duplicate key value violates unique constraint "organization_legacy_idx"',
+          );
+        }
+      }
+    }
     journalMapWrite(scope, this.rows, organization.organization_id);
     this.rows.set(organization.organization_id, organization);
   }

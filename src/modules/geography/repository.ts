@@ -36,7 +36,19 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   async listCountries(): Promise<readonly Country[]> {
     return [...this.countries.values()];
   }
+  /**
+   * `region_country_code_code_key`: a region code is unique inside its country,
+   * so a service area resolved by code cannot mean two places.
+   */
   async insertRegion(region: Region, _scope?: TransactionScope): Promise<void> {
+    for (const existing of this.regions.values()) {
+      if (existing.region_id === region.region_id) continue;
+      if (existing.country_code === region.country_code && existing.code === region.code) {
+        throw new Error(
+          'duplicate key value violates unique constraint "region_country_code_code_key"',
+        );
+      }
+    }
     journalMapWrite(_scope, this.regions, region.region_id);
     this.regions.set(region.region_id, region);
   }

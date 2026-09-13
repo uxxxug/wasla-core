@@ -131,12 +131,17 @@ export interface FulfillmentRepository {
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   private rows = new Map<string, Fulfillment>();
   async insert(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
-    // `market_order_reference` is UNIQUE in the schema since migration 0002.
-    // Enforced here too: a memory store more permissive than the database
-    // certifies a bug rather than catching it.
+    // `fulfillment_market_order_reference_key` and
+    // `fulfillment_move_job_reference_key` are both UNIQUE in the schema, and
+    // both are named in the refusal: a memory store more permissive than the
+    // database certifies a bug rather than catching it, and one that refuses
+    // without naming the rule leaves the reader unable to check which.
     if (this.byOrderReference(fulfillment.market_order_reference)) {
-      throw new Error("duplicate key value violates unique constraint on market_order_reference");
+      throw new Error(
+        'duplicate key value violates unique constraint "fulfillment_market_order_reference_key"',
+      );
     }
+    this.assertJobReferenceFree(fulfillment);
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
   }
@@ -152,8 +157,28 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     return "inserted";
   }
   async update(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
+    this.assertJobReferenceFree(fulfillment);
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
     this.rows.set(fulfillment.fulfillment_id, fulfillment);
+  }
+
+  /**
+   * One MOVE job traces one fulfillment.
+   *
+   * Checked on update as well as insert, because the job reference is attached
+   * after intake: `traceJob` is the write that could give one job two owners,
+   * and CORE would then report the same delivery twice.
+   */
+  private assertJobReferenceFree(fulfillment: Fulfillment): void {
+    if (fulfillment.move_job_reference === null) return;
+    for (const existing of this.rows.values()) {
+      if (existing.fulfillment_id === fulfillment.fulfillment_id) continue;
+      if (existing.move_job_reference === fulfillment.move_job_reference) {
+        throw new Error(
+          'duplicate key value violates unique constraint "fulfillment_move_job_reference_key"',
+        );
+      }
+    }
   }
   /**
    * The in-memory counterpart of the conditional update.

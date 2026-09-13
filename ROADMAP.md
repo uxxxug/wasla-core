@@ -81,26 +81,18 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved: uniqueness parity between the reference backend and Postgres
-(branch `uniqueness-parity`).** The schema declares 24 uniqueness rules — 21
-UNIQUE constraints, one `EXCLUDE USING gist`, and three partial unique indexes.
-Only three of them are restated by name anywhere in `src/`, and reading the
-reference stores shows several that are not enforced at all: two on `principal`,
-one on `session`, one on `membership`, one on `region`, `fulfillment`'s job
-reference, both `subscription_period` uniqueness rules including the overlap
-exclusion, and the two `legacy_id` partial indexes. Wherever that is true the
-in-memory backend accepts a row Postgres refuses, so a dual-backend test can pass
-on a race that production would have rejected — which is what B-12 was, declared
-resolved for money only. Scope: measure each rule against both backends, fix the
-reference store where they disagree, and add a gate so a new uniqueness rule
-cannot ship without parity.
+Nothing is reserved. The uniqueness-parity cycle closed: all 24 uniqueness rules
+the schema declares are now measured against both backends by
+`tests/uniqueness-parity.test.ts`, the reference stores refuse every row Postgres
+refuses, and a coverage check reads the live schema so a new uniqueness rule
+cannot ship without a parity case. See the cycle section at the end of this file.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
 
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
-against both. Migrations 0001–0011 are applied and verified on real engines
+against both. Migrations 0001–0018 are applied and verified on real engines
 (PostgreSQL 18.6 locally in the latest cycle, 18.4 and 17.6 managed earlier),
 rollbacks included — 0009 and 0011 verified as *refusing* to roll back while
 money history would be falsified by doing so.
@@ -124,6 +116,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 9 | Staging readiness, cutover and rollback rehearsal | **Blocked — B-5, B-6** | Migrations and rollbacks are rehearsed against real engines. No environment is chosen |
 | 10 | Reputation and trust signals (ADR 0015) | **CORE side complete; ingestion has no producer, and the policy above the signals is not CORE's to decide** | This row is new, and its absence was the defect the cycle opened with: reputation was on the ownership list in `docs/data-ownership.md`, named as the one remaining gap in `README.md`, and missing from this table entirely — so the document that decides what is next could not have selected it. Now: migration 0018 (`reputation_signal`, append-only by trigger, closed `signal_kind` vocabulary, `UNIQUE (organization_id, source_system, source_reference)`, retraction marker), `src/modules/reputation/` (pure domain + port + Postgres adapter + service + two read routes), four contracts, `docs/reputation.md`, 28 tests × both backends including cross-backend equality of the grouped rows a standing folds from. No score and no review text is stored anywhere: a standing is derived on every read, and there is no column or contract field text could arrive in. Not implementable here: MARKET publishes neither `market.review.rated` nor `market.review.retracted` today, so no signal reaches a deployed CORE; `completion`/`cancellation` cannot be attributed at all until MOVE names the CORE identity that executed a job (external dependency below); weighting, decay, thresholds and cross-tenant aggregation are **B-31…B-34** |
 | 11 | CORE degradation rules (ADR 0010) | **Not implemented, and until this cycle not tracked here at all** | The second roadmap-source gap this cycle found. `docs/adr/README.md` has carried ADR 0010 as `not yet implemented | pending` since the foundation cycle, and no milestone or blocker in this document ever mentioned it, so it could not be selected as next work — the same failure that hid reputation, in a row nobody was reading. What exists today is fail-closed behaviour, not degradation policy: `/ready` reports the wired backend, the outbox relay, inbound dispatcher, delivery worker and notification dispatcher classify failures, retry with backoff, lease, reclaim within a budget (B-25) and dead-letter, and the HTTP surface answers canonical errors under rate limiting. What does not exist is a decision about what CORE *serves* while a dependency is down — whether access checks answer from a cache when Postgres is unreachable, whether reads degrade while writes refuse, and what MOVE and MARKET are told to do meanwhile. That is not implementable from the ADR's title, which is all this repository records of it: the ADR text is not in the repository. Recorded as **B-35** rather than guessed at, because a wrong degradation rule fails exactly when nothing else is working |
+| 13 | Uniqueness parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The gate in milestone 12 made the database assertions run; this row is about what they assert. The schema declares 24 uniqueness rules (21 `UNIQUE`, one `EXCLUDE USING gist`, three partial unique indexes — the last kind invisible to any inventory reading `pg_constraint` alone), and 11 of them were accepted in memory where Postgres refuses: both `principal` rules, `session_token_hash_key`, the membership pair, `region_country_code_code_key`, `fulfillment_move_job_reference_key`, both `legacy_id` partial indexes, and — the one that mattered most — `notification_idempotency_key_key`, where the reference store returned `false` for a genuine key collision that the adapter raises on, so two different messages claiming one identity would vanish silently in tests and fail in production. Two more refused without naming the rule, which is not evidence: "identity link already exists" does not say which constraint fired and survives a rename. Now every refusal quotes the rule Postgres quotes, every check is synchronous check-then-set over a journalled write, and `tests/uniqueness-parity.test.ts` reads `pg_constraint` and `pg_indexes` at run time and fails if the schema declares a rule with no case. 49 assertions; `docs/uniqueness-parity.md` records the inventory, the one legitimate asymmetry, and why `false` is the right refusal for a replayed relay pair and an exception is the right refusal for a key collision. Reading alone had also mis-reported the `subscription_period` rules as missing; measurement showed all three enforced and named — recorded because the correction came from running the probe, not from re-reading |
 | 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 
 ### What was claimed complete and actually is
@@ -192,6 +185,7 @@ Nothing.
 | B-27 | **Resolved.** A dead `outbox` or `event_delivery` row had no revival path in CORE at all. Replay reads `inbound_event` only, and there was no `requeue`, no `revive` and no equivalent for the other two queues anywhere in the repository, so a dead outbox row — an event MOVE and MARKET would never receive — was durable and unreachable at the same time, which is the exact defect Milestone 6 removed for inbound events. B-25 had made it worse by adding a second route to `dead`. Recovering a row meant a manual `update` against the database, unreviewed and unaudited, and free to resurrect a row that had already been published | Closed by `selectDead`/`revive` on `OutboxStore` and `DeliveryStore` in both backends, `QueueRevivalService` (`src/platform/replay/revive.ts`), the `events.revive` permission and `npm run revive`, all documented in `docs/queue-revival.md`. The owner decision is taken and recorded: revival **re-publishes the original envelope unchanged**. It publishes nothing itself — the row goes back to `pending` and the existing relay and delivery worker do what they always do, which keeps one publish path in CORE and keeps `event_id` stable for every consumer inbox and every subscriber that deduplicates on it. A fresh envelope was rejected: it would need a second publish path and would make a month-old fact arrive as news |
 | B-28 | **Resolved.** `DeliveryFanOut` filtered `subscriptionsFor` on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, and a delivery that was already `pending` when the subscription was switched off was still claimed, signed and POSTed, for up to `maxAttempts` across hours of backoff. Found while building B-27, whose revival refuses an inactive subscription; the worker's own behaviour was the other half and contradicted it. The documented reasoning for the old behaviour — those deliveries were promised, and dropping them is worse than delivering them late — was right that they must not be dropped and wrong that "late" is what an operator asked for when switching off a leaking endpoint | Closed by `markSuppressed` on `DeliveryStore` in both backends and an `active` re-check in the worker: the row is dead-lettered with the reason recorded, unsent, with `attempts` and `last_status` untouched, and reported as `suppressed` in the worker result. Read as **stop sending**, not *stop queueing*, because the realistic reasons to deactivate are urgent — a compromised endpoint, a leaked secret, a partner asking to be switched off. Checked at the moment of sending rather than swept at deactivation, since a sweep cannot close the race where fan-out reads the active subscriptions, the deactivation commits and fan-out then queues its row. `dead` reused rather than a fourth status, following the precedent B-25 set for its own new route to `dead`. Recovery is reactivate then `npm run revive` |
 | B-29 | **Resolved.** MOVE executes over minutes, so a cancellation can arrive mid-execution. CORE closed the fulfillment `cancelled`, released the hold and published `core.fulfillment.cancelled`, and then refused MOVE's already in-flight `move.job.completed` with `409 fulfillment was cancelled` and recorded nothing. Two failures followed, both worse than the race: the inbound dispatcher retries whatever is thrown at it and this refusal can never come good — a cancelled fulfillment does not reopen — so the report was retried five times across hours of backoff and dead-lettered as an error string; and the row read `cancelled` + `released`, which `financialDisposition` calls `settled`, so `listFinanciallyInconsistent()` and `listPendingFinancialDecision()` both returned empty while a driver had delivered an order whose payer had been refunded. Found by reading CORE's own code and proved with a throwaway probe before anything was changed; the existing single-closure test covered only the *simultaneous* race, where refusing the loser is still correct, and nothing covered the sequential shape | Closed by recording the fact instead of refusing it. Migration 0017 adds `executed_after_cancellation_at` (MOVE's `completed_at`, not CORE's receipt time) and `executed_after_cancellation_job_reference` (separate from `move_job_reference`, which is null whenever the cancellation beat MOVE's acceptance — the commonest ordering for this case), both nullable, with check constraints for both-or-neither and marker-only-on-cancelled. A conditional store write `markExecutedAfterCancellation` makes the marker single-valued the same way B-21 made the closure single-valued, so one report produces one marker, one event and one audit entry however often it is redelivered. `financialDisposition` returns `decision_required` — placed after the `unsettled` and still-`held` checks so a CORE defect is never masked by a business question — and the additive event `core.fulfillment.executed_after_cancellation` v1 tells MARKET, the only side that can talk to the customer it already told the order was cancelled. No existing contract changed and the cancellation is not re-published. CORE moves **no** money, deliberately: the voided hold cannot be captured and re-charging a refunded payer is not CORE's decision — who pays MOVE and who absorbs the loss is a B-20-class owner question, recorded as **B-30**. Scope is the `cancelled` branch only: a late `completed` on a `failed` row is either MOVE contradicting itself or a redelivery of the report that closed the row, and keeps its existing refusal; a late `failed` after a cancellation records nothing and is answered rather than refused, since both sides agree the work was not delivered and a 409 would only be dead-lettered for nothing. Reports lost before the deploy can be recovered by reviving the `inbound_event` rows carrying `fulfillment was cancelled` (B-27, `npm run revive`); the migration performs no backfill and invents no history |
+| B-36 | Branch protection and rulesets cannot be configured on this repository's plan | CI's two jobs are informative, not required: a red run blocks no merge automatically, so the enforcement milestone 12 delivered stops at the run and does not reach the merge button. Measured rather than assumed — `gh api repos/uxxxug/wasla-core/branches/main/protection` and `.../rulesets` both answer HTTP 403 "Upgrade to GitHub Pro or make this repository public", so this is not a setting anyone forgot | Either a paid plan on the owning account or making the repository public. Neither is a code change and neither is CORE's call |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -4098,3 +4092,102 @@ repository, so a red job blocks no merge automatically. That is a repository
 setting rather than a code change, and it is the one thing this cycle could not do
 from inside the tree — recorded here so the next cycle does not mistake a green
 badge for an enforced gate.
+
+## Cycle 2026-09-13 — uniqueness parity between the two backends
+
+### Why this was next
+
+Milestone 12 made the database assertions run in CI. It did not ask whether the
+assertions were equivalent on both backends, and that is where B-12 had been
+left: declared resolved in the vertical-slice cycle, but only for money. Every
+other uniqueness rule in the schema was still unmeasured against the reference
+stores, and a dual-backend suite whose memory half accepts what Postgres refuses
+does not verify twice — it verifies once and certifies a bug the other half of
+the time.
+
+### Measured first, and the measurement corrected the plan
+
+The schema declares 24 uniqueness rules: 21 `UNIQUE` constraints, one
+`EXCLUDE USING gist` (`subscription_period_no_overlap`), and three partial unique
+indexes (`identity_legacy_idx`, `organization_legacy_idx`,
+`subscription_period_authorization_unique`). The partial indexes are the trap:
+they are constraints in effect but not `pg_constraint` rows, so an inventory that
+reads only `pg_constraint` reports 21 and misses three.
+
+Reading the code suggested the `subscription_period` rules were unenforced in
+memory. Running the probes showed all three are enforced *and* named. Recorded
+because it is the point of the cycle: the fix list came from measurement, and
+reading had produced two false entries on it.
+
+### The gaps, as the first run reported them
+
+Eleven cases failed on the reference backend and none on Postgres:
+
+| Rule | What the gap allowed |
+|---|---|
+| `identity_legacy_idx` | one legacy record imported twice as two identities |
+| `organization_legacy_idx` | the same, for an organization — memberships and money split across two ids |
+| `principal_identity_id_key` | two principals for one identity, so an authorization answer depends on which row is reached first |
+| `principal_service_name_key` | two principals answering to one service credential |
+| `session_token_hash_key` | one bearer token resolving to two sessions |
+| `membership_principal_id_organization_id_key` | two answers to "what may this principal do here" |
+| `region_country_code_code_key` | one region code meaning two places in one country |
+| `fulfillment_move_job_reference_key` | one MOVE job traced by two fulfillments |
+| `notification_idempotency_key_key` | a genuine key collision reported as a duplicate and dropped |
+| `identity_link_channel_type_external_id_key` | refused, but as "identity link already exists" — no rule named |
+| `fulfillment_market_order_reference_key` | refused, but naming a column instead of the constraint |
+
+### The one that was not a missing check
+
+`PgNotificationStore.queue` inserts with `on conflict (event_id, recipient_id)
+do nothing`. Nothing absorbs `notification_idempotency_key_key`, so on Postgres
+a key reused for a *different* message raises. The reference store returned
+`false` for both, collapsing two different situations into one: the relay
+replaying an event, which is expected, and two messages claiming one identity,
+which is a defect. A test could not have told them apart, and the silent path was
+the dangerous one. The reference store now returns `false` for the replayed pair
+and throws, naming the constraint, for the key collision.
+
+### What changed
+
+- `tests/uniqueness-parity.test.ts` — one case per rule, both backends: the rule
+  name, what a violation means in business terms, and a probe that seeds a
+  legitimate row then attempts the row that must be refused. Each case asserts
+  the refusal **and** that it names the schema rule.
+- The same file reads `pg_constraint` and `pg_indexes` at run time and fails when
+  the schema declares a uniqueness rule with no case. That is the part that keeps
+  working after this cycle: a migration adding a `UNIQUE` cannot ship without
+  parity, and cannot ship with parity that only holds on Postgres.
+- `src/modules/identity-access/memory-repository.ts` — six rules restated, all
+  synchronous check-then-set over journalled writes, all quoting the constraint.
+  The legacy check runs on update as well as insert, because a rename could
+  create the collision.
+- `src/modules/organization/service.ts`, `src/modules/geography/repository.ts` —
+  the two remaining partial/compound rules.
+- `src/modules/fulfillment/service.ts` — `fulfillment_move_job_reference_key`
+  added, checked on **update** as well as insert because the job reference is
+  attached after intake by `traceJob`; the order-reference message now names its
+  constraint.
+- `src/modules/notification/repository.ts` — the split described above.
+- `docs/uniqueness-parity.md` — the inventory, the refusal shapes and why they
+  differ, where each rule is restated, and the two constraints on any such check
+  (no `await` between check and write; the write must be journalled).
+
+### Proven, not assumed
+
+- `tests/uniqueness-parity.test.ts`: **49 passed** on both backends. The same
+  file failed 11 cases before the fixes, and the fixture bugs it exposed on the
+  Postgres side were fixed rather than routed around — the queue tables' foreign
+  key to `outbox(event_id)` and the deferred ledger-agreement trigger both
+  refused invented fixtures, which is those rules working.
+- Full suite with `DATABASE_URL`: **735 passed in 39 files**, plus the
+  migration-lifecycle pass **1 passed**. Without a database: **409 passed, 48
+  skipped**. Both up from 686 / 385 with no test weakened or skipped.
+- Gates: typecheck clean; governance clean; contracts 26 schemas / 17 emitted
+  types; migrations 18 forward, all with rollbacks.
+
+### What this cycle could not do
+
+Branch protection is still unconfigurable on this plan (403 on both the
+protection and rulesets endpoints), so CI remains informative rather than
+required. Recorded as **B-36** instead of left as an implied to-do.
