@@ -21,7 +21,39 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     return `${channelType}::${externalId}`;
   }
 
+  /**
+   * The wording Postgres uses, so a caller cannot tell the two backends apart.
+   *
+   * Every refusal below quotes the schema rule that would have refused it, which
+   * is what makes a reference-store green mean the same thing as a database
+   * green (B-12). A message that only says "already exists" leaves the reader
+   * guessing which rule fired and lets the rule be renamed without a test
+   * noticing.
+   */
+  private duplicate(constraint: string): Error {
+    return new Error(`duplicate key value violates unique constraint "${constraint}"`);
+  }
+
+  /**
+   * `identity_legacy_idx`: one row per (source_system, legacy_id), and only
+   * where `legacy_id` is not null, because an identity CORE created itself has
+   * no legacy record to be a second copy of.
+   */
+  private assertIdentityLegacyFree(identity: Identity): void {
+    if (identity.legacy_id === null) return;
+    for (const existing of this.identities.values()) {
+      if (existing.identity_id === identity.identity_id) continue;
+      if (
+        existing.legacy_id === identity.legacy_id &&
+        existing.source_system === identity.source_system
+      ) {
+        throw this.duplicate("identity_legacy_idx");
+      }
+    }
+  }
+
   async insertIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
+    this.assertIdentityLegacyFree(identity);
     journalMapWrite(_scope, this.identities, identity.identity_id);
     this.identities.set(identity.identity_id, identity);
   }
@@ -29,6 +61,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     return this.identities.get(identityId);
   }
   async updateIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
+    this.assertIdentityLegacyFree(identity);
     journalMapWrite(_scope, this.identities, identity.identity_id);
     this.identities.set(identity.identity_id, identity);
   }
@@ -39,7 +72,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   async insertLink(link: IdentityLink, _scope?: TransactionScope): Promise<void> {
     const key = this.linkKey(link.channel_type, link.external_id);
     if (this.links.has(key)) {
-      throw new Error(`identity link already exists: ${key}`);
+      throw this.duplicate("identity_link_channel_type_external_id_key");
     }
     journalMapWrite(_scope, this.links, key);
     this.links.set(key, link);
@@ -52,6 +85,17 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertPrincipal(principal: Principal, _scope?: TransactionScope): Promise<void> {
+    for (const existing of this.principals.values()) {
+      if (existing.principal_id === principal.principal_id) continue;
+      // Two principals for one identity would make an authorization answer
+      // depend on which row a query happened to reach first.
+      if (existing.identity_id === principal.identity_id) {
+        throw this.duplicate("principal_identity_id_key");
+      }
+      if (principal.service_name !== null && existing.service_name === principal.service_name) {
+        throw this.duplicate("principal_service_name_key");
+      }
+    }
     journalMapWrite(_scope, this.principals, principal.principal_id);
     this.principals.set(principal.principal_id, principal);
   }
@@ -63,6 +107,14 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertSession(session: Session, _scope?: TransactionScope): Promise<void> {
+    for (const existing of this.sessions.values()) {
+      // One bearer token resolving to two sessions is one credential with two
+      // sets of rights, so the token hash is unique for every session ever
+      // issued, revoked or not.
+      if (existing.session_id !== session.session_id && existing.token_hash === session.token_hash) {
+        throw this.duplicate("session_token_hash_key");
+      }
+    }
     journalMapWrite(_scope, this.sessions, session.session_id);
     this.sessions.set(session.session_id, session);
   }
@@ -78,6 +130,17 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   }
 
   async insertMembership(membership: Membership, _scope?: TransactionScope): Promise<void> {
+    for (const existing of this.memberships.values()) {
+      if (existing.membership_id === membership.membership_id) continue;
+      // Roles live in one row per pair, so a second row is a second answer to
+      // "what may this principal do here".
+      if (
+        existing.principal_id === membership.principal_id &&
+        existing.organization_id === membership.organization_id
+      ) {
+        throw this.duplicate("membership_principal_id_organization_id_key");
+      }
+    }
     journalMapWrite(_scope, this.memberships, membership.membership_id);
     this.memberships.set(membership.membership_id, membership);
   }

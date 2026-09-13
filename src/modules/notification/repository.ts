@@ -193,15 +193,28 @@ export class InMemoryNotificationStore implements NotificationStore {
   }
 
   async queue(notification: Notification, scope: TransactionScope = NO_SCOPE): Promise<boolean> {
-    // UNIQUE (event_id, recipient_id) and UNIQUE (idempotency_key), checked
-    // synchronously.
+    // Two rules, two outcomes, because Postgres treats them differently and a
+    // reference store that flattened them would hide a real bug.
+    //
+    // `PgNotificationStore.queue` inserts with `on conflict (event_id,
+    // recipient_id) do nothing`, so a repeat of that pair is absorbed and
+    // reported as `false` — the relay replaying one event is expected. Nothing
+    // absorbs `notification_idempotency_key_key`, so the same key on a
+    // different message raises. That case is not a retry: it is two messages
+    // claiming one identity, and swallowing it would drop the second silently.
     for (const existing of this.notifications.values()) {
       if (
-        (existing.event_id === notification.event_id &&
-          existing.recipient_id === notification.recipient_id) ||
-        existing.idempotency_key === notification.idempotency_key
+        existing.event_id === notification.event_id &&
+        existing.recipient_id === notification.recipient_id
       ) {
         return false;
+      }
+    }
+    for (const existing of this.notifications.values()) {
+      if (existing.idempotency_key === notification.idempotency_key) {
+        throw new Error(
+          'duplicate key value violates unique constraint "notification_idempotency_key_key"',
+        );
       }
     }
     journalMapWrite(scope, this.notifications, notification.notification_id);
