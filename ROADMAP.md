@@ -4217,7 +4217,7 @@ what the budget is.
 
 **CI verdict — read from GitHub Actions, not inferred from the local run.** Run
 [34781968718](https://github.com/uxxxug/wasla-core/actions/runs/34781968718) on
-commit `9a3d0dd` of branch `http-response-headers`, both jobs green:
+commit `d06f376` of branch `http-response-headers`, both jobs green:
 
 - *Verify without a database* — **709 passed / 147 skipped (856)**.
 - *Verify against PostgreSQL 16* — **1271 passed**, plus the separately reported
