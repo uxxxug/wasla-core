@@ -4215,7 +4215,23 @@ outbound webhooks. And it does not turn the limiter's numbers into published
 promises: the gate asserts the budget counts down and reads `0` at the refusal, not
 what the budget is.
 
-**CI verdict.** Recorded below once read from GitHub Actions, not from the local run.
+**CI verdict — read from GitHub Actions, not inferred from the local run.** Run
+[34781968718](https://github.com/uxxxug/wasla-core/actions/runs/34781968718) on
+commit `9a3d0dd` of branch `http-response-headers`, both jobs green:
+
+- *Verify without a database* — **709 passed / 147 skipped (856)**.
+- *Verify against PostgreSQL 16* — **1271 passed**, plus the separately reported
+  `migration-0011-lifecycle` file **1 passed** = **1272**.
+
+The passing counts agree exactly with the local measurement (709 and 1272). The
+skipped count does not: 147 in CI against 148 locally, one test more skipped here
+than there. Stated rather than smoothed over, because it is the same one-test
+difference the last four cycles' records carried without anybody naming it: the
+local run and CI's no-database job disagree by a single skipped case, and until a
+cycle measures *which* case that is, the honest form of the claim is "709 pass in
+both, and one test's skip condition is environment-dependent". Nothing about the
+passing counts, the gate or the fixes depends on it. Pull request
+[#19](https://github.com/uxxxug/wasla-core/pull/19).
 
 ## Cycle 2026-09-13 (sixteenth) — the contract had never been read
 
