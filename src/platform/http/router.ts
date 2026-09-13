@@ -1,9 +1,10 @@
 import { IncomingMessage, ServerResponse } from "node:http";
-import { CoreError } from "../errors.js";
+import { CoreError, invalid } from "../errors.js";
 import { newId } from "../ids.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
 import { NO_BODY, parseBody, type Body, type BodySpec } from "./body.js";
 import { parseHeaders, type RawHeaders, type RequestHeaders } from "./headers.js";
+import { sealHeaders } from "./response-headers.js";
 import { parseSelection, type ParamSpec, type Selection } from "./query.js";
 import {
   rateClassFor,
@@ -283,7 +284,7 @@ export class Router {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: { "x-correlation-id": correlationId },
+        headers: sealHeaders({ "x-correlation-id": correlationId }),
       };
     }
     const correlationId = headers.value("x-correlation-id") ?? newId();
@@ -330,7 +331,7 @@ export class Router {
         return {
           status: error.status,
           body: error.toBody(correlationId),
-          headers: { ...rateHeaders, "x-correlation-id": correlationId },
+          headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
         };
       }
     }
@@ -345,6 +346,11 @@ export class Router {
           retryable: false,
           correlation_id: correlationId,
         },
+        // The defect this milestone was reserved for: this branch used to return
+        // no headers at all, so the one answer a caller gets when it cannot reach
+        // any route in CORE was the one answer it could not correlate to CORE's
+        // logs — while the body next to it carried the very same id.
+        headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
       };
       const duration = Date.now() - started;
       this.record(
@@ -397,7 +403,7 @@ export class Router {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: { ...rateHeaders, "x-correlation-id": correlationId },
+        headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
       };
     }
 
@@ -443,7 +449,9 @@ export class Router {
       );
       return {
         ...result,
-        headers: { ...rateHeaders, ...(result.headers ?? {}), "x-correlation-id": correlationId },
+        // The correlation id last, so a route cannot overwrite CORE's record of
+        // the request with a value of its own choosing.
+        headers: sealHeaders(rateHeaders, result.headers, { "x-correlation-id": correlationId }),
       };
     } catch (err) {
       const coreError =
@@ -468,7 +476,7 @@ export class Router {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: { ...rateHeaders, "x-correlation-id": correlationId },
+        headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
       };
     }
   }
@@ -484,8 +492,19 @@ export class Router {
         try {
           body = JSON.parse(raw);
         } catch {
-          res.writeHead(400, { "content-type": "application/json" });
-          res.end(JSON.stringify({ code: "invalid_request", message: "body must be valid JSON" }));
+          // Answered here rather than by the router, because a body that is not
+          // JSON cannot be handed to it — but answered in the *same* shape.
+          // Before this milestone this was the one refusal in CORE that carried
+          // neither `correlation_id`, `details` nor `retryable`, and no
+          // `x-correlation-id` header: a caller with a malformed body got an
+          // answer it could not parse as an `Error` and could not trace.
+          const coreError = invalid("body must be valid JSON");
+          const correlationId = newId();
+          res.writeHead(coreError.status, {
+            "content-type": "application/json",
+            ...sealHeaders({ "x-correlation-id": correlationId }),
+          });
+          res.end(JSON.stringify(coreError.toBody(correlationId)));
           return;
         }
       }

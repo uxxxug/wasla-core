@@ -224,6 +224,14 @@ describe("declared request headers", () => {
           // An object key: how the router sets the response header of the same
           // name, which is CORE's own record and not the caller's.
           if (after === ":") continue;
+          // The *value* of a `name:` field: milestone 28 declares the response
+          // headers CORE sets in `platform/http/response-headers.ts`, and one of
+          // them is `x-correlation-id`, the same name this module reads on the way
+          // in. Exempted narrowly, by the two tokens in front of it, rather than
+          // by skipping that file — a file-wide exemption would also hide a real
+          // request read placed inside it, which is the thing this scan exists to
+          // find.
+          if (/\bname:\s*$/.test(before)) continue;
           offenders.push(`${path}: ${name} outside a declared reader`);
         }
       }
