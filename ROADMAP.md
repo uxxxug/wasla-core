@@ -5135,5 +5135,16 @@ column that is read.
 46 files. With `DATABASE_URL` against local PostgreSQL 16: 1075 passed in 46
 files.
 
-**CI verdict:** pending — recorded below from the run logs for this branch's
-head commit, not inferred from the local run.
+**CI verdict: both jobs green**, read from the run logs for head `8953e0e` on
+`read-path-parity` (PR run `34746138148`, push run `34746135902`):
+
+| Job | Result | Wall time | Totals |
+|---|---|---|---|
+| Verify without a database | success | 34s | 589 passed, 71 skipped in 44 of 46 files; the lifecycle file skipped |
+| Verify against PostgreSQL | success | 2m07s | 1075 passed in 46 files; the lifecycle file 1 passed |
+
+Both totals match the local measurement exactly. What CI adds for this cycle
+specifically: the eight behavioural round-trip assertions compared a reference
+record with one read out of a `postgres:16` that CI built from the 19
+migrations, so the claim that the two backends return the same record is now a
+claim about a database this repository did not create.
