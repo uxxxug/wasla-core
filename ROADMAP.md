@@ -4970,5 +4970,18 @@ strictnesses.
 
 ### CI verdict for this cycle — read from the run, not assumed
 
-_Pending: to be replaced with the run's own verdict after the push, per the rule
-that local green is not a verdict._
+Head `473a0c6` on `column-parity`, run `34743967640` (pull request) and
+`34743966173` (push), [PR #9](https://github.com/uxxxug/wasla-core/pull/9):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 36s | **574 passed, 60 skipped** in 42 of 44 files, `tests/column-parity.test.ts` among them at **21 tests, 4 skipped** — the four that need a database — then the migration-lifecycle file **1 skipped** |
+| `Verify against PostgreSQL` | **success**, 2m6s | **1047 passed in 44 files** with `DATABASE_URL` against `postgres:16`, `tests/column-parity.test.ts` **21 tests** with none skipped, then the migration-lifecycle pass **1 passed** |
+
+Read from the run's own log archive rather than from a local run, and the totals
+match the local ones exactly (574 / 60 and 1047 + 1). What matters for this cycle
+specifically is that the four database-only assertions ran *there*: the
+declaration was compared against the `pg_attribute` of a database CI built from
+the 19 migrations, and the six refusal probes were compared with the wording of
+CI's own `postgres:16` — so `column-shapes.ts` quotes a message this repository
+has seen a real database produce on a machine that is not this one.
