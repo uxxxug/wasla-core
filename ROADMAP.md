@@ -4329,3 +4329,17 @@ exemption means no caller can reach the rule, not that the store may ignore it.
 
 Branch protection is still unconfigurable on this plan, so CI remains
 informative rather than required: **B-36**, unchanged.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `0cc4fff` on `check-constraint-parity`, run `34730621741`, [PR #5](https://github.com/uxxxug/wasla-core/pull/5):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 35s | the dependency-free pass still stands on its own |
+| `Verify against PostgreSQL` | **success**, 2m37s | **913 tests passed in 40 files** with `DATABASE_URL` against `postgres:16`, then the migration-lifecycle pass **1 passed** — migration 0019 rolled back and re-applied |
+
+The CI totals match the local ones exactly (913 + 1), which is what makes the
+parity file worth having: the 88 constraints it now restates in the reference
+backend are enforced by a run nobody's machine configured, on a database created
+from the migrations rather than from a developer's schema.
