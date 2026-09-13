@@ -6,6 +6,7 @@ import {
 } from "../../platform/persistence/transaction.js";
 import { assertBalanced } from "./domain.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
+import { assertColumns } from "../../platform/persistence/column-shapes.js";
 import { assertRow, putRow, type Row } from "../../platform/persistence/row-rules.js";
 
 export interface MoneyRepository {
@@ -271,6 +272,10 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     // The entries are rows of their own table, with their own rules; a
     // transaction that balances out of forbidden entries is still forbidden.
     for (const entry of transaction.entries) {
+      // `ledger_entry` is the other ruled table whose rows never pass through
+      // `putRow`: entries are nested inside their transaction, not keyed rows
+      // of their own map. Columns first, then the rules, matching Postgres.
+      assertColumns("ledger_entry", entry as unknown as Row);
       assertRow("ledger_entry", entry as unknown as Row);
     }
     journalMapWrite(_scope, this.ledger, transaction.transaction_id);

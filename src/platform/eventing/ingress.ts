@@ -37,6 +37,18 @@ export interface InboundRecord {
    */
   received_at: string;
   /**
+   * When CORE finished handling the event, or null while it has not.
+   *
+   * The column has existed since migration 0007 and, like the outbox's
+   * `created_at`, was written by the Postgres adapter and selected by neither:
+   * the reference store omitted the key entirely, so `record.processed_at` read
+   * `undefined` on one backend and a timestamp on the other for the same event.
+   * Found by the column-parity gate (milestone 18), which refuses an absent key
+   * for a nullable column — a tuple has no such state, and null is what the
+   * database stores.
+   */
+  processed_at: string | null;
+  /**
    * When a dispatcher claimed this row, or null when nobody holds it (B-24).
    *
    * While it is null, `next_attempt_at` is a retry schedule; while it is set,
@@ -216,6 +228,8 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       last_error: null,
       next_attempt_at: now,
       received_at: now,
+      // Explicitly null rather than absent: see `processed_at`.
+      processed_at: null,
       claimed_at: null,
       claim_token: null,
     });
@@ -311,6 +325,9 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       ...record,
       status: "processed",
       last_error: null,
+      // What Postgres sets in the same statement (`processed_at = $3`), by the
+      // same clock the adapter passes it.
+      processed_at: this.clock.now().toISOString(),
       claimed_at: null,
       claim_token: null,
     });

@@ -23,6 +23,7 @@ interface OutboxRow {
   attempts: number;
   last_error: string | null;
   next_attempt_at: Date;
+  created_at: Date;
   claimed_at: Date | null;
   reclaims: number;
   claim_token: string | null;
@@ -47,6 +48,7 @@ function toRecord(row: OutboxRow): OutboxRecord {
     attempts: row.attempts,
     last_error: row.last_error,
     next_attempt_at: isoRequired(row.next_attempt_at),
+    created_at: isoRequired(row.created_at),
     claimed_at: iso(row.claimed_at),
     reclaims: row.reclaims,
     claim_token: row.claim_token,
@@ -62,7 +64,7 @@ const COLUMNS = `event_id, event_type, version, producer, occurred_at, correlati
  * Everything a read returns, including the claim (B-24), its budget (B-25) and
  * the token that fences it (B-26).
  */
-const SELECT_COLUMNS = `${COLUMNS}, claimed_at, reclaims, claim_token`;
+const SELECT_COLUMNS = `${COLUMNS}, created_at, claimed_at, reclaims, claim_token`;
 
 /**
  * Durable outbox (ADR 0009).

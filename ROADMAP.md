@@ -81,18 +81,22 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The delete-path parity cycle that held this slot is
-finished and recorded below, which closes the delete half of the four parity
-families B-12 named, and with it B-12 itself. It does not close parity as a
-subject: measuring the schema for this cycle turned up a family B-12 never
-named, column shape, recorded below as milestone 18. Re-measured before writing this: of the items
-above, milestones 2…9 wait on environments and producers outside CORE,
-B-14…B-20 and B-30…B-34 are policy decisions that are not CORE's to make,
-B-35/ADR 0010 still has no ADR text in the repository, and B-36 is a plan
-limitation. The next actionable item is therefore **milestone 18, column-level
-parity**: 270 columns, **212 `NOT NULL`** and **49 with a default**, against a
-reference backend that enforces nullability only where a text rule happens to
-mention it. Nothing is holding it.
+Nothing is reserved. Milestone 18 closed the sixth parity cycle (column-level
+parity — `NOT NULL`, types, lengths and defaults; see the cycle record at the
+end of this file and `docs/column-parity.md`), and the reservation it held is
+released here in the same commit range that closed it.
+
+**Next actionable item: milestone 19 — the column gate reaches only the 28 ruled
+tables.** Four of the schema's 32 tables have no `ROW_RULES` entry and therefore
+no column shape: they are migration bookkeeping, written by the migration runner
+rather than by a store, which is why the gate excludes them — but "excluded
+because nothing above the runner writes them" is an exemption held true by
+nothing, exactly the shape of claim milestone 17 was created to stop trusting.
+Measured while closing this cycle: 32 tables, 270 columns, 212 `NOT NULL`, 49
+defaults, of which **254 / 197 / 45 are now gated** and 16 columns across 4
+tables are not. The cycle would either bring the runner's writes through a gate
+of their own or record the exclusion as an enforced, falsifiable exemption the
+way `delete-actions.ts` records its one unmodelled cascade.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -129,7 +133,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 15 | Referential-integrity parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The third and last large family of B-12. The schema declares **30 foreign keys** across 20 child tables and exactly **one** — `usage_record_period_id_fkey` — was restated anywhere in `src/`, so the reference backend accepted a fulfillment in no tenant, a membership for no principal, a session for a principal nobody created, a notification addressed to a recipient row that was never inserted, and a webhook delivery of an envelope the outbox never recorded. `src/platform/persistence/reference-keys.ts` declares one rule per referencing column (name, child column, parent table, nullability, because `MATCH SIMPLE` makes a null reference satisfy the key) and `putRow` now calls `assertReferences` on every reference write, refusing with Postgres' own wording. Parents are found through a bundle-scoped registry that reads the stores' **live** maps, so no row is copied and no second source of truth exists. `tests/fk-parity.test.ts` probes 29 of the 30 on both backends (**63 assertions**), records the thirtieth as exempt with its reason, and holds four gates: coverage against `pg_constraint` at run time, a declaration gate comparing every rule's child column, parent table and nullability with the catalog, an assertion that the bundle resolved every parent the rules read — the design's single fail-open path, measured rather than trusted — and a reason for every exemption. Enforcement immediately falsified six passing suites: **29 failures**, all `fulfillment_organization_id_fkey` or `membership_organization_id_fkey`, because those fixtures had never created the tenant they wrote into. Fixed in the fixtures (`seedTenant`, `coreWithTenants`), not by relaxing the rule. A second finding: `session`, `plan_grant` and `usage_record` were still writing with a bare `map.set`, so the previous cycle's claim that `putRow` is the only reference write path held for 25 of 28 tables and their five `CHECK`s were duplicated inline; all three now go through `putRow` and their rules are declared in `ROW_RULES`. `docs/foreign-key-parity.md` records the inventory, the six nullable columns and what null means in each, the one weakening, the exemption, and a stale fixture comment claiming `organization` has a country foreign key when the catalog shows none |
 | 16 | Trigger-invariant parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The fourth and last family of B-12. The schema installs **12 triggers**, measured from `pg_trigger`; five were named anywhere in `src/`. Two were enforced by no reference store at all: `subscription_currency_check` (a plan priced in one currency billed against a wallet in another, and a subscription to a plan that was never offered) lived only in `SubscriptionService`, and `ledger_transaction_balance` only in `MoneyService` — so a caller reaching the stores directly could post entries summing to -1 and the reference backend accepted money appearing from nowhere. `src/platform/persistence/transition-rules.ts` declares the immediate triggers as transition rules over (operation, previous row, next row) and `putRow` applies them after the checks and the foreign keys, the order Postgres uses; the four `DEFERRABLE INITIALLY DEFERRED` constraint triggers stay on the transaction journal, because a write-time refusal would reject a legal sequence. The same file carries `TRIGGER_INVENTORY`, which names all twelve exactly once as immediate, deferred (naming the store that defers it) or exempt with a reason. `tests/trigger-parity.test.ts` holds **39 assertions** with a database: a refusal probe per reachable trigger on both backends asserting Postgres' own words, an outcome probe for the one path both backends narrow away before it can fire, three exemptions that assert the absent port operations rather than claiming unreachability in prose, and five gates — coverage against `pg_trigger` at run time, a timing gate reading `tgdeferrable`/`tginitdeferred`, `unresolvedReads() === []`, a reason per exemption, and agreement between the inventory and the rules. `docs/trigger-parity.md` records the inventory, the two gaps, and the four places the backends still differ |
 | 17 | `ON DELETE` and delete-path parity | **Complete, and self-enforcing from here** | The fifth parity cycle, the last of the four families B-12 named, and the only one where nothing in the code was wrong. All four earlier cycles ended with the same admission — the reference backend models no referential action, and the delete halves of the four append-only triggers are *unreachable* rather than enforced — and nothing in the repository kept that true: a migration adding `ON DELETE SET NULL`, or a store growing a `deleteUsage`, would have turned every "no caller can express this write" exemption false while the suite stayed green. Measured from `pg_constraint` and the source rather than the documents: **30 foreign keys, 29 `ON DELETE NO ACTION`**, exactly one `ON DELETE CASCADE` (`plan_grant_plan_id_fkey`), **no** non-default `ON UPDATE`, **15 of 32 tables are a foreign-key parent**, and **three** places in `src/` remove a row — the inbox releasing a claim, the rate-limit counter pruning closed windows, and the in-memory boundary unwinding a rollback. `src/platform/persistence/delete-actions.ts` declares the action of all 30 keys (`NO ACTION` is modelled by construction: the database refuses a delete that would orphan a child, and in memory there is no delete to refuse) and the one cascade as **`modelled: false`** with its reason, plus the three delete paths with the reason each is safe. `tests/delete-parity.test.ts` holds **11 assertions** with a database: an action for every key, unmodelled-means-unreachable, no port that deletes an unmodelled parent, row removal only where declared (scanning for `delete from`, `truncate`, `.delete(` and `.clear(` — the last two appear nowhere in `src/` and are scanned for anyway), every removal-shaped port operation classified as deleting a row or releasing a lease (the four `reclaimExpired` methods are `UPDATE`s and say so), the declarations read against `confdeltype`/`confupdtype` at run time, the deletable tables checked against `pg_constraint` and `pg_trigger`, and two outcome probes on both backends for the one delete a caller can reach. No delete path was added: the append-only tables are append-only by design, and the cycle's job was to make that enforced rather than to weaken it so a cascade becomes observable. `docs/delete-path-parity.md` records the inventory, the five falsifications, and the four things the cycle does not claim |
-| 18 | Column-level parity: `NOT NULL`, defaults and types | **Not started; the next actionable item** | The family the five parity cycles never touched. Measured from `pg_attribute` while closing milestone 17: **270 columns, 212 `NOT NULL`, 49 with a default**, and 11 distinct types including `character(3)` for currency and `character(2)` for country. The reference backend enforces nullability only where a `ROW_RULES` text rule happens to mention it, enforces no type at all — a number where Postgres wants `text`, a 4-letter currency where the column is `character(3)` — and applies no default, so a row the database would have completed is stored incomplete in memory. The cycle would declare the column shape once, apply it in `putRow` before the checks (the order Postgres uses), probe the refusals on both backends with Postgres' own wording, and gate the declaration against the catalog |
+| 18 | Column-level parity: `NOT NULL`, defaults and types | **Complete** | The sixth parity cycle, and the family the first five never touched: all of them are rules *about* a value, none asks whether the value fits the column. Measured from `pg_attribute` and from the rows the stores actually write — the second by instrumenting `putRow` and running the whole suite, 7578 writes across 26 of the 28 tables, not by reading the stores and guessing. Across the 28 ruled tables: **254 columns, 197 `NOT NULL`, 45 with a database default**, in 11 types. The reference backend enforced none of it. `src/platform/persistence/column-shapes.ts` declares every column with its type, its `character(n)` width, its nullability, its default expression and **the path the value takes in the reference row** — without the path the gate would have checked nothing for the 20 columns `outbox` and `inbound_event` nest under `event.*`. `assertColumns` runs in `putRow` **before** the `CHECK` rules, the order Postgres uses, and directly in the two ruled tables whose rows never pass through `putRow` (`audit_entry`, an append-only array; `ledger_entry`, nested inside its transaction). No default is ever applied: a column the database would have filled must be written by the store or the row is refused, because completing the row here would make the declaration a second source of truth for what a row contains. An absent key is refused even for a nullable column — a tuple has no absent state. The measurement found **two live divergences**, both default-reliance, both fixed at the root rather than exempted: `outbox.created_at` (`NOT NULL DEFAULT now()`, inserted by the adapter, selected by neither backend, written by the reference store never) and `inbound_event.processed_at` (set by the adapter, selected by neither, omitted rather than null in memory) are now fields of `OutboxRecord` and `InboundRecord`, written from the injected clock and added to both adapters' `SELECT_COLUMNS`. `tests/column-parity.test.ts` holds **21 assertions**, 4 needing a database: coverage in both directions against `pg_attribute` including the default *expression*, the three counts as live measurements, six offending rows inserted into a real `plan` and rolled back so the database's message is compared to the reference backend's character for character, and a probe that the **three deliberate strictnesses** are still strictnesses (Postgres coerces `1` into `text` and `"yes"` into `boolean`, and accepts a `bigint` JavaScript has already rounded; memory refuses all three, because accepting would leave the two backends holding different values for one write). Five falsifications, five caught. `docs/column-parity.md` records the inventory, the asymmetries, the falsifications and what the cycle does not claim |
 
 ### What was claimed complete and actually is
 
@@ -4831,3 +4835,153 @@ actions were compared with `confdeltype`/`confupdtype`, and the deletable tables
 with `pg_constraint` and `pg_trigger`, on a database CI built from the 19
 migrations — so `delete-actions.ts` is checked against the schema CI produces
 and not only the one on this machine.
+
+## Cycle 2026-09-13 (sixth) — column-level parity: `NOT NULL`, types and defaults
+
+### Why this was next
+
+Re-measured rather than read off the documents, as every cycle before it: nothing
+above milestone 18 in the dependency order is actionable. Milestones 2…9 wait on
+environments and producers outside CORE, B-14…B-20 and B-30…B-34 are policy
+decisions that are not CORE's to make, B-35/ADR 0010 has no ADR text in the
+repository, and B-36 is a plan limitation. Milestone 18 was the one item with no
+external dependency — and it was the item the previous cycle created out of its
+own measurement rather than an item anyone planned, which is the mechanism
+working as intended.
+
+### Measured first
+
+From `pg_attribute`, and from the rows the reference stores actually write. The
+second measurement was taken by temporarily instrumenting `putRow` to append the
+key paths of every row it received to a file and running the whole suite — 7578
+writes, 26 of the 28 ruled tables observed — because reading the stores and
+inferring their row shapes is the kind of guess this repository keeps finding to
+be wrong.
+
+| Question | Answer |
+|---|---|
+| Columns across the 28 ruled tables | **254** |
+| `NOT NULL` | **197** |
+| With a database default | **45** |
+| Distinct types | **11** |
+| Ruled tables whose rows bypass `putRow` | **2** — `audit_entry`, `ledger_entry` |
+| Columns the reference backend enforced | **0** by type, 0 by length, nullability only where a text rule mentioned it |
+
+The 11 types are `uuid`, `text`, `character(2)`, `character(3)`, `timestamptz`,
+`integer`, `bigint`, `double precision`, `boolean`, `jsonb`, `text[]`. The
+default expressions are `now()`, `'{}'::jsonb`, `'pending'::text`,
+`'none'::text`, `'active'::text`, `0`, `1`, `true`.
+
+### Two divergences the measurement found, fixed at the root
+
+Neither was hypothetical and neither is an exemption:
+
+- **`outbox.created_at`** — `NOT NULL DEFAULT now()` since the first migration.
+  The Postgres adapter inserted it and never selected it; the reference store
+  never wrote it. A reference record was missing a value every database row had,
+  and the two backends returned records of different shapes for the same event.
+- **`inbound_event.processed_at`** — set by the adapter in the same statement
+  that marks an event processed, selected by neither backend, omitted rather
+  than stored as null in memory. `record.processed_at` read `undefined` on one
+  backend and a timestamp on the other.
+
+Both are now fields of `OutboxRecord` and `InboundRecord`, written by the
+reference stores from the injected clock, and added to `SELECT_COLUMNS` in
+`pg-outbox.ts` and `pg-ingress.ts`. 282 suite failures pointed at exactly these
+two columns and nothing else, which is how a gate is supposed to report a
+divergence: two causes, not 282.
+
+### What the cycle built
+
+`src/platform/persistence/column-shapes.ts` — every column of all 28 ruled
+tables with its type, width, nullability, default expression and **the path the
+value takes in the reference row**. Twenty columns are nested (`outbox` and
+`inbound_event` carry the envelope under `event.*`, its payload at
+`event.payload`); declaring the column without the path would have gated nothing
+for those.
+
+`assertColumns` runs in `putRow` before the `CHECK` rules — Postgres refuses a
+`NOT NULL` violation before evaluating a `CHECK` on the same column — and is
+called directly by `audit.ts` and by the ledger-entry loop in
+`src/modules/money/repository.ts`, the two ruled write paths that are not keyed
+maps.
+
+Three choices that could have gone the other way, recorded in the file header
+and in `docs/column-parity.md`:
+
+1. **No default is applied.** A defaulted column absent from the row is refused
+   with a message that says the database would have filled it and the store has
+   to instead. Completing the row here would make this file a second source of
+   truth for what a row contains — which is precisely what the two divergences
+   above were.
+2. **An absent key is refused even for a nullable column.** Null is what the
+   database stores; `undefined` versus `null` is a difference a handler sees.
+3. **Refusals quote Postgres' wording**, measured by inserting each value into a
+   real Postgres 16, not recalled. The array wording was corrected by that
+   measurement: a string in a `text[]` column raises `malformed array literal:
+   "admin"`, not a type error, because the value is parsed as an array literal
+   first.
+
+### Where the reference backend is deliberately stricter
+
+Three writes Postgres accepts by converting, and the reference backend refuses,
+because memory has no conversion step and accepting would leave the two backends
+holding different values for one write: a number in a `text` column (Postgres
+stores `"1"`), a string in a `boolean` column (Postgres stores `true`), and an
+integer past `Number.MAX_SAFE_INTEGER` in a `bigint` column (Postgres stores the
+rounded double it was sent; a `bigint` value is accepted). Refusing a write the
+database would have taken is the safe direction, but it is an asymmetry, so it
+is written down and asserted by a test that checks Postgres still accepts all
+three — if a future version stops, the note is wrong and the test says so.
+
+`character(n)` short values are **not** refused: the type blank-pads, and the
+schema's own `plan_currency_format` CHECK is what rejects `SA`. Refusing in the
+column gate would quote the wrong rule for the write.
+
+### The gates, and breaking them on purpose
+
+`tests/column-parity.test.ts`, **21 assertions**, 4 requiring a database:
+coverage in both directions against `pg_attribute` (type, `character(n)` width,
+nullability and the default *expression*), the three counts as live measurements
+rather than remembered numbers, a vacuity guard on the catalog query, six
+offending rows inserted into a real `plan` inside a transaction and rolled back
+so the database's message is compared character for character with
+`assertColumns`', and a probe that the three strictnesses are still
+strictnesses.
+
+| Falsification | Result |
+|---|---|
+| `plan.activated_at` declared `notNull: true` | 4 assertions fail |
+| `plan.interval_count` declared `bigint` | catalog gate and the wording comparison fail |
+| a `databaseDefault: "now()"` removed | defaulted-count gate and catalog gate fail |
+| a column entry deleted | catalog gate fails |
+| the `NOT NULL` branch of `assertColumns` disabled | refusal probes and the wording comparison fail |
+
+### What this cycle did not do
+
+- It does not add a type system to the domain. The gate checks what the column
+  will hold, at the one place every reference write already passes through.
+- It does not reach the four unruled tables — 16 columns of migration
+  bookkeeping written by the runner rather than by a store. That exclusion is
+  currently held true by nothing, which is the same shape of untrusted claim
+  milestone 17 existed to close, and it is recorded as the next actionable item
+  rather than waved through here.
+- It does not make CI a required check; B-36 is still a plan limitation.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `473a0c6` on `column-parity`, run `34743967640` (pull request) and
+`34743966173` (push), [PR #9](https://github.com/uxxxug/wasla-core/pull/9):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 36s | **574 passed, 60 skipped** in 42 of 44 files, `tests/column-parity.test.ts` among them at **21 tests, 4 skipped** — the four that need a database — then the migration-lifecycle file **1 skipped** |
+| `Verify against PostgreSQL` | **success**, 2m6s | **1047 passed in 44 files** with `DATABASE_URL` against `postgres:16`, `tests/column-parity.test.ts` **21 tests** with none skipped, then the migration-lifecycle pass **1 passed** |
+
+Read from the run's own log archive rather than from a local run, and the totals
+match the local ones exactly (574 / 60 and 1047 + 1). What matters for this cycle
+specifically is that the four database-only assertions ran *there*: the
+declaration was compared against the `pg_attribute` of a database CI built from
+the 19 migrations, and the six refusal probes were compared with the wording of
+CI's own `postgres:16` — so `column-shapes.ts` quotes a message this repository
+has seen a real database produce on a machine that is not this one.
