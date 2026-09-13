@@ -210,17 +210,37 @@ export class PgDeliveryStore implements DeliveryStore {
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `update event_delivery set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                                 claimed_at = $1,
-                                 claim_token = $4
-       where delivery_id in (
+      // The batch is returned in the order it was claimed.
+      //
+      // Milestone 22: the selection below has always been ordered, but
+      // `update ... returning` hands rows back in whatever order it updated
+      // them — a heap scan — so the worker processed the batch in storage
+      // order while the reference backend processed it in due order. The two
+      // agreed only while rows were inserted in the order they came due. The
+      // rank is carried out of the selection because the update overwrites
+      // `next_attempt_at` with the lease expiry, so the due order cannot be
+      // recovered afterwards.
+      `with due as (
          select delivery_id from event_delivery
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
-         order by next_attempt_at, created_at
+         order by next_attempt_at, created_at, delivery_id
          limit $2
          for update skip locked
+       ),
+       ranked as (
+         select d.delivery_id as due_id,
+                row_number() over (order by e.next_attempt_at, e.created_at, e.delivery_id) as due_rank
+         from due d join event_delivery e on e.delivery_id = d.delivery_id
+       ),
+       claimed as (
+         update event_delivery set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                                   claimed_at = $1,
+                                   claim_token = $4
+         from ranked r
+         where event_delivery.delivery_id = r.due_id
+         returning r.due_rank as due_rank, ${DEL_SELECT_COLUMNS}
        )
-       returning ${DEL_SELECT_COLUMNS}`,
+       select ${DEL_SELECT_COLUMNS} from claimed order by due_rank`,
       // One token for the batch; see `PgOutbox.claimDue` for why per-row would
       // cost one statement per row and refuse nothing extra.
       [iso(now), limit, String(leaseMs), newClaimToken()],
@@ -258,7 +278,7 @@ export class PgDeliveryStore implements DeliveryStore {
          -- not a total order over rows that became due in the same millisecond,
          -- so which rows a recovery run picked was left to the plan (milestone
          -- 21). The reference backend spells the same two keys.
-         order by next_attempt_at, created_at
+         order by next_attempt_at, created_at, delivery_id
          limit $2
          for update skip locked
        )

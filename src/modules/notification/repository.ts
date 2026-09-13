@@ -10,6 +10,7 @@ import type {
   NotificationStatus,
 } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { descending, orderedBy } from "../../platform/persistence/list-order.js";
 
 /** Result of one claim: the row as the worker now owns it, with its token. */
 export interface ClaimedNotification extends Notification {
@@ -179,23 +180,29 @@ export class InMemoryNotificationStore implements NotificationStore {
     eventType: string,
     organizationId: string | null,
   ): Promise<NotificationRecipient[]> {
-    return [...this.recipients.values()].filter(
-      (r) =>
-        r.active &&
-        r.event_type === eventType &&
+    return orderedBy(
+      [...this.recipients.values()].filter(
+        (r) =>
+          r.active &&
+          r.event_type === eventType &&
         // Platform-wide recipients match every tenant; scoped ones only their
         // own. An event with no tenant scope reaches the platform-wide list
         // only, which is why `organizationScope` returning null is not silent
         // data loss but a narrower audience.
-        (r.organization_id === null || r.organization_id === organizationId),
+          (r.organization_id === null || r.organization_id === organizationId),
+      ),
+      (r) => r.created_at,
+      (r) => r.recipient_id,
     );
   }
 
   async listRecipients(organizationId?: string | null): Promise<NotificationRecipient[]> {
     const all = [...this.recipients.values()];
-    return organizationId === undefined
-      ? all
-      : all.filter((r) => r.organization_id === organizationId);
+    return orderedBy(
+      organizationId === undefined ? all : all.filter((r) => r.organization_id === organizationId),
+      (r) => r.created_at,
+      (r) => r.recipient_id,
+    );
   }
 
   async setRecipientActive(recipientId: string, active: boolean): Promise<void> {
@@ -235,10 +242,17 @@ export class InMemoryNotificationStore implements NotificationStore {
   }
 
   async claimDue(now: Date, limit: number, leaseMs: number): Promise<ClaimedNotification[]> {
-    const due = [...this.notifications.values()]
-      .filter((n) => n.status === "pending" && new Date(n.next_attempt_at) <= now)
-      .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
-      .slice(0, limit);
+    // Due order with the same explicit tiebreak the SQL uses (milestone 22).
+    // Sorting by `next_attempt_at` alone left rows queued in the same
+    // millisecond to the Map's insertion order, which is not an order.
+    const due = orderedBy(
+      [...this.notifications.values()].filter(
+        (n) => n.status === "pending" && new Date(n.next_attempt_at) <= now,
+      ),
+      (n) => n.next_attempt_at,
+      (n) => n.created_at,
+      (n) => n.notification_id,
+    ).slice(0, limit);
     const claimed: ClaimedNotification[] = [];
     for (const notification of due) {
       // Written before returning, in the same synchronous stretch as the read.
@@ -260,9 +274,16 @@ export class InMemoryNotificationStore implements NotificationStore {
   }
 
   async reclaimExpired(now: Date, maxAttempts: number, limit: number): Promise<number> {
-    const expired = [...this.notifications.values()]
-      .filter((n) => n.status === "processing" && new Date(n.next_attempt_at) <= now)
-      .slice(0, limit);
+    // Longest-abandoned claim first, not insertion order: with a limit, the
+    // order decides which crashed worker's rows are recovered (milestone 22).
+    const expired = orderedBy(
+      [...this.notifications.values()].filter(
+        (n) => n.status === "processing" && new Date(n.next_attempt_at) <= now,
+      ),
+      (n) => n.next_attempt_at,
+      (n) => n.created_at,
+      (n) => n.notification_id,
+    ).slice(0, limit);
     for (const notification of expired) {
       const exhausted = notification.attempts >= maxAttempts;
       putRow("notification", this.notifications, notification.notification_id, {
@@ -374,17 +395,25 @@ export class InMemoryNotificationStore implements NotificationStore {
   }
 
   async forEvent(eventId: string): Promise<Notification[]> {
-    return [...this.notifications.values()].filter((n) => n.event_id === eventId);
+    return orderedBy(
+      [...this.notifications.values()].filter((n) => n.event_id === eventId),
+      (n) => n.created_at,
+      (n) => n.notification_id,
+    );
   }
 
   async byStatus(
     status: NotificationStatus,
     organizationId?: string | null,
   ): Promise<Notification[]> {
-    return [...this.notifications.values()].filter(
-      (n) =>
-        n.status === status &&
-        (organizationId === undefined || n.organization_id === organizationId),
+    return orderedBy(
+      [...this.notifications.values()].filter(
+        (n) =>
+          n.status === status &&
+          (organizationId === undefined || n.organization_id === organizationId),
+      ),
+      (n) => n.created_at,
+      (n) => n.notification_id,
     );
   }
 
@@ -396,8 +425,13 @@ export class InMemoryNotificationStore implements NotificationStore {
       rows = rows.filter((n) => n.organization_id === filter.organization_id);
     }
     if (filter.status) rows = rows.filter((n) => n.status === filter.status);
-    rows.sort((a, b) => b.created_at.localeCompare(a.created_at));
-    return rows.slice(0, filter.limit ?? 100);
+    // Newest first, then by id: `order by created_at desc` alone is not a total
+    // order, and this listing takes a `limit`, so the tie decided which rows a
+    // caller saw at all (milestone 22).
+    return orderedBy(rows, descending((n) => n.created_at), descending((n) => n.notification_id)).slice(
+      0,
+      filter.limit ?? 100,
+    );
   }
 
   async counts(organizationId?: string | null): Promise<Record<string, number>> {

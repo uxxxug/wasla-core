@@ -222,7 +222,7 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
     ownerId: string,
   ): Promise<readonly Subscription[]> {
     const result = await this.db().query(
-      `SELECT * FROM subscription WHERE owner_type = $1 AND owner_id = $2 ORDER BY created_at`,
+      `SELECT * FROM subscription WHERE owner_type = $1 AND owner_id = $2 ORDER BY created_at, subscription_id`,
       [ownerType, ownerId],
     );
     return result.rows.map((row) => this.toSubscription(row));
@@ -232,7 +232,7 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
     statuses: readonly SubscriptionStatus[],
   ): Promise<readonly Subscription[]> {
     const result = await this.db().query(
-      `SELECT * FROM subscription WHERE status = ANY($1::text[]) ORDER BY created_at`,
+      `SELECT * FROM subscription WHERE status = ANY($1::text[]) ORDER BY created_at, subscription_id`,
       [[...statuses]],
     );
     return result.rows.map((row) => this.toSubscription(row));
@@ -395,7 +395,7 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
 
   async listUsage(periodId: string): Promise<readonly UsageRecord[]> {
     const result = await this.db().query(
-      `SELECT * FROM usage_record WHERE period_id = $1 ORDER BY recorded_at`,
+      `SELECT * FROM usage_record WHERE period_id = $1 ORDER BY recorded_at, usage_id`,
       [periodId],
     );
     return result.rows.map((row) => this.toUsage(row));

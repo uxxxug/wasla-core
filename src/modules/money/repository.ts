@@ -8,6 +8,7 @@ import { assertBalanced } from "./domain.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
 import { assertColumns } from "../../platform/persistence/column-shapes.js";
 import { assertRow, putRow, type Row } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 export interface MoneyRepository {
   insertWallet(wallet: Wallet, scope: TransactionScope): Promise<void>;
@@ -242,10 +243,20 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     return [...this.authorizations.values()].find((item) => item.business_reference === reference);
   }
   async listAuthorizations(walletId: string): Promise<readonly PaymentAuthorization[]> {
-    return [...this.authorizations.values()].filter((item) => item.wallet_id === walletId);
+    // Same keys as the SQL (milestone 22). Insertion order agreed with
+    // `created_at` only as long as nothing inserted a row out of order.
+    return orderedBy(
+      [...this.authorizations.values()].filter((item) => item.wallet_id === walletId),
+      (item) => item.created_at,
+      (item) => item.authorization_id,
+    );
   }
   async allAuthorizations(): Promise<readonly PaymentAuthorization[]> {
-    return [...this.authorizations.values()];
+    return orderedBy(
+      this.authorizations.values(),
+      (item) => item.created_at,
+      (item) => item.authorization_id,
+    );
   }
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.assertAuthorizationShape(authorization);
@@ -296,6 +307,10 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     return [...this.ledger.values()].find((item) => item.business_reference === reference);
   }
   async transactions(): Promise<readonly LedgerTransaction[]> {
-    return [...this.ledger.values()];
+    return orderedBy(
+      this.ledger.values(),
+      (item) => item.occurred_at,
+      (item) => item.transaction_id,
+    );
   }
 }

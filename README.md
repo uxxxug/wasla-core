@@ -41,10 +41,10 @@ package, no cross-database access.
 | Notifications: recipients, tenant-scoped fan-out, rendering, dispatcher with leases | implemented; provider delivery confirmation missing (D-8) |
 | Reputation: append-only signals, exactly-once ingestion, retraction marker, standing derived on every read | implemented; no producer publishes `market.review.*` yet, and weighting/decay/thresholds are undecided (B-31…B-34) |
 
-**595 tests** pass in the dependency-free default run and **1125** with
+**599 tests** pass in the dependency-free default run and **1162** with
 `DATABASE_URL` set, because the database-backed files stop being skipped and the
 dual-backend suites run their Postgres half. (The line has read 385/687, then
-529/976, then 550/1015, then 557/1026, then 574/1047, then 584/1063, then 589/1075; the
+529/976, then 550/1015, then 557/1026, then 574/1047, then 584/1063, then 589/1075, then 595/1125; the
 counts are updated rather than
 removed, and the earlier pairs are kept in this parenthesis so the growth stays
 auditable.)

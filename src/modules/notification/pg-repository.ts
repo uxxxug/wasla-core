@@ -225,20 +225,40 @@ export class PgNotificationStore implements NotificationStore {
    */
   async claimDue(now: Date, limit: number, leaseMs: number): Promise<ClaimedNotification[]> {
     const result = await this.pool.query<NotificationRow>(
-      `update notification set
-         status = 'processing',
-         attempts = attempts + 1,
-         claim_token = $4,
-         claimed_at = $1,
-         next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
-       where notification_id in (
+      // The batch is returned in the order it was claimed.
+      //
+      // Milestone 22: the selection below has always been ordered, but
+      // `update ... returning` hands rows back in whatever order it updated
+      // them — a heap scan — so the worker processed the batch in storage
+      // order while the reference backend processed it in due order. The two
+      // agreed only while rows were inserted in the order they came due. The
+      // rank is carried out of the selection because the update overwrites
+      // `next_attempt_at` with the lease expiry, so the due order cannot be
+      // recovered afterwards.
+      `with due as (
          select notification_id from notification
          where status = 'pending' and next_attempt_at <= $1
-         order by next_attempt_at, created_at
+         order by next_attempt_at, created_at, notification_id
          limit $2
          for update skip locked
+       ),
+       ranked as (
+         select d.notification_id as due_id,
+                row_number() over (order by n.next_attempt_at, n.created_at, n.notification_id) as due_rank
+         from due d join notification n on n.notification_id = d.notification_id
+       ),
+       claimed as (
+         update notification set
+           status = 'processing',
+           attempts = attempts + 1,
+           claim_token = $4,
+           claimed_at = $1,
+           next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond')
+         from ranked r
+         where notification.notification_id = r.due_id
+         returning r.due_rank as due_rank, ${COLUMNS}
        )
-       returning ${COLUMNS}`,
+       select ${COLUMNS} from claimed order by due_rank`,
       [iso(now), limit, String(leaseMs), `pg-${randomUUID()}`],
     );
     return result.rows.map((row) => {
@@ -261,7 +281,10 @@ export class PgNotificationStore implements NotificationStore {
        where n.notification_id in (
          select notification_id from notification
          where status = 'processing' and next_attempt_at <= $1
-         order by next_attempt_at
+         -- Two keys: with a limit, ordering by next_attempt_at alone is not a
+         -- total order over rows abandoned in the same millisecond, so which
+         -- claims a recovery run freed was left to the plan (milestone 22).
+         order by next_attempt_at, created_at, notification_id
          limit $2
          for update skip locked
        )`,
@@ -355,7 +378,7 @@ export class PgNotificationStore implements NotificationStore {
 
   async forEvent(eventId: string): Promise<Notification[]> {
     const result = await this.pool.query<NotificationRow>(
-      `select ${COLUMNS} from notification where event_id = $1 order by created_at`,
+      `select ${COLUMNS} from notification where event_id = $1 order by created_at, notification_id`,
       [eventId],
     );
     return result.rows.map(toNotification);
@@ -367,7 +390,7 @@ export class PgNotificationStore implements NotificationStore {
   ): Promise<Notification[]> {
     if (organizationId === undefined) {
       const all = await this.pool.query<NotificationRow>(
-        `select ${COLUMNS} from notification where status = $1 order by created_at`,
+        `select ${COLUMNS} from notification where status = $1 order by created_at, notification_id`,
         [status],
       );
       return all.rows.map(toNotification);
@@ -375,7 +398,7 @@ export class PgNotificationStore implements NotificationStore {
     const result = await this.pool.query<NotificationRow>(
       `select ${COLUMNS} from notification
        where status = $1 and organization_id is not distinct from $2
-       order by created_at`,
+       order by created_at, notification_id`,
       [status, organizationId],
     );
     return result.rows.map(toNotification);
@@ -388,7 +411,9 @@ export class PgNotificationStore implements NotificationStore {
       `select ${COLUMNS} from notification
        where ($1::boolean or organization_id is not distinct from $2)
          and ($3::text is null or status = $3)
-       order by created_at desc
+       -- Total, and with a limit that matters: newest first, then by id, so a
+       -- page is not decided by the plan when two rows share a timestamp.
+       order by created_at desc, notification_id desc
        limit $4`,
       [
         filter.organization_id === undefined,

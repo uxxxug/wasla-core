@@ -143,17 +143,37 @@ export class PgInboundEventStore implements InboundEventStore {
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `update inbound_event set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                                claimed_at = $1,
-                                claim_token = $4
-       where event_id in (
+      // The batch is returned in the order it was claimed.
+      //
+      // Milestone 22: the selection below has always been ordered, but
+      // `update ... returning` hands rows back in whatever order it updated
+      // them — a heap scan — so the worker processed the batch in storage
+      // order while the reference backend processed it in due order. The two
+      // agreed only while rows were inserted in the order they came due. The
+      // rank is carried out of the selection because the update overwrites
+      // `next_attempt_at` with the lease expiry, so the due order cannot be
+      // recovered afterwards.
+      `with due as (
          select event_id from inbound_event
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
-         order by next_attempt_at, received_at
+         order by next_attempt_at, received_at, event_id
          limit $2
          for update skip locked
+       ),
+       ranked as (
+         select d.event_id as due_id,
+                row_number() over (order by i.next_attempt_at, i.received_at, i.event_id) as due_rank
+         from due d join inbound_event i on i.event_id = d.event_id
+       ),
+       claimed as (
+         update inbound_event set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                                  claimed_at = $1,
+                                  claim_token = $4
+         from ranked r
+         where inbound_event.event_id = r.due_id
+         returning r.due_rank as due_rank, ${SELECT_COLUMNS}
        )
-       returning ${SELECT_COLUMNS}`,
+       select ${SELECT_COLUMNS} from claimed order by due_rank`,
       // One token for the batch; see `PgOutbox.claimDue` for why per-row would
       // cost one statement per row and refuse nothing extra.
       [iso(now), limit, String(leaseMs), newClaimToken()],
@@ -188,7 +208,7 @@ export class PgInboundEventStore implements InboundEventStore {
          -- not a total order over rows that became due in the same millisecond,
          -- so which rows a recovery run picked was left to the plan (milestone
          -- 21). The reference backend spells the same two keys.
-         order by next_attempt_at, received_at
+         order by next_attempt_at, received_at, event_id
          limit $2
          for update skip locked
        )

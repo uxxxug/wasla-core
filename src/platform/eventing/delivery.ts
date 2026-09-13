@@ -298,7 +298,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       (d) => d.status === "pending" && d.claimed_at === null && new Date(d.next_attempt_at) <= now,
     );
     // Due order with an explicit tiebreak, shared with Postgres (milestone 21).
-    const due = inDueOrder(candidates, (row) => row.created_at).slice(0, limit);
+    const due = inDueOrder(candidates, (row) => row.created_at, (row) => row.delivery_id).slice(0, limit);
     // The claimed rows, not the pre-claim ones: Postgres returns the updated
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
@@ -323,7 +323,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     // Due order (milestone 21): `limit` makes the order a selection.
-    for (const delivery of inDueOrder(this.deliveries.values(), (row) => row.created_at)) {
+    for (const delivery of inDueOrder(this.deliveries.values(), (row) => row.created_at, (row) => row.delivery_id)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (delivery.status !== "pending" || delivery.claimed_at === null) continue;
       if (new Date(delivery.next_attempt_at).getTime() > now.getTime()) continue;
