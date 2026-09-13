@@ -139,7 +139,7 @@ export class PgDeliveryStore implements DeliveryStore {
     const result = await this.pool.query<SubscriptionRow>(
       `select ${SUB_COLUMNS} from event_subscription
        where event_type = $1 and active
-       order by subscriber`,
+       order by subscriber collate "C", subscription_id`,
       [eventType],
     );
     return result.rows.map(toSubscription);
@@ -147,7 +147,7 @@ export class PgDeliveryStore implements DeliveryStore {
 
   async listSubscriptions(): Promise<EventSubscription[]> {
     const result = await this.pool.query<SubscriptionRow>(
-      `select ${SUB_COLUMNS} from event_subscription order by subscriber, event_type`,
+      `select ${SUB_COLUMNS} from event_subscription order by subscriber collate "C", event_type collate "C", subscription_id`,
     );
     return result.rows.map(toSubscription);
   }
@@ -374,9 +374,16 @@ export class PgDeliveryStore implements DeliveryStore {
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
+    return this.byStatuses([status]);
+  }
+
+  /** See `DeliveryStore.byStatuses`. One query, so one order over the union. */
+  async byStatuses(statuses: readonly DeliveryStatus[]): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_SELECT_COLUMNS} from event_delivery where status = $1 order by created_at`,
-      [status],
+      `select ${DEL_SELECT_COLUMNS} from event_delivery
+       where status = any($1::text[])
+       order by created_at, delivery_id`,
+      [[...statuses]],
     );
     return result.rows.map(toDelivery);
   }
@@ -442,7 +449,7 @@ export class PgDeliveryStore implements DeliveryStore {
 
   async forEvent(eventId: string): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_SELECT_COLUMNS} from event_delivery where event_id = $1 order by created_at`,
+      `select ${DEL_SELECT_COLUMNS} from event_delivery where event_id = $1 order by created_at, delivery_id`,
       [eventId],
     );
     return result.rows.map(toDelivery);
@@ -450,7 +457,7 @@ export class PgDeliveryStore implements DeliveryStore {
 
   async all(): Promise<EventDelivery[]> {
     const result = await this.pool.query<DeliveryRow>(
-      `select ${DEL_SELECT_COLUMNS} from event_delivery order by created_at`,
+      `select ${DEL_SELECT_COLUMNS} from event_delivery order by created_at, delivery_id`,
     );
     return result.rows.map(toDelivery);
   }

@@ -81,25 +81,26 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Milestone 23 — selection parity for the HTTP read surface — is reserved** on
-branch `http-selection-parity`, taken from `main` at `59da72e` (the merge of
-milestone 22). Scope, fixed before any file was touched: every route that
-returns a list, the query parameters those routes parse, and the order in which
-the rows a store selected reach the caller. No new route, no new pagination
-contract, no change to what a route is permitted to return.
+Nothing is reserved. Milestone 23 (selection parity for the HTTP read surface)
+merged from branch `http-selection-parity`; the account is in
+`docs/http-selection-parity.md` and the cycle record is at the end of this file.
 
-The re-measurement that opened this cycle **corrected the milestone 22 record**
+The re-measurement that opened milestone 23 **corrected the milestone 22 record**
 before reserving anything, and the correction is additive: milestone 22's own
 text says it gated "every other listing in the repository", and it did not. It
 gated the *module* repositories. The **platform** stores — the outbox, the
-inbound-event store and the delivery store — still return `Map` insertion order
+inbound-event store and the delivery store — still returned `Map` insertion order
 from `all`, `byStatus`, `forEvent`, `listSubscriptions` and `subscriptionsFor`
-while their SQL sorts, and two of those are reachable from an HTTP route
-(`GET /v1/event-subscriptions`, `GET /v1/event-deliveries/undelivered`). Eight
-of the Postgres orders they are compared against are not total. That is the
-same defect family milestone 22 closed, in the layer milestone 22 did not read,
-and it is inside this cycle's scope because the HTTP surface is where a caller
-observes it.
+while their SQL sorted, two of those are reachable from an HTTP route
+(`GET /v1/event-subscriptions`, `GET /v1/event-deliveries/undelivered`), and
+eight of the Postgres orders they are compared against were not total. That was
+the same defect family milestone 22 closed, in the layer milestone 22 did not
+read. Milestone 23 closed it.
+
+**Milestone 24 is open and unreserved**, and it exists because milestone 23
+measured it rather than because anybody predicted it: a query parameter no
+handler reads is still ignored silently, so `?limit=abc` on a route with no
+`limit` returns 200 and every row.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -107,7 +108,7 @@ and passes there.
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
 against both. Migrations 0001-0019 are applied and verified on real engines
-(PostgreSQL 18.6 locally in the latest cycle, 18.4 and 17.6 managed earlier),
+(PostgreSQL 18.4 locally in the latest cycle, 18.6, 18.4 and 17.6 earlier),
 rollbacks included - 0009 and 0011 verified as *refusing* to roll back while
 money history would be falsified by doing so.
 
@@ -141,7 +142,8 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 20 | Read-path parity: what a store returns, not only what it accepts | **Complete** | Six cycles gated writes; nothing gated reads, and the three divergences the previous three cycles found — `outbox.created_at`, `inbound_event.processed_at`, `rate_limit_counter.updated_at` — were each found *sideways*, by a gate built for another purpose, because a column one backend writes and no read returns is a difference nothing in the suite can observe. Two were closed by adding a name to a `SELECT_COLUMNS` string and nothing kept those strings complete. `tests/read-path-parity.test.ts` closes it in two halves that do not subsume each other. **Static:** every `select` and every `insert`/`update`/`delete … returning` in `src/` is parsed with the adapters' column-list constants expanded to a fixed point, and compared with `COLUMN_SHAPES` in both directions — an unreachable column must be declared by name with a reason, a read naming a column the schema lacks fails, and a declaration that has stopped being true fails, so the excuse list cannot rot. Of 263 columns, all but six are surfaced by some read and there are no ghosts. The six are the two runtime tables whose stores return no record at all, and the bar is that narrow deliberately: "no caller needs it yet" is how `created_at` stayed invisible for seventeen migrations. **Behavioural:** outbox, inbound, audit and `event_delivery` are written and read back through *both* backends and compared — every key path at every depth, then every value, under one fixed clock and one set of ids. The inbound probe claims and processes the row before reading it, because a probe that reads a row whose interesting column is null cannot tell a backend that surfaces the column from one that does not; with the first draft, dropping `processed_at` from the select list was caught by the static half alone. Six falsifications, six caught, including both historical divergences restored on purpose. Measured: 589/71 without a database, 1075 with one |
 | 21 | Selection parity: what a store selects *by* | **Complete** | The seventh parity cycle. Milestones 18–20 gated what a row *contains* and what a read *returns*; none of them can see a **predicate** — which rows a query picks out of many, and in which order. Every queue operation in CORE is written twice, as SQL and as TypeScript, and `claimDue` and `reclaimExpired` are where B-22, B-24 and B-25 all came from, so this is the family with the worst history here. `tests/selection-parity.test.ts` builds the same 18-row population twice — through the stores' own APIs, never by inserting behind the store's back — drives it into real states with `claimDue`/`markPublished`/`markFailed`/`markDead`, and compares the **ordered id list** of ~40 selections across both backends. Each case declares how many rows it expects and that expectation is asserted on the reference backend without a database, so a case that silently stops selecting anything fails instead of passing vacuously; every case gets a freshly built population, so the mutating selections cannot leak into each other; and a premise test proves the two backends start alike. **What it found:** `InMemoryOutbox.claimDue` did not sort at all — it walked a `Map`'s insertion order while Postgres ordered by `(next_attempt_at, created_at)`, so with one row failed and re-scheduled the two backends claimed *different rows for the same call*. All three `reclaimExpired` implementations had the same gap, and the Postgres ones ordered by `next_attempt_at` alone, which is not a total order under a limit. Fixed at the root: one shared comparator, `src/platform/eventing/queue-order.ts`, used by all three reference stores in both operations, and the same two keys spelled in the three Postgres recovery statements. A batch claim stamps one lease expiry on every row it takes, so the ordinary cases could not see recovery order at all — a staggered-lease scenario was added where the middle row is failed and re-claimed later, making due order and insertion order disagree. Seven falsifications, seven caught; F2 needed a new case first, because at every instant the existing cases claimed at, the held row's lease had not yet run out and the `claimed_at` half of the predicate was doing nothing observable. Measured: 595/114 without a database, 1125 with one |
 | 22 | Selection parity for the module read paths | **Complete** | The eighth parity cycle, and the second to gate a predicate. `tests/module-selection-parity.test.ts` builds one population twice, through the repositories' own APIs, with **every batch inserted in the reverse of the order its listing must return** - newest-first for anything sorted by a timestamp, descending code for plans and regions, descending name for cities and areas, with deliberate ties on timestamps and names. That inversion is the measurement: a store returning insertion order now returns exactly the reverse of the right answer, and a non-total sort key now has a tie to get wrong. 37 tests: a declared row count per case asserted on the reference backend without a database, a declared order per ordered case computed from the fixture definitions rather than read back out of a store (so "both backends agree" cannot mean "both are wrong in the same way"), a cross-backend ordered-id comparison per case, a premise test, a staggered-lease recovery scenario for the notification dispatcher, and the claimed-batch order gate below. **What it found:** nineteen reference listings returned `Map` insertion order while their SQL sorted (notification x7, money x3, subscription x5, identity x3, organization, fulfillment, and all four geography listings); seven Postgres orders were not total (the five notification reads, and the subscription owner/status and usage reads), which under `notification.list`'s `limit` left the page to the plan; and - the discovery no static reading would have produced - **all four lease queues returned their claimed batch in storage order**, because `update ... returning` hands rows back in the order it updated them, not the order the `select` chose. The selection was right and the batch a worker then processed was in heap order, agreeing with due order only while rows were inserted in the order they came due, which is what every earlier fixture did; milestone 21's own gate passed for that reason. Fixed at the root: `src/platform/persistence/list-order.ts` states the doctrine once (a reference listing sorts by the same keys as its SQL, and the key list must be total, ending with the primary key), `queue-order.ts` gained the row id as a third key, and all four claims now carry the due rank out of the selection in a CTE and sort the returned batch by it - the update overwrites `next_attempt_at` with the lease expiry, so the due order cannot be recovered afterwards. Five falsifications, five caught. Full account in `docs/module-selection-parity.md`. Measured: 599/147 without a database, 1162 with one |
-| 23 | Selection parity for the HTTP read surface | **Reserved and in progress** (branch `http-selection-parity`) | Milestones 18-22 gated the persistence layer: what a row contains, what a read returns, which rows a store selects and in what order. None of them reach the layer above. A route that pages, filters or sorts does that work in `http.ts` - `list` handlers translate query parameters into repository calls, cap limits, and in places re-sort or re-filter what they get back - and nothing compares the rows a **route** returns against the rows its store selected. The mechanism is reusable but the population is not: the inverted-insertion fixture in `tests/module-selection-parity.test.ts` proves a store's order, while a route's order also depends on parameter parsing, default limits, and tenant scoping, so the cycle has to decide whether to drive the population through the HTTP surface itself (slower, but gates the parsing too) or seed through the stores and read through the routes. Scope note from milestone 22: the defect class that cycle found - a correct selection whose *result order* is discarded by the next step - is exactly what an HTTP handler can reintroduce, by collecting a store's ordered rows into a map or a set before serialising them |
+| 23 | Selection parity for the HTTP read surface | **Complete, and self-enforcing from here** | The ninth parity cycle and the third to gate a predicate: milestones 21 and 22 proved a **store** selects the same rows in the same order on both backends, and neither reads the layer a caller talks to. `tests/http-selection-parity.test.ts` seeds one population through the stores - several of these rows have no route that writes them - and reads it back through `core.router.handle`, the real router with real authorisation and real serialisation. **49 tests**: 19 listing cases each declaring a row count *and* an order computed from the fixture definitions rather than read out of a store, 22 refusal cases asserted on both backends, a coverage gate over the router's own `registrations()` so a `GET` added later is either measured or excused by name, and a premise test that asserts the run is comparing the halves it claims to (`["memory", "postgres"]` when `DATABASE_URL` is set), so a run that lost its Postgres half cannot report the same green count. **Five defect classes, all fixed at the root.** (1) The three platform stores returned `Map` insertion order while their SQL sorted - 7 of 11 probed listings disagreed across the backends before the fix, which is the correction to milestone 22's overclaim. (2) `SubscriptionRegistry.undelivered()` concatenated two ordered queries, so every pending delivery preceded every dead one regardless of age and **both backends were wrong in the same way** - invisible to a cross-backend comparison alone; it is one `status = any($1::text[]) order by created_at, delivery_id` query now. (3) Eight non-total SQL orders completed with a primary-key tiebreak. (4) Route parsing accepted what it then ignored: a repeated parameter kept the first value and dropped the rest, `?organization_id=` filtered on the empty string and returned a count of 0 indistinguishable from an empty tenant, and `Number()` accepted `0x10`, `1e3`, `" 5"`, `+5` and `5.0`. `src/platform/http/query.ts` is the single strict reader now and both local ad-hoc parsers are gone. (5) The discovery: **`localeCompare` matches no Postgres collation.** The local engine's databases are `C` and CI's `postgres:16` is `en_US.utf8`, so with `localeCompare` on the reference side the text order CORE produced depended on where it was deployed. `compareValues` compares code units, matching `C`, and every text order it is compared against is pinned with `collate "C"`. Ten falsifications, ten caught - two only after the **gate** was strengthened: dropping a `delivery_id` tiebreak passed until two rows shared an instant and were inserted in the opposite order to their ids, and removing a vocabulary guard passed until an *unknown* value was probed, because an unknown status had been answered with an empty page. What the cycle does not claim is recorded in `docs/http-selection-parity.md`, including the finding it declined to half-build: see milestone 24. Measured: 648/148 without a database, 1211 with one |
+| 24 | Read routes refuse only what they read | **Open, measured but not started** | Milestone 23 found this while strengthening its own refusal list, and left it deliberately: a query parameter no handler reads is ignored silently. `GET /v1/notification-recipients?limit=abc` returns 200 and every row, because that route has no `limit` and nothing rejects a parameter nobody read - a caller who believes they bounded the response gets everything, and a caller who misspells `organization_id` gets another tenant's scope-free answer rather than a 400. Milestone 23 closed the *values* a route accepts for the parameters it does read; this closes the *set* of parameters. It is a change to what every read route is permitted to accept, which is why it was not folded into a cycle scoped to selection: it needs a per-route declaration of allowed parameters, a strict reader that refuses anything outside it, and a coverage gate asserting every registered `GET` has such a declaration - the same shape as milestone 23's `registrations()` gate, one level down. The prerequisite is already in place: every read route now reads its parameters through `src/platform/http/query.ts`, so there is exactly one place the check belongs |
 
 ### What was claimed complete and actually is
 
@@ -5308,3 +5310,92 @@ passed in the cluster file — 1162 in total, matching the local measurement
 exactly. `tests/migration-0011-lifecycle.test.ts` passed in CI in the same
 combined run where it is reported FAIL locally, which keeps that oddity a
 local-environment observation rather than a defect in the file.
+
+## Cycle 2026-09-13 (eleventh) — selection parity for the HTTP read surface
+
+The ninth parity cycle. Full account in `docs/http-selection-parity.md`.
+
+**Why it exists.** Milestones 18-22 gated the persistence layer: what a row
+contains, what a read returns, which rows a store selects and in what order. None
+of them reach the layer a caller actually talks to. A route decides which store
+method to call, what to pass it, what to do with a parameter that is missing or
+repeated or malformed, and what to hand back — and milestone 22's own finding was
+that a correct selection can be destroyed by the step after it.
+
+**The correction this cycle opened with.** Milestone 22's record claims it gated
+"every other listing in the repository". Re-measuring found it had gated the
+*module* repositories only: the outbox, the inbound store and the delivery store
+still walked a `Map` while their SQL sorted, and two of those listings are
+reachable over HTTP. Of eleven probed listings **seven disagreed between the
+backends**. The overclaiming sentence stands where it was written, with the
+correction beside it — this is the third time a cycle has opened by falsifying
+the previous cycle's own summary, and each time the correction has been additive.
+
+**How the population is honest.** Seeded **through the stores** and read
+**through `core.router.handle`**. Seeding over HTTP was considered and rejected:
+there is no route that writes a delivery, an inbound event or a reputation
+signal, so an API-built population would have shrunk the gate to the subset of
+state the API can construct. Reading through the router rather than calling
+handlers keeps authorisation, routing and serialisation inside the measurement.
+Fixed ids, a fixed clock, two tenants, and deliberate ties on every timestamp a
+listing sorts by.
+
+**The four defect classes found by comparison.** The three platform reference
+stores returned insertion order. `undelivered()` concatenated
+`byStatus("pending")` and `byStatus("dead")`, so the oldest stuck delivery was
+never first — and **both backends produced the same wrong answer**, which is the
+one class a cross-backend comparison cannot see on its own and the reason each
+case declares its expected order independently. Eight SQL orders were not total.
+And the routes read parameters with `query.get()` and `Number()`: a repeated
+parameter silently kept the first value, `?organization_id=` filtered on `""` and
+returned a count of 0 indistinguishable from an empty tenant, and `Number()`
+accepted `0x10`, `1e3`, `" 5"`, `+5` and `5.0`.
+
+**The discovery.** `localeCompare` matches no Postgres collation. Measured on the
+same eight strings, Postgres `C` and JavaScript's `<` agree exactly
+(`MOVE-c Move-b "move a" move-A move-a move1 move_a móve`) and `localeCompare`
+produces a different order entirely. The local engine's databases are `C`; CI's
+`postgres:16` service is `en_US.utf8`. So the text order CORE produced depended
+on where it was deployed, and a gate comparing the two could have been green on
+one machine and red on the other for a reason nothing in the repository recorded.
+Fixed on both sides at once: `compareValues` compares code units, and every text
+order in SQL that a reference listing is compared against is pinned with
+`collate "C"`.
+
+**The fixes are at the root.** One strict reader,
+`src/platform/http/query.ts`, replaced every `query.get()`/`Number()` pair in
+every read route and both local ad-hoc parsers were deleted, so a parameter rule
+has one home. `DeliveryStore.byStatuses` replaced the concatenation.
+`router.registrations()` is new so the coverage gate reads the router instead of
+a list somebody maintains.
+
+**Falsification.** Ten breaks, ten caught — but two of them only after the
+**gate** was strengthened, and those two are the useful entries. Dropping the
+`delivery_id` tiebreak from the SQL order passed: every undelivered row in the
+first fixture had a distinct `created_at`, so no tie existed to decide. Two rows
+were moved onto one instant, given different statuses so they also exercise the
+merged query, and **inserted in the opposite order to their ids** so heap order
+and the declared order disagree; then it failed. Removing the vocabulary guard
+from the notification `status` filter also passed: the refusal list probed empty
+and repeated values but never an *unknown* one, so an unknown status was accepted
+and answered with an empty page — "you have no failed notifications" in place of
+"that status does not exist". Two cases were added; then it failed. A gate that
+cannot be broken has usually not been aimed at anything.
+
+**What was measured and deliberately not fixed.** A query parameter no handler
+reads is still ignored: `?limit=abc` on `GET /v1/notification-recipients`
+returns 200 and every row. Refusing it changes what every read route is permitted
+to accept and needs a per-route parameter declaration plus a coverage gate over
+it, which is not selection parity. Reserved as **milestone 24** rather than
+half-built, quietly dropped, or bolted on at the end of a cycle scoped for
+something else.
+
+**Local measurement.** 648 passed / 147 skipped in the main file set without a
+database (plus 1 skipped in the cluster file); 1210 passed across 49 files and 1
+in the cluster file with `DATABASE_URL` set — 1211 in total, against a baseline
+of 1162, and the 49 new tests account for the difference exactly, so nothing
+regressed. Governance, contract, migration and roadmap checks pass; typecheck is
+clean. The known `tests/migration-0011-lifecycle.test.ts` oddity **did not
+reappear** this run: the file was reported passed in the combined run as well as
+standalone, which is recorded because it is a change in the observation, not
+because it is understood.

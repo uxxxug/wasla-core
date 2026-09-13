@@ -16,6 +16,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { compareValues, orderedBy } from "../persistence/list-order.js";
 import { putRow } from "../persistence/row-rules.js";
 import { inDueOrder } from "./queue-order.js";
 
@@ -179,7 +180,8 @@ export interface InboundEventStore {
 /** Shared ordering, so both backends sort identically. */
 export function compareInboundPosition(a: InboundRecord, b: InboundRecord): number {
   return (
-    a.received_at.localeCompare(b.received_at) || a.event.event_id.localeCompare(b.event.event_id)
+    compareValues(a.received_at, b.received_at) ||
+    compareValues(a.event.event_id, b.event.event_id)
   );
 }
 
@@ -203,8 +205,8 @@ export function matchesSelection(record: InboundRecord, selection: InboundSelect
   if (selection.after) {
     const after = selection.after;
     const position =
-      record.received_at.localeCompare(after.received_at) ||
-      event.event_id.localeCompare(after.event_id);
+      compareValues(record.received_at, after.received_at) ||
+      compareValues(event.event_id, after.event_id);
     if (position <= 0) return false;
   }
   return true;
@@ -373,12 +375,17 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     return true;
   }
 
+  /** `order by received_at, event_id`, the same keys as `PgInboundEventStore`. */
   async byStatus(status: InboundStatus): Promise<InboundRecord[]> {
-    return [...this.records.values()].filter((r) => r.status === status);
+    return (await this.all()).filter((r) => r.status === status);
   }
 
   async all(): Promise<InboundRecord[]> {
-    return [...this.records.values()];
+    return orderedBy(
+      this.records.values(),
+      (r) => r.received_at,
+      (r) => r.event.event_id,
+    );
   }
 
   async counts(): Promise<Record<string, number>> {

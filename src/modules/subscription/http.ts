@@ -1,9 +1,13 @@
 import { invalid } from "../../platform/errors.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
+import { enumParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { BillingInterval, SubscriptionOwnerType } from "./domain.js";
 import type { SubscriptionService } from "./service.js";
+
+/** The plan statuses `GET /v1/plans` may be filtered by. */
+const PLAN_STATUSES = ["draft", "active", "retired"] as const;
 
 function objectBody(ctx: RequestContext): Record<string, unknown> {
   if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
@@ -96,10 +100,7 @@ export function registerSubscriptionRoutes(
 
   router.get("/v1/plans", async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
-    const status = ctx.query?.get("status") ?? undefined;
-    if (status !== undefined && status !== "draft" && status !== "active" && status !== "retired") {
-      throw invalid("status must be draft, active or retired");
-    }
+    const status = enumParam(ctx.query, "status", PLAN_STATUSES);
     return { status: 200, body: { plans: await billing.listPlans(status) } };
   });
 

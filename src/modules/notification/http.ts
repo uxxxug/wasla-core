@@ -1,5 +1,6 @@
 import { invalid } from "../../platform/errors.js";
 import type { Router } from "../../platform/http/router.js";
+import { enumParam, limitParam, optionalParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { NotificationStatus } from "./domain.js";
@@ -61,7 +62,7 @@ export function registerNotificationRoutes(
 
   router.get("/v1/notification-recipients", async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const organizationId = ctx.query.get("organization_id") ?? undefined;
+    const organizationId = optionalParam(ctx.query, "organization_id");
     const items = await recipients.list(organizationId);
     return { status: 200, body: { count: items.length, items } };
   });
@@ -88,19 +89,12 @@ export function registerNotificationRoutes(
    */
   router.get("/v1/notifications", async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const status = ctx.query.get("status") ?? undefined;
-    if (status !== undefined && !STATUSES.includes(status as NotificationStatus)) {
-      throw invalid(`status must be one of ${STATUSES.join(", ")}`);
-    }
-    const organizationId = ctx.query.get("organization_id") ?? undefined;
-    const limitRaw = ctx.query.get("limit") ?? undefined;
-    const limit = limitRaw === undefined ? 100 : Number(limitRaw);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-      throw invalid("limit must be an integer between 1 and 500");
-    }
+    const status = enumParam(ctx.query, "status", STATUSES);
+    const organizationId = optionalParam(ctx.query, "organization_id");
+    const limit = limitParam(ctx.query, "limit", { default: 100, min: 1, max: 500 });
     const items = await reads.list({
       ...(organizationId === undefined ? {} : { organization_id: organizationId }),
-      ...(status === undefined ? {} : { status: status as NotificationStatus }),
+      ...(status === undefined ? {} : { status }),
       limit,
     });
     const summary = await reads.counts(organizationId);

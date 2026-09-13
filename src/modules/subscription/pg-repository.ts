@@ -118,8 +118,8 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
 
   async listPlans(status?: PlanStatus): Promise<readonly Plan[]> {
     const result = status
-      ? await this.db().query(`SELECT * FROM plan WHERE status = $1 ORDER BY code`, [status])
-      : await this.db().query(`SELECT * FROM plan ORDER BY code`);
+      ? await this.db().query(`SELECT * FROM plan WHERE status = $1 ORDER BY code COLLATE "C"`, [status])
+      : await this.db().query(`SELECT * FROM plan ORDER BY code COLLATE "C"`);
     return result.rows.map((row) => this.toPlan(row));
   }
 
@@ -142,7 +142,7 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
 
   async listGrants(planId: string): Promise<readonly PlanGrant[]> {
     const result = await this.db().query(
-      `SELECT * FROM plan_grant WHERE plan_id = $1 ORDER BY feature_key`,
+      `SELECT * FROM plan_grant WHERE plan_id = $1 ORDER BY feature_key COLLATE "C"`,
       [planId],
     );
     return result.rows.map((row) => this.toGrant(row));
