@@ -195,27 +195,40 @@ describe("declared request headers", () => {
   });
 
   it("has no other reader of request headers in src", () => {
+    // Two scans, because the first one alone was not enough. Written first as
+    // `headers\s*["name"]`, it passed a deliberate falsification that put the old
+    // reader back behind a cast — `(ctx.headers as unknown as Record<string,
+    // string>)["authorization"]` — where the word `headers` is no longer adjacent
+    // to the bracket. That is recorded as F7b in
+    // `docs/http-header-declaration.md`, and the second scan is what replaced it:
+    // **a declared header name may appear in `src` only as the argument of a
+    // declared read**, however the expression in front of it is written.
+    const declared = DECLARED_HEADERS.map((spec) => spec.name);
     const offenders: string[] = [];
     for (const path of sourceFiles("src")) {
-      const source = readCode(path);
       if (path.endsWith("platform/http/headers.ts")) continue;
-      // Indexing a header record by name. `router.ts` is allowed to pass
-      // `req.headers` into `handle` — that is the transport handing the request
-      // over — but not to read a name out of it.
+      const source = readCode(path);
       for (const match of source.matchAll(/headers\s*\[\s*["'`]([^"'`]+)["'`]\s*\]/g)) {
-        offenders.push(`${path}: headers[${match[1]}]`);
+        // CORE *writes* `retry-after` and `x-correlation-id` on responses, which
+        // is its own output rather than a read of the request.
+        if (match[1] === "retry-after" || match[1] === "x-correlation-id") continue;
+        offenders.push(`${path}: headers["${match[1]}"]`);
+      }
+      for (const name of declared) {
+        const quoted = new RegExp(`["'\`]${name.replace(/[-.]/g, "\\$&")}["'\`]`, "g");
+        for (const match of source.matchAll(quoted)) {
+          const at = match.index!;
+          const before = source.slice(Math.max(0, at - 24), at);
+          const after = source.slice(at + match[0].length, at + match[0].length + 1);
+          if (/\.(value|firstForwarded)\(\s*$/.test(before)) continue;
+          // An object key: how the router sets the response header of the same
+          // name, which is CORE's own record and not the caller's.
+          if (after === ":") continue;
+          offenders.push(`${path}: ${name} outside a declared reader`);
+        }
       }
     }
-    // The router still *writes* response headers by name, which is a different
-    // record; the scan above is scoped to reads by requiring a quoted name on a
-    // `headers[...]` expression, so a response write shows up here too and has to
-    // be distinguishable. The response names are the ones CORE itself sets.
-    const written = new Set(["x-correlation-id", "retry-after", "content-type"]);
-    const real = offenders.filter((entry) => {
-      const name = entry.slice(entry.indexOf("[") + 1, entry.lastIndexOf("]"));
-      return !written.has(name);
-    });
-    expect(real).toEqual([]);
+    expect(offenders).toEqual([]);
   });
 
   it("reads no header name that is not declared", () => {
