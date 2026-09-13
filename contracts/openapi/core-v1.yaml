@@ -42,6 +42,8 @@ paths:
       security: []
       responses:
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
           description: Process is alive
           content:
             application/json:
@@ -54,6 +56,8 @@ paths:
       security: []
       responses:
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
           description: Ready to serve, with pending outbox depth
           content:
             application/json:
@@ -85,11 +89,21 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Existing identity resolved
           content:
             application/json:
               schema: { $ref: "#/components/schemas/IdentityResolved" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Identity created
           content:
             application/json:
@@ -114,6 +128,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Session issued. The token is returned once and stored only as a hash.
           content:
             application/json:
@@ -133,6 +152,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Authenticated principal
           content:
             application/json:
@@ -154,7 +178,13 @@ paths:
                 session_id: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "204": { description: Revoked (idempotent) }
+        "204":
+          description: Revoked (idempotent)
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
   /v1/access/check:
     post:
       parameters:
@@ -176,6 +206,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Decision
           content:
             application/json:
@@ -207,6 +242,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Membership granted
           content:
             application/json:
@@ -230,6 +270,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Created
           content:
             application/json:
@@ -247,6 +292,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Organization
           content:
             application/json:
@@ -273,6 +323,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Wallet created
           content:
             application/json:
@@ -297,6 +352,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Balance in integer minor units
           content:
             application/json:
@@ -332,6 +392,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Payment authorized
           content:
             application/json:
@@ -371,6 +436,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Capture transaction, idempotent on the capture reference
           content:
             application/json:
@@ -410,6 +480,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Refund transaction, idempotent on the refund reference
           content:
             application/json:
@@ -438,6 +513,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: >
             Authorization closed, idempotent. Closes as voided when nothing was
             captured, and as partially_captured when some money had already
@@ -497,6 +577,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Draft plan created with its grants. No event is published, because terms that can still change are not a business fact anyone outside CORE can act on.
           content:
             application/json:
@@ -514,6 +599,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Plans, newest first.
           content:
             application/json:
@@ -538,6 +628,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: The plan and its grants.
           content:
             application/json:
@@ -560,6 +655,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Plan active; terms and grants are now immutable.
           content:
             application/json:
@@ -585,6 +685,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Plan retired; existing subscriptions are unaffected.
           content:
             application/json:
@@ -622,6 +727,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscription created with its first period. collected reports whether the first charge was collected; false leaves the subscription past_due and the period retryable.
           content:
             application/json:
@@ -650,6 +760,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: The subscription and every period it has had, so its billing history can be read without reconstructing it from events.
           content:
             application/json:
@@ -693,6 +808,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscription cancelled. voided_period_id names the period voided when it had not been paid, otherwise null.
           content:
             application/json:
@@ -739,6 +859,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Usage recorded for the first time.
           content:
             application/json:
@@ -769,6 +894,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: The period after the attempt. collected reports whether money moved; reason carries why not when it did not.
           content:
             application/json:
@@ -791,6 +921,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Countries
           content:
             application/json:
@@ -824,6 +959,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Country registered
           content:
             application/json:
@@ -841,6 +981,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Regions
           content:
             application/json:
@@ -863,6 +1008,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Cities
           content:
             application/json:
@@ -892,6 +1042,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Region registered
           content:
             application/json:
@@ -916,6 +1071,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: City registered
           content:
             application/json:
@@ -944,6 +1104,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Service area registered
           content:
             application/json:
@@ -973,6 +1138,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Matching service areas ordered by distance
           content:
             application/json:
@@ -1011,6 +1181,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Count and list of inconsistent fulfillments
           content:
             application/json:
@@ -1049,6 +1224,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Count and list of fulfillments awaiting a financial decision
           content:
             application/json:
@@ -1095,6 +1275,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Count and list of open fulfillments with an unusable hold
           content:
             application/json:
@@ -1134,6 +1319,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Fulfillment coordination record
           content:
             application/json:
@@ -1161,6 +1351,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Cancelled fulfillment
           content:
             application/json:
@@ -1189,6 +1384,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "202":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Event accepted and recorded durably
           content:
             application/json:
@@ -1240,6 +1440,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscription registered
           content:
             application/json:
@@ -1253,6 +1458,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscriptions, without their secrets
           content:
             application/json:
@@ -1280,6 +1490,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscription deactivated
           content:
             application/json:
@@ -1303,6 +1518,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Subscription activated
           content:
             application/json:
@@ -1325,6 +1545,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Outstanding deliveries
           content:
             application/json:
@@ -1379,11 +1604,21 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Recipient registered
           content:
             application/json:
               schema: { $ref: "#/components/schemas/NotificationRecipient" }
         "400":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: >-
             Unknown or non-notifiable event type, unreceivable channel, no
             verified link on that channel, or a tenant scope the event cannot
@@ -1401,6 +1636,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Recipients
           content:
             application/json:
@@ -1438,6 +1678,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Recipient deactivated
           content:
             application/json:
@@ -1470,6 +1715,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: Notifications, newest first, with counts by state
           content:
             application/json:
@@ -1529,6 +1779,8 @@ paths:
       security: []
       responses:
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
           description: Prometheus exposition, version 0.0.4. Deterministic for unchanged state.
           content:
             text/plain:
@@ -1570,6 +1822,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: The derived standing, with per-kind counts and the standing rating average.
           content:
             application/json:
@@ -1607,6 +1864,11 @@ paths:
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
           description: The recorded signals, newest first, each stating whether and when it was retracted.
           content:
             application/json:
@@ -1645,9 +1907,45 @@ components:
         type: string
         maxLength: 128
         pattern: "^[A-Za-z0-9._:-]+$"
+  headers:
+    CorrelationId:
+      description: >
+        CORE's own record of this request, echoed from the request's
+        `x-correlation-id` when one was sent and generated when none was. It is
+        the value written to every audit, outbox, ledger, inbound-event,
+        notification and subscription row the request touched, so a caller that
+        keeps it can ask CORE afterwards what the request did and be answered
+        from CORE's own tables. Set on every response CORE produces, including
+        the ones it could not route and the ones it refused before reading the
+        request.
+      required: true
+      schema: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }
+    RateLimitLimit:
+      description: >
+        Requests allowed per window for the class this route belongs to. Sent on
+        every response produced while a limiter is wired, successes included, so
+        a caller learns its budget before it is refused rather than from the
+        refusal. Absent — not zero — where no limiter is configured.
+      schema: { type: integer, minimum: 1 }
+    RateLimitRemaining:
+      description: Requests left in the current window after this one; 0 on a refusal.
+      schema: { type: integer, minimum: 0 }
+    RateLimitReset:
+      description: Unix time in seconds at which the current window ends.
+      schema: { type: integer }
+    RetryAfter:
+      description: >
+        Whole seconds until this exact request may be resent unchanged, minimum 1
+        (RFC 9110). Sent only on a refusal that comes good on its own.
+      schema: { type: integer, minimum: 1 }
   responses:
     Error:
       description: Canonical error
+      headers:
+        x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+        x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+        x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
@@ -1661,18 +1959,11 @@ components:
         distinct from `unavailable`, so a caller can tell "wait" from "broken".
         Wait for `retry-after` and resend the identical request.
       headers:
-        retry-after:
-          description: Whole seconds until the window resets, minimum 1 (RFC 9110).
-          schema: { type: integer, minimum: 1 }
-        x-ratelimit-limit:
-          description: Requests allowed per window for this route class.
-          schema: { type: integer, minimum: 1 }
-        x-ratelimit-remaining:
-          description: Requests left in the current window; 0 on a refusal.
-          schema: { type: integer, minimum: 0 }
-        x-ratelimit-reset:
-          description: Unix time in seconds at which the current window ends.
-          schema: { type: integer }
+        x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+        retry-after: { $ref: "#/components/headers/RetryAfter" }
+        x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+        x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }

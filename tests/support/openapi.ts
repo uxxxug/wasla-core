@@ -320,6 +320,14 @@ export interface DocumentedResponse {
   readonly description?: string;
   /** Every key written on the response object, so a junk key is visible. */
   readonly keys: readonly string[];
+  /**
+   * The response headers the contract says this response carries, lower-cased,
+   * with their declarations `$ref`-resolved — milestone 28. `content-type` is
+   * deliberately not among them: OpenAPI states a response header named
+   * `Content-Type` is ignored, because the media type is already declared by
+   * `content`, which milestone 27 gates.
+   */
+  readonly headers: ReadonlyMap<string, Yaml>;
 }
 
 export interface Operation {
@@ -419,6 +427,11 @@ export function loadContract(path = "contracts/openapi/core-v1.yaml"): Contract 
           schema: schema === undefined ? undefined : deepResolve(schema),
           description: typeof resolved["description"] === "string" ? resolved["description"] : undefined,
           keys: Object.keys(resolved),
+          headers: new Map(
+            Object.entries((resolved["headers"] ?? {}) as Record<string, Yaml>).map(
+              ([name, declaration]) => [name.toLowerCase(), deepResolve(declaration)] as const,
+            ),
+          ),
         });
       }
       operations.push({
