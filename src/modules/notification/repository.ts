@@ -8,6 +8,7 @@ import type {
   NotificationRecipient,
   NotificationStatus,
 } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 /** Result of one claim: the row as the worker now owns it, with its token. */
 export interface ClaimedNotification extends Notification {
@@ -141,7 +142,7 @@ export class InMemoryNotificationStore implements NotificationStore {
       }
     }
     journalMapWrite(scope, this.recipients, recipient.recipient_id);
-    this.recipients.set(recipient.recipient_id, recipient);
+    putRow("notification_recipient", this.recipients, recipient.recipient_id, recipient);
   }
 
   async getRecipient(recipientId: string): Promise<NotificationRecipient | undefined> {
@@ -189,7 +190,7 @@ export class InMemoryNotificationStore implements NotificationStore {
   async setRecipientActive(recipientId: string, active: boolean): Promise<void> {
     const existing = this.recipients.get(recipientId);
     if (!existing) return;
-    this.recipients.set(recipientId, { ...existing, active });
+    putRow("notification_recipient", this.recipients, recipientId, { ...existing, active });
   }
 
   async queue(notification: Notification, scope: TransactionScope = NO_SCOPE): Promise<boolean> {
@@ -218,7 +219,7 @@ export class InMemoryNotificationStore implements NotificationStore {
       }
     }
     journalMapWrite(scope, this.notifications, notification.notification_id);
-    this.notifications.set(notification.notification_id, notification);
+    putRow("notification", this.notifications, notification.notification_id, notification);
     return true;
   }
 
@@ -241,7 +242,7 @@ export class InMemoryNotificationStore implements NotificationStore {
         claimed_at: now.toISOString(),
         next_attempt_at: new Date(now.getTime() + leaseMs).toISOString(),
       };
-      this.notifications.set(notification.notification_id, leased);
+      putRow("notification", this.notifications, notification.notification_id, leased);
       claimed.push({ ...leased, claim_token: token });
     }
     return claimed;
@@ -253,7 +254,7 @@ export class InMemoryNotificationStore implements NotificationStore {
       .slice(0, limit);
     for (const notification of expired) {
       const exhausted = notification.attempts >= maxAttempts;
-      this.notifications.set(notification.notification_id, {
+      putRow("notification", this.notifications, notification.notification_id, {
         ...notification,
         status: exhausted ? "failed" : "pending",
         claim_token: null,
@@ -282,7 +283,7 @@ export class InMemoryNotificationStore implements NotificationStore {
   ): Promise<boolean> {
     const existing = this.fenced(notificationId, token);
     if (!existing) return false;
-    this.notifications.set(notificationId, {
+    putRow("notification", this.notifications, notificationId, {
       ...existing,
       status: "accepted",
       claim_token: null,
@@ -302,7 +303,7 @@ export class InMemoryNotificationStore implements NotificationStore {
   ): Promise<boolean> {
     const existing = this.fenced(notificationId, token);
     if (!existing) return false;
-    this.notifications.set(notificationId, {
+    putRow("notification", this.notifications, notificationId, {
       ...existing,
       status: "delivered",
       claim_token: null,
@@ -324,7 +325,7 @@ export class InMemoryNotificationStore implements NotificationStore {
   ): Promise<boolean> {
     const existing = this.fenced(notificationId, token);
     if (!existing) return false;
-    this.notifications.set(notificationId, {
+    putRow("notification", this.notifications, notificationId, {
       ...existing,
       status: "pending",
       claim_token: null,
@@ -345,7 +346,7 @@ export class InMemoryNotificationStore implements NotificationStore {
   ): Promise<boolean> {
     const existing = this.fenced(notificationId, token);
     if (!existing) return false;
-    this.notifications.set(notificationId, {
+    putRow("notification", this.notifications, notificationId, {
       ...existing,
       status: "failed",
       claim_token: null,

@@ -9,6 +9,7 @@ import {
   type ReputationSignal,
   type ReputationSubject,
 } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 /**
  * Whether the insert was the first report of this fact.
@@ -141,7 +142,7 @@ export class InMemoryReputationRepository implements ReputationRepository {
       return "duplicate_source_reference";
     }
     journalMapWrite(scope, this.rows, signal.reputation_signal_id);
-    this.rows.set(signal.reputation_signal_id, signal);
+    putRow("reputation_signal", this.rows, signal.reputation_signal_id, signal);
     return "inserted";
   }
 
@@ -172,7 +173,7 @@ export class InMemoryReputationRepository implements ReputationRepository {
     // and the marker must still be absent.
     if (!stored || stored.retracted_at !== null) return "stale";
     journalMapWrite(scope, this.rows, stored.reputation_signal_id);
-    this.rows.set(stored.reputation_signal_id, {
+    putRow("reputation_signal", this.rows, stored.reputation_signal_id, {
       ...stored,
       retracted_at: input.retracted_at,
       retraction_reason: input.reason,

@@ -38,15 +38,19 @@ const COLUMNS = `fulfillment_id, organization_id, market_order_reference, move_j
   executed_after_cancellation_at, executed_after_cancellation_job_reference`;
 
 /**
- * The insert list, which is `COLUMNS` minus the two B-29 markers.
+ * The insert list: every column, the two B-29 markers included.
  *
- * A fulfillment is never born marked: the marker records a report that arrived
- * after the row was cancelled, so on any path that inserts, it is null by
- * definition. Listing it in the insert would mean binding two literal nulls on
- * every intake and inviting a future caller to pass something else.
+ * They were left out on the grounds that a fulfillment is never born marked, and
+ * on every code path in CORE that is still true. What the omission actually did
+ * was discard a caller's values without saying so: the reference store kept the
+ * markers a caller passed to `insert` and Postgres wrote nulls, so the two
+ * backends held different rows and the schema's two coupling constraints never
+ * saw the row they exist to refuse. `tests/check-parity.test.ts` measured that.
+ * Binding two usually-null parameters is cheaper than a silent divergence, and
+ * with them bound the database refuses an inconsistent marker on the insert path
+ * as well as on the update path.
  */
-const INSERT_COLUMNS = `fulfillment_id, organization_id, market_order_reference, move_job_reference,
-  payment_authorization_id, status, settlement_state, created_at, completed_at, closure_reason`;
+const INSERT_COLUMNS = COLUMNS;
 
 /**
  * Postgres adapter for the fulfillment port.
@@ -66,7 +70,7 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
 
   async insert(fulfillment: Fulfillment, scope: TransactionScope = NO_SCOPE): Promise<void> {
     await runner(this.pool, scope).query(
-      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         fulfillment.fulfillment_id,
         fulfillment.organization_id,
@@ -78,6 +82,8 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.created_at,
         fulfillment.completed_at,
         fulfillment.closure_reason,
+        fulfillment.executed_after_cancellation_at,
+        fulfillment.executed_after_cancellation_job_reference,
       ],
     );
   }
@@ -96,7 +102,7 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     scope: TransactionScope = NO_SCOPE,
   ): Promise<InsertOutcome> {
     const result = await runner(this.pool, scope).query(
-      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `insert into fulfillment (${INSERT_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        on conflict do nothing`,
       [
         fulfillment.fulfillment_id,
@@ -109,6 +115,8 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.created_at,
         fulfillment.completed_at,
         fulfillment.closure_reason,
+        fulfillment.executed_after_cancellation_at,
+        fulfillment.executed_after_cancellation_job_reference,
       ],
     );
     return result.rowCount === 1 ? "inserted" : "duplicate_order_reference";
@@ -116,9 +124,15 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
 
   async update(fulfillment: Fulfillment, scope: TransactionScope = NO_SCOPE): Promise<void> {
     await runner(this.pool, scope).query(
+      // Every mutable column, the two B-29 markers included: a whole-row update
+      // that leaves two of the row's columns alone is an update that silently
+      // ignores part of what it was given, and the reference store — which
+      // replaces the row outright — would then hold something different.
       `update fulfillment
        set move_job_reference = $2, payment_authorization_id = $3, status = $4,
-           settlement_state = $5, completed_at = $6, closure_reason = $7
+           settlement_state = $5, completed_at = $6, closure_reason = $7,
+           executed_after_cancellation_at = $8,
+           executed_after_cancellation_job_reference = $9
        where fulfillment_id = $1`,
       [
         fulfillment.fulfillment_id,
@@ -128,12 +142,14 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.settlement_state,
         fulfillment.completed_at,
         fulfillment.closure_reason,
+        fulfillment.executed_after_cancellation_at,
+        fulfillment.executed_after_cancellation_job_reference,
       ],
     );
   }
 
   /**
-   * The transition write. Identical to `update` plus `and status = any($8)`,
+   * The transition write. Identical to `update` plus `and status = any($10)`,
    * and that predicate is the entire fix for B-21.
    *
    * Under READ COMMITTED two transitions of the same row serialise on the row
@@ -155,8 +171,10 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     const result = await runner(this.pool, scope).query(
       `update fulfillment
        set move_job_reference = $2, payment_authorization_id = $3, status = $4,
-           settlement_state = $5, completed_at = $6, closure_reason = $7
-       where fulfillment_id = $1 and status = any($8::text[])`,
+           settlement_state = $5, completed_at = $6, closure_reason = $7,
+           executed_after_cancellation_at = $8,
+           executed_after_cancellation_job_reference = $9
+       where fulfillment_id = $1 and status = any($10::text[])`,
       [
         fulfillment.fulfillment_id,
         fulfillment.move_job_reference,
@@ -165,6 +183,8 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
         fulfillment.settlement_state,
         fulfillment.completed_at,
         fulfillment.closure_reason,
+        fulfillment.executed_after_cancellation_at,
+        fulfillment.executed_after_cancellation_job_reference,
         [...expected],
       ],
     );
