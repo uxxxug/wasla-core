@@ -4187,6 +4187,18 @@ credential-free revoke route beside it.
 
 Measured: 717 passed / 148 skipped without a database, 1280 with one.
 
+**CI verdict**, read after the push rather than inferred from the local run, on
+`7954cab` in runs
+[34783866073](https://github.com/uxxxug/wasla-core/actions/runs/34783866073) and
+[34783867970](https://github.com/uxxxug/wasla-core/actions/runs/34783867970), both
+jobs green in both: *Verify without a database* 717 passed / **147** skipped (864),
+*Verify against PostgreSQL* 1279 + 1 = 1280 passed. The skipped count is one lower
+than the local 148, exactly as milestone 28 recorded; which test differs is still
+unidentified, and it is written here again rather than rounded away, because a
+number that has now disagreed across two cycles is a finding waiting for somebody
+to spend a cycle on it. PR [#20](https://github.com/uxxxug/wasla-core/pull/20),
+squash-merged to `main`.
+
 ## Cycle 2026-09-13 (seventeenth) — the answer nobody could trace
 
 **Reserved before any edit**, as the cycle discipline requires: measured on `main`
