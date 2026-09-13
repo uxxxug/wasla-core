@@ -81,8 +81,23 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Milestone 21 (selection parity) closed with the cycle
-logged at the end of this file; the next actionable item is milestone 22 below.
+**Reserved: milestone 22 — selection parity for the module read paths.** Branch
+`module-selection-parity`. Held by this reservation until the cycle closes or
+the reservation is released here.
+
+Milestone 21 gated the predicates of the three eventing queues and stopped
+there deliberately. The same argument applies to every other listing in the
+repository: the notification dispatcher (a fourth lease queue, with the same
+`order by next_attempt_at` under a limit that was not a total order in the
+first three), the money reads, the subscription plan/period/usage reads, the
+identity and membership lookups, and the organization, fulfillment and
+geography listings are each written twice — once in SQL, once in TypeScript —
+and no gate compares which rows they pick or in what order.
+
+Scope of the reservation: `tests/module-selection-parity.test.ts`, and whatever
+divergence the measurement shows in the read and claim paths of the module
+repositories on both backends. Anything outside that scope is recorded as a
+blocker rather than fixed here.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
