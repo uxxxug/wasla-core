@@ -106,6 +106,10 @@ export function registerFulfillmentRoutes(
       reason: ctx.input.text("reason") ?? "",
       correlation_id: ctx.correlation_id,
     });
-    return { status: 200, body: cancelled };
+    // Through `withDisposition` like every other fulfillment answer: milestone 27
+    // measured this one route returning the record without the derived
+    // `financial_disposition`, so a client reading a cancellation saw a
+    // different shape than a client reading the same fulfillment a moment later.
+    return { status: 200, body: withDisposition(fulfillment, cancelled) };
   });
 }

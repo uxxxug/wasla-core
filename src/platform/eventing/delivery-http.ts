@@ -3,7 +3,7 @@ import { NO_BODY, objectBody } from "../http/body.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
 import type { IdentityService } from "../../modules/identity-access/service.js";
-import type { SubscriptionRegistry } from "./delivery.js";
+import { redactDelivery, type SubscriptionRegistry } from "./delivery.js";
 
 export function registerDeliveryRoutes(
   router: Router,
@@ -65,6 +65,10 @@ export function registerDeliveryRoutes(
   router.get("/v1/event-deliveries/undelivered", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const items = await registry.undelivered();
-    return { status: 200, body: { count: items.length, items } };
+    // The claim token is redacted for the reason the signing secret is: it is a
+    // credential, not a fact about the delivery. `organization.read` is held by
+    // every member of every tenant, and a caller holding a live claim token can
+    // acknowledge a delivery it is not performing.
+    return { status: 200, body: { count: items.length, items: items.map(redactDelivery) } };
   });
 }

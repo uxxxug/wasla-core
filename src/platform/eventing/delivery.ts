@@ -86,6 +86,25 @@ export interface EventDelivery {
   claim_token: string | null;
 }
 
+/**
+ * What a delivery looks like once it leaves the module. No claim token.
+ *
+ * The same reasoning as `PublicSubscription`, applied to the other secret in
+ * this file. `claim_token` is a fencing credential: `markDelivered`, `markDead`
+ * and every other acknowledgement accept a claim only when the token matches,
+ * so a caller holding it can acknowledge work it never did. The reconciliation
+ * read that listed undelivered rows was returning it to anyone with
+ * `organization.read` — measured in milestone 27 against the published contract,
+ * which never documented the field. Redacted rather than documented: nothing
+ * outside the worker has any use for it.
+ */
+export type PublicDelivery = Omit<EventDelivery, "claim_token">;
+
+export const redactDelivery = (d: EventDelivery): PublicDelivery => {
+  const { claim_token: _token, ...rest } = d;
+  return rest;
+};
+
 export interface DeliveryStore {
   insertSubscription(subscription: EventSubscription, scope?: TransactionScope): Promise<void>;
   getSubscription(subscriptionId: string): Promise<EventSubscription | undefined>;

@@ -17,7 +17,9 @@ export function registerOrganizationRoutes(
     ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const organization = organizations.create({
+    // `await`: both of these are async, and a promise handed back as a body is
+    // serialised as `{}` — the empty answer milestone 27 measured here.
+    const organization = await organizations.create({
       name: ctx.input.requiredText("name"),
       country_code: ctx.input.requiredText("country_code"),
       correlation_id: ctx.correlation_id,
@@ -28,6 +30,6 @@ export function registerOrganizationRoutes(
   router.get("/v1/organizations/:organization_id", [], async (ctx) => {
     const organizationId = ctx.params["organization_id"]!;
     await requirePrincipal(ctx, identity, "organization.read", organizationId);
-    return { status: 200, body: organizations.require(organizationId) };
+    return { status: 200, body: await organizations.require(organizationId) };
   });
 }

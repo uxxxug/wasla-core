@@ -1,7 +1,9 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-13
-**Last milestone:** CORE reads only the request headers it declares, and accepts
+**Last milestone:** Routes document the response they return, and the documented
+shape is enforced (milestone 27) — see the entry below. The previous milestone's
+summary is kept beneath it: CORE reads only the request headers it declares, and accepts
 them only in the shape it declares (milestone 26). Measured first: an
 8000-character `x-correlation-id` was accepted, echoed and persisted verbatim in
 the `correlation_id` `text` column of every audit, outbox, ledger, inbound-event,
@@ -18,16 +20,53 @@ runs** — which is also what makes the credential the limiter charges and the
 credential `bearer()` authenticates the same value by construction. A refusal
 never echoes the value that caused it. `x-correlation-id` and the bearer
 credential are documented in the contract for the first time, the header parameter
-referenced from all 52 operations. **689** tests pass without `DATABASE_URL` and
-**1252** with it.
-**Verification at this working tree:** `tsc --noEmit` clean; `npm test` 689
-passed / 147 skipped without a database and 1251 + 1 = 1252 with `DATABASE_URL`
+referenced from all 52 operations.
+
+**Milestone 27 — routes document the response they return, and the documented
+shape is enforced.** The fourth and last surface of that family, and the half
+other systems build against. Measured first, by parsing the contract and driving
+all 52 operations: **34 of 52 operations documented no response schema at all**;
+**nothing in the repository had ever parsed `contracts/openapi/core-v1.yaml` as
+YAML** (`check-contracts.mjs` scans it with regular expressions, so two response
+objects broken by unquoted commas inside a flow map — a truncated sentence plus a
+junk key — had passed for the file's whole life); and nothing had ever compared a
+response body to the contract, which had hidden three shipped divergences.
+`POST /v1/organizations` and `GET /v1/organizations/{id}` **answered `{}`** —
+both handlers passed an unawaited promise as the body and `JSON.stringify`
+renders a promise as `{}`, so the call that creates a tenant never returned its
+id, and every test passed because every test read the status.
+`GET /v1/event-deliveries/undelivered` **returned `claim_token`**, the fencing
+credential a worker presents to acknowledge a delivery, to anybody holding
+`organization.read`. `GET /v1/sessions/current` returned six permissions the
+published `Permission` enum did not list. Now: a dependency-free contract reader
+with a strict validator (`tests/support/openapi.ts`), a scenario that drives all
+52 operations to a **success** status (`tests/support/http-scenario.ts`), 25 new
+component schemas and 33 response bodies documented, the router refusing any
+route that hands back a promise as its body, `redactDelivery` mirroring
+`redactSubscription`, and an 11-case gate that fails if any operation returns a
+property the contract does not document. **700** tests pass without
+`DATABASE_URL` and **1263** with it.
+**Verification at this working tree:** `tsc --noEmit` clean; `npm test` 700
+passed / 147 skipped without a database and 1262 + 1 = 1263 with `DATABASE_URL`
 against a real PostgreSQL 18.4, all 19 migrations applied; governance, contract,
-migration and roadmap gates passing. Eleven falsifications, each applied to a
-committed tree and restored, are tabulated in `docs/http-header-declaration.md` —
-including F7b, which **defeated the first version of the gate's source scan** and
-is recorded as such rather than removed. The CI verdict, which is the judgment,
-is in the cycle record below.
+migration and roadmap gates passing. The falsifications, each applied to a
+committed tree and restored, are tabulated in
+`docs/http-response-declaration.md`. The CI verdict, which is the judgment, is in
+the cycle record below.
+
+### Milestone 26's entry, kept as written
+
+Kept rather than replaced, because it is the record of the previous cycle's
+verification and its counts are the baseline this cycle's are measured against.
+
+> **689** tests pass without `DATABASE_URL` and **1252** with it.
+> **Verification at that working tree:** `tsc --noEmit` clean; `npm test` 689
+> passed / 147 skipped without a database and 1251 + 1 = 1252 with `DATABASE_URL`
+> against a real PostgreSQL 18.4, all 19 migrations applied; governance, contract,
+> migration and roadmap gates passing. Eleven falsifications, each applied to a
+> committed tree and restored, are tabulated in `docs/http-header-declaration.md` —
+> including F7b, which **defeated the first version of the gate's source scan** and
+> is recorded as such rather than removed.
 
 ### The previous state of this header, kept verbatim
 
@@ -194,7 +233,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 24 | Read routes refuse only what they read | **Complete, and self-enforcing from here** | The tenth cycle in this family and the first that is not a parity cycle: nothing in it compares two backends. Milestone 23 closed the *values* a route accepts for the parameters it reads and left the *set* of parameters open, with two measurements: `GET /v1/notification-recipients?limit=abc` answered **200 with every row** because that route has no `limit`, and `?organisation_id=…` — the British spelling, or any typo — was ignored, so one tenant's question was answered with every tenant's rows. Both are the milestone 23 defect from the other end: CORE answered a question the caller did not ask and reported success. **The fix is structural, not per route**, because 23 hand-maintained lists in 23 handlers is the shape that produced the defect and a drifted list fails open. `router.get(path, accepts, handler)` takes the accepted parameters as a **required positional** argument, `add(...)` defaults to accepting nothing (fail-closed), the router parses before the handler and after the rate-limit check, refusals go through the same `CoreError` envelope as every other refusal, and — the change that makes the gate possible — **`RequestContext` carries no `URLSearchParams` at all**: `ctx.query` is gone and `ctx.selection` is the parsed result, so a handler *cannot* read an undeclared parameter. `Selection` throws rather than returning `undefined` for an undeclared name, because `undefined` would rebuild the original defect one level down. `tests/http-parameter-declaration.test.ts` — **10 tests, no database, so both CI jobs run it** — is driven off `router.registrations()` rather than a list in the test: every route of every method refuses `?__unexpected_parameter=1` by name; the 29 routes that declared nothing refuse any query string; every declared parameter is proved live by a repeat probe that fills the route's *other* parameters with valid values first; declarations are well formed (unique snake_case, non-empty vocabularies, `0 < min <= default <= max`); a source scan proves `query.ts` and `router.ts` are the only modules that touch a query string; and a **file-scoped cross-check** proves every declared name is read and every read name declared, which is the direction a liveness probe cannot see. **What it found beyond the two known cases:** comparing the declarations with `contracts/openapi/core-v1.yaml` — added to delete a second source of truth — showed `country_code` on `GET /v1/geography/service-areas/resolve` has been implemented since the geography module shipped and **appeared in no contract**, so no consumer could know a country filter existed; documented in the same commit. Nine falsifications, and F2 (a declared parameter no handler reads) **passed the first version of the gate**, which proved only that declarations are parsed — the cross-check was written in response, making this the second cycle running where a falsification passed until the gate itself was strengthened. Unknown-parameter refusal precedes authentication: deliberate, since the accepted set is published in the contract, and it keeps a request CORE cannot understand away from any store read. What it does not claim, recorded in `docs/http-parameter-declaration.md`: request **bodies** still tolerate unknown properties (strict rejection there is a breaking change for clients, unlike the query case), the cross-check is file- not handler-scoped, and `kind: "text"` carries no format so UUID-shaped parameters are still validated by the handler that knows them. Measured: 658/148 without a database, 1221 with one |
 | 25 | Write routes accept only the body they declare | **Complete** — declared bodies enforced by the router on all 29 write routes, `ctx.body` removed, 16 gate tests, nine falsifications, four undocumented request bodies found and documented; CI verdict recorded in the cycle record below | The symmetric half of milestone 24, reserved **before** any file was edited this time. Milestone 24 closed the query string and its record named the request body as a separate question; measuring the body before reserving turned that into a money defect rather than a symmetry argument. **`POST /v1/payment-authorizations/:id/capture` with `{"amountMinor": 500}` — one camelCase typo — captured 5000, the entire remaining hold, and answered 200.** The route reads `amount_minor` and treats its absence as "capture everything", which is the correct meaning of an absent amount and a catastrophic meaning for a misspelled one; `refund` has the same shape. `POST /v1/wallets` accepts `nonsense` and `CURRENCY` alongside `currency` and reports 201. Every write route hand-parses `ctx.body as Record<string, unknown>` with per-module `objectBody`/`requiredString`/`optionalString` helpers duplicated across three files, and no route refuses a property it does not read. Scope: one declared body reader owned by the platform, a per-route declaration in the registration as with `accepts`, router-enforced refusal of unknown properties, `ctx.body` removed from `RequestContext` in favour of a parsed value that throws on an undeclared read, a gate driven off `registrations()`, and a cross-check against the `requestBody` schemas in `contracts/openapi/core-v1.yaml`. **The breaking-change objection, answered rather than ignored:** milestone 24's record argued strict body rejection breaks any client sending an extra field. It does — and milestone 5 records that no external system has adopted these contracts yet, so there is no such client today and this is the cheapest moment this change will ever have. A capture that silently takes ten times what was asked is not a compatibility feature |
 | 26 | Caller-supplied headers CORE records are validated at the boundary | **Complete, and self-enforcing from here** — `src/platform/http/headers.ts` is the only reader of a request header in `src`; five declared headers with a use, a bound and a recorded reason; refusal before the route is matched and before the limiter runs; no rejected value echoed; `CorrelationId` documented and referenced from all 52 operations; 15 gate tests, eleven falsifications including one that defeated the first version of the source scan. CI verdict recorded in the cycle below. Measured cause: | The third and last request surface, after the query string (24) and the body (25), and the only one where CORE stores what the caller sent. `x-correlation-id` is taken from the request verbatim if it is a non-empty string, then echoed in the response, written to structured logs, and persisted in `correlation_id` **`text`** columns on audit, outbox, ledger, inbound-event, notification and subscription rows. Measured against `main` at `a043ab7`, end to end through `createServer(core.router.nodeListener())` and a raw socket: **an 8000-character correlation id is accepted, echoed and recorded** (Node's own 16KB header limit is the only bound, so a caller can write kilobytes of attacker-chosen text into CORE's audit trail with every ordinary request, permanently, with no gate); **`"   "` is accepted as the identity of record**, so two unrelated requests correlate to the same blank id and the field every reconciliation and audit read traces by is meaningless; **`a\tb` is accepted**; and **a repeated header is joined by Node into `"a, b"` and recorded as one id**, so a later trace lookup by either half finds nothing, while `bearer()` silently takes `[0]` of a repeated `authorization` — the same silent-substitution class milestones 24 and 25 closed for parameters and properties. Not defects, measured and recorded as such: Node's parser refuses NUL, DEL and obs-fold with 400 before CORE sees them, so response splitting is not reachable — but a NUL correlation id would have been a backend divergence, since the reference backend accepts it and PostgreSQL refuses `0x00` in `text` outright. Neither `Authorization` nor `x-correlation-id` appears anywhere in `contracts/openapi/core-v1.yaml`, so the one header every route requires is undocumented. Scope: one platform module declaring the headers CORE reads and their accepted shape, router-enforced refusal of a malformed declared header **before any work**, no direct `ctx.headers[...]` read left outside it, a repeated declared header refused rather than silently narrowed, the headers documented in the contract, and a gate driven off the declaration with the same falsification discipline as 24 and 25 |
-| 27 | Routes document the response they return, and the documented shape is enforced | **Reserved, measured, in progress on branch `http-response-declaration`** — the fourth and last surface of the HTTP contract family: milestones 24, 25 and 26 closed what a route *reads* from a request; nothing closes what it *answers*. Measured on `main` at `f71aba2` by walking `contracts/openapi/core-v1.yaml`: **33 of the 52 operations document their success response with no schema at all** — `GET /health`, `GET /ready`, `POST /v1/wallets`, all four payment-authorization transitions, every plan and subscription route, and 24 more carry only a `description:`. The 19 that do carry a schema are checked by nothing: no test and no script in the repository compares a real response body against the contract, so a documented shape and the returned shape can diverge silently, which is the same class of defect the request surface had before milestone 24. MOVE and MARKET build against this file. | 26 |
+| 27 | Routes document the response they return, and the documented shape is enforced | **Complete** (branch `http-response-declaration`) — the fourth and last surface of the HTTP contract family. Measured on `main` at `f71aba2` by *parsing* `contracts/openapi/core-v1.yaml` rather than scanning it: **34 of the 52 operations documented no response schema** (the reservation's text scan said 33; corrected additively here, and 35 if `/metrics`'s text body is counted), **nothing had ever parsed the contract as YAML** — so two response objects broken by unquoted commas inside a flow map had passed `check-contracts.mjs` for the file's whole life — and **nothing had ever compared a response body to the contract**, which hid three shipped divergences: `POST /v1/organizations` and `GET /v1/organizations/{id}` answered `{}` (unawaited promise as the body), `GET /v1/event-deliveries/undelivered` returned the `claim_token` fencing credential, and `GET /v1/sessions/current` returned six permissions the published `Permission` enum omitted. Now every operation documents the status, content type and schema it answers with; all 52 are driven to a success status and their real bodies validated strictly, an undocumented property failing the gate; the router refuses any route whose body is a thenable; and coverage is asserted three ways (contract = driven = registered). `tests/support/openapi.ts`, `tests/support/http-scenario.ts`, `tests/http-response-declaration.test.ts`, `docs/http-response-declaration.md`. | 26 |
 
 ### What was claimed complete and actually is
 
@@ -4051,6 +4090,103 @@ and unblocked. Every remaining milestone waits on something CORE does not own:
 milestone 2's multi-hold on a MARKET contract decision, 5 on MOVE/MARKET
 adoption, 7 on B-2/B-3, 9 on B-5/B-6, 10's ingestion on a MARKET producer and its
 policy on B-31…B-34, and 11 on B-35.
+## Cycle 2026-09-13 (sixteenth) — the contract had never been read
+
+Scope: milestone 27. The three request surfaces were declared and gated
+(milestones 24, 25, 26). This cycle closes the answer surface — the half MOVE and
+MARKET build against.
+
+### What was measured before anything changed
+
+Against `main` at `f71aba2`, by parsing `contracts/openapi/core-v1.yaml` and
+driving every operation the router registers:
+
+| Reading | On `main` |
+| --- | --- |
+| Operations documenting no response schema | **34 of 52** (35 counting `/metrics`) |
+| Tests or scripts parsing the contract as YAML | **none** |
+| Tests or scripts comparing a response body to the contract | **none** |
+| Response objects broken by an unquoted comma in a flow map | **2** |
+| Documented shapes diverging from the real body | **3** |
+
+**Correction to the reservation, by addition.** The reservation commit (`3eb996d`)
+said "33 of 52" and "10 malformed lines". Both were text scans of the file. The
+parser-derived figures are **34 of 52** operations with no schema (35 with
+`/metrics`, whose body is text), and **10 flow-map lines contained an unquoted
+comma — 8 of which stopped being flow maps when they gained a `content:` block,
+and 2 were quoted in place**. The reservation text is left as written; this is the
+correction of record.
+
+### The three divergences, each a real defect
+
+1. **`POST /v1/organizations` and `GET /v1/organizations/{id}` answered `{}`.**
+   Both handlers returned `organizations.create(...)` / `.require(...)` without
+   `await`, and `JSON.stringify` renders a promise as `{}`. The call that creates
+   a tenant — the first call any integrator makes — never returned the id of the
+   thing it created, for the module's whole life, because every test asserted the
+   status code. Fixed at the root twice: the two `await`s, and a guard in
+   `src/platform/http/router.ts` that throws when a handler's body is a thenable,
+   so the next handler to forget one fails loudly instead of shipping an empty
+   object past a green suite.
+2. **`GET /v1/event-deliveries/undelivered` returned `claim_token`** — the fencing
+   credential a worker presents to acknowledge a delivery (B-24) — to any caller
+   holding `organization.read`. `EventSubscription` already had exactly this
+   treatment for `signing_secret`; the delivery row never got it. Now
+   `PublicDelivery` + `redactDelivery` mirror it, and the gate asserts no response
+   body anywhere contains the string.
+3. **`GET /v1/sessions/current` returned six permissions the published
+   `Permission` enum did not list** (`events.submit`, `events.replay`,
+   `events.revive`, `subscription.read`, `subscription.write`, `reputation.read`)
+   and did not document `service_name`. A client validating CORE's own answer
+   against CORE's own contract would have rejected it. `EventDelivery` was also
+   missing `claimed_at` and `reclaims`, and the notification list's `summary` was
+   a free-form integer map — now six named counters, so a new notification state
+   has to be published before it can appear in a response.
+
+### What was built
+
+- `tests/support/openapi.ts` — a dependency-free reader for the YAML subset this
+  contract uses, `$ref` resolution (cycle-guarded), `allOf` flattening for
+  objects, and `violations(value, schema, at)`: strict, so an undocumented
+  property is a failure, `null` needs `nullable: true`, and `enum`, `format: uuid`
+  and `format: date-time` are checked against the value. A construct it cannot
+  read **throws**, so an unreadable schema fails the gate rather than being
+  skipped.
+- `tests/support/http-scenario.ts` — drives all 52 operations against one app on
+  the memory backend to a **success** status and records status, content type and
+  body. Getting there required real work rather than assertions: the
+  reconciliation and reputation reads need `organization_id`; the notification
+  recipient needs a verified channel link; and two reconciliation reads return
+  `count: 0` on any ordinary scenario, where **an empty `items: []` satisfies any
+  item schema** — so the scenario now partially captures and cancels a funded
+  fulfillment (`decision_required`) and voids an authorization under an open
+  fulfillment (a stale hold), producing one real row each.
+- `contracts/openapi/core-v1.yaml` — 25 new component schemas, 33 response
+  `content:` blocks, the four corrections above, the two quoted descriptions.
+- `tests/http-response-declaration.test.ts` — the gate, 11 cases: the contract
+  parses with no junk keys; every operation documents the status, content type and
+  schema it answers with; a bodyless `204` documents *no* content, asserted;
+  every real body validates strictly; coverage is asserted three ways (contract =
+  driven = registered); every operation reaches a success status, so no schema is
+  validated against a refusal; a real `400` satisfies the documented `Error`
+  shape; no body contains a claim token; a promise-bodied route is refused.
+
+### Measurement
+
+Without `DATABASE_URL`: 689 → **700 passed / 147 skipped**. With it: 1252 →
+**1262 + 1 = 1263**, none skipped, on a real PostgreSQL 18.4 with `C` collation,
+all 19 migrations applied. `tsc --noEmit` clean; governance, contract, migration
+and roadmap gates pass. No existing test was changed, loosened or skipped. As an
+independent cross-check, Python's `yaml.safe_load` was run against the contract
+and agrees with the new reader that no response object carries an undefined key.
+
+What this cycle does not claim is written out in
+`docs/http-response-declaration.md`: it does not prove the schemas cover every
+value a property can take (they cover what CORE produced here plus its own
+domain enums), it validates one canonical error body rather than every refusal
+per operation, it says nothing about response *headers*, and it does not make the
+new reader a general OpenAPI validator.
+
 ## Cycle 2026-09-13 (fifteenth) — the gate was not measuring the thing it gated
 
 Scope: make CI run the half of the suite it had never run. No feature was added
