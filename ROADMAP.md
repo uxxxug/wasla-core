@@ -1,58 +1,102 @@
 # WASLA CORE — Roadmap
 
 **Last updated:** 2026-09-13
-**Last milestone:** Routes document the response they return, and the documented
-shape is enforced (milestone 27) — see the entry below. The previous milestone's
-summary is kept beneath it: CORE reads only the request headers it declares, and accepts
-them only in the shape it declares (milestone 26). Measured first: an
-8000-character `x-correlation-id` was accepted, echoed and persisted verbatim in
-the `correlation_id` `text` column of every audit, outbox, ledger, inbound-event,
-notification and subscription row a request creates, so any caller could write
-kilobytes of chosen text into CORE's permanent audit trail with every ordinary
-request; `"   "` became the identity of record, making the field six tables are
-traced by meaningless; a repeated header was recorded as `"a, b"`, an id belonging
-to neither half; and `bearer()` silently authenticated `[0]` of two credentials
-while the rate limiter hashed its own reading of the same header. Now
-`src/platform/http/headers.ts` declares the five headers CORE reads with a use, a
-length bound and a written reason, `RequestHeaders` throws on an undeclared read,
-and the router checks them **before the route is matched and before the limiter
-runs** — which is also what makes the credential the limiter charges and the
-credential `bearer()` authenticates the same value by construction. A refusal
-never echoes the value that caused it. `x-correlation-id` and the bearer
-credential are documented in the contract for the first time, the header parameter
-referenced from all 52 operations.
+**Last milestone:** Every response declares the headers it sets, and every response
+carries the one a caller cannot work without (milestone 28) — the fifth and last
+undeclared HTTP surface, and the one milestone 27 explicitly said it did not
+cover. Measured first, by driving all 52 operations and reading the real answers:
+**`x-correlation-id` was set on 52 of 52 responses and documented on 0 of them** —
+the value written to every audit, outbox, ledger, inbound-event, notification and
+subscription row a request touches, and the only handle a caller has for asking
+CORE afterwards what its request did, published nowhere; the three `x-ratelimit-*`
+headers were sent on **every** limited response, successes included, while the
+contract documented them only on the shared `RateLimited` 429, as if a budget could
+only be learned by exceeding it. And two defects, both on the paths a caller
+reaches when something has already gone wrong: **an unmatched route answered `404`
+with no headers at all**, so the one answer a caller gets when it can reach no
+route in CORE was the one it could not correlate to CORE's logs — while the body
+beside it carried the same id — and **the Node adapter's unparseable-body `400`
+answered `{code, message}`** with no `correlation_id`, no `details` and no
+`retryable`: the only refusal in CORE that was not the canonical `Error`, invisible
+to milestone 27's gate because it is produced above the router that gate drives.
+Now `src/platform/http/response-headers.ts` declares the six headers CORE sends
+with when, why and an anchored shape each, `sealHeaders` is the only place a
+response's headers are decided and **refuses an undeclared name or a wrong-shaped
+value**, both defective paths are fixed at the cause, and one
+`components/headers` section in the contract is referenced by every response object
+and both shared refusals — documented where the headers are actually sent, and
+deliberately *not* on `/health`, `/ready` and `/metrics`, which the limiter exempts.
+**709** tests pass without `DATABASE_URL` and **1272** with it.
+**Verification at this working tree:** `tsc --noEmit` clean; `npm test` 709 passed
+/ 148 skipped without a database and 1272 with `DATABASE_URL` against a real
+PostgreSQL 18.4, all 19 migrations applied; governance, contract and migration
+gates passing, and the roadmap gate satisfied across the pushed range. Twelve
+falsifications, each applied to a committed tree and restored, are tabulated in
+`docs/http-response-headers.md` — including F10, whose **first attempt was invalid**
+(the substitution matched nothing, so "not caught" described a tree that had not
+been mutated) and which is recorded rather than removed. The CI verdict, which is
+the judgment, is in the cycle record below.
 
-**Milestone 27 — routes document the response they return, and the documented
-shape is enforced.** The fourth and last surface of that family, and the half
-other systems build against. Measured first, by parsing the contract and driving
-all 52 operations: **34 of 52 operations documented no response schema at all**;
-**nothing in the repository had ever parsed `contracts/openapi/core-v1.yaml` as
-YAML** (`check-contracts.mjs` scans it with regular expressions, so two response
-objects broken by unquoted commas inside a flow map — a truncated sentence plus a
-junk key — had passed for the file's whole life); and nothing had ever compared a
-response body to the contract, which had hidden three shipped divergences.
-`POST /v1/organizations` and `GET /v1/organizations/{id}` **answered `{}`** —
-both handlers passed an unawaited promise as the body and `JSON.stringify`
-renders a promise as `{}`, so the call that creates a tenant never returned its
-id, and every test passed because every test read the status.
-`GET /v1/event-deliveries/undelivered` **returned `claim_token`**, the fencing
-credential a worker presents to acknowledge a delivery, to anybody holding
-`organization.read`. `GET /v1/sessions/current` returned six permissions the
-published `Permission` enum did not list. Now: a dependency-free contract reader
-with a strict validator (`tests/support/openapi.ts`), a scenario that drives all
-52 operations to a **success** status (`tests/support/http-scenario.ts`), 25 new
-component schemas and 33 response bodies documented, the router refusing any
-route that hands back a promise as its body, `redactDelivery` mirroring
-`redactSubscription`, and an 11-case gate that fails if any operation returns a
-property the contract does not document. **700** tests pass without
-`DATABASE_URL` and **1263** with it.
-**Verification at this working tree:** `tsc --noEmit` clean; `npm test` 700
-passed / 147 skipped without a database and 1262 + 1 = 1263 with `DATABASE_URL`
-against a real PostgreSQL 18.4, all 19 migrations applied; governance, contract,
-migration and roadmap gates passing. The falsifications, each applied to a
-committed tree and restored, are tabulated in
-`docs/http-response-declaration.md`. The CI verdict, which is the judgment, is in
-the cycle record below.
+### Milestone 27's entry, kept as written
+
+Kept rather than replaced, because it is the record of the previous cycle's
+verification and its counts are the baseline this cycle's are measured against. One
+additive correction: the skipped count it reports as 147 was 148 at that commit;
+the passing counts are unchanged.
+
+> **Last updated:** 2026-09-13
+> **Last milestone:** Routes document the response they return, and the documented
+> shape is enforced (milestone 27) — see the entry below. The previous milestone's
+> summary is kept beneath it: CORE reads only the request headers it declares, and accepts
+> them only in the shape it declares (milestone 26). Measured first: an
+> 8000-character `x-correlation-id` was accepted, echoed and persisted verbatim in
+> the `correlation_id` `text` column of every audit, outbox, ledger, inbound-event,
+> notification and subscription row a request creates, so any caller could write
+> kilobytes of chosen text into CORE's permanent audit trail with every ordinary
+> request; `"   "` became the identity of record, making the field six tables are
+> traced by meaningless; a repeated header was recorded as `"a, b"`, an id belonging
+> to neither half; and `bearer()` silently authenticated `[0]` of two credentials
+> while the rate limiter hashed its own reading of the same header. Now
+> `src/platform/http/headers.ts` declares the five headers CORE reads with a use, a
+> length bound and a written reason, `RequestHeaders` throws on an undeclared read,
+> and the router checks them **before the route is matched and before the limiter
+> runs** — which is also what makes the credential the limiter charges and the
+> credential `bearer()` authenticates the same value by construction. A refusal
+> never echoes the value that caused it. `x-correlation-id` and the bearer
+> credential are documented in the contract for the first time, the header parameter
+> referenced from all 52 operations.
+>
+> **Milestone 27 — routes document the response they return, and the documented
+> shape is enforced.** The fourth and last surface of that family, and the half
+> other systems build against. Measured first, by parsing the contract and driving
+> all 52 operations: **34 of 52 operations documented no response schema at all**;
+> **nothing in the repository had ever parsed `contracts/openapi/core-v1.yaml` as
+> YAML** (`check-contracts.mjs` scans it with regular expressions, so two response
+> objects broken by unquoted commas inside a flow map — a truncated sentence plus a
+> junk key — had passed for the file's whole life); and nothing had ever compared a
+> response body to the contract, which had hidden three shipped divergences.
+> `POST /v1/organizations` and `GET /v1/organizations/{id}` **answered `{}`** —
+> both handlers passed an unawaited promise as the body and `JSON.stringify`
+> renders a promise as `{}`, so the call that creates a tenant never returned its
+> id, and every test passed because every test read the status.
+> `GET /v1/event-deliveries/undelivered` **returned `claim_token`**, the fencing
+> credential a worker presents to acknowledge a delivery, to anybody holding
+> `organization.read`. `GET /v1/sessions/current` returned six permissions the
+> published `Permission` enum did not list. Now: a dependency-free contract reader
+> with a strict validator (`tests/support/openapi.ts`), a scenario that drives all
+> 52 operations to a **success** status (`tests/support/http-scenario.ts`), 25 new
+> component schemas and 33 response bodies documented, the router refusing any
+> route that hands back a promise as its body, `redactDelivery` mirroring
+> `redactSubscription`, and an 11-case gate that fails if any operation returns a
+> property the contract does not document. **700** tests pass without
+> `DATABASE_URL` and **1263** with it.
+> **Verification at this working tree:** `tsc --noEmit` clean; `npm test` 700
+> passed / 147 skipped without a database and 1262 + 1 = 1263 with `DATABASE_URL`
+> against a real PostgreSQL 18.4, all 19 migrations applied; governance, contract,
+> migration and roadmap gates passing. The falsifications, each applied to a
+> committed tree and restored, are tabulated in
+> `docs/http-response-declaration.md`. The CI verdict, which is the judgment, is in
+> the cycle record below.
 
 ### Milestone 26's entry, kept as written
 
@@ -234,7 +278,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 25 | Write routes accept only the body they declare | **Complete** — declared bodies enforced by the router on all 29 write routes, `ctx.body` removed, 16 gate tests, nine falsifications, four undocumented request bodies found and documented; CI verdict recorded in the cycle record below | The symmetric half of milestone 24, reserved **before** any file was edited this time. Milestone 24 closed the query string and its record named the request body as a separate question; measuring the body before reserving turned that into a money defect rather than a symmetry argument. **`POST /v1/payment-authorizations/:id/capture` with `{"amountMinor": 500}` — one camelCase typo — captured 5000, the entire remaining hold, and answered 200.** The route reads `amount_minor` and treats its absence as "capture everything", which is the correct meaning of an absent amount and a catastrophic meaning for a misspelled one; `refund` has the same shape. `POST /v1/wallets` accepts `nonsense` and `CURRENCY` alongside `currency` and reports 201. Every write route hand-parses `ctx.body as Record<string, unknown>` with per-module `objectBody`/`requiredString`/`optionalString` helpers duplicated across three files, and no route refuses a property it does not read. Scope: one declared body reader owned by the platform, a per-route declaration in the registration as with `accepts`, router-enforced refusal of unknown properties, `ctx.body` removed from `RequestContext` in favour of a parsed value that throws on an undeclared read, a gate driven off `registrations()`, and a cross-check against the `requestBody` schemas in `contracts/openapi/core-v1.yaml`. **The breaking-change objection, answered rather than ignored:** milestone 24's record argued strict body rejection breaks any client sending an extra field. It does — and milestone 5 records that no external system has adopted these contracts yet, so there is no such client today and this is the cheapest moment this change will ever have. A capture that silently takes ten times what was asked is not a compatibility feature |
 | 26 | Caller-supplied headers CORE records are validated at the boundary | **Complete, and self-enforcing from here** — `src/platform/http/headers.ts` is the only reader of a request header in `src`; five declared headers with a use, a bound and a recorded reason; refusal before the route is matched and before the limiter runs; no rejected value echoed; `CorrelationId` documented and referenced from all 52 operations; 15 gate tests, eleven falsifications including one that defeated the first version of the source scan. CI verdict recorded in the cycle below. Measured cause: | The third and last request surface, after the query string (24) and the body (25), and the only one where CORE stores what the caller sent. `x-correlation-id` is taken from the request verbatim if it is a non-empty string, then echoed in the response, written to structured logs, and persisted in `correlation_id` **`text`** columns on audit, outbox, ledger, inbound-event, notification and subscription rows. Measured against `main` at `a043ab7`, end to end through `createServer(core.router.nodeListener())` and a raw socket: **an 8000-character correlation id is accepted, echoed and recorded** (Node's own 16KB header limit is the only bound, so a caller can write kilobytes of attacker-chosen text into CORE's audit trail with every ordinary request, permanently, with no gate); **`"   "` is accepted as the identity of record**, so two unrelated requests correlate to the same blank id and the field every reconciliation and audit read traces by is meaningless; **`a\tb` is accepted**; and **a repeated header is joined by Node into `"a, b"` and recorded as one id**, so a later trace lookup by either half finds nothing, while `bearer()` silently takes `[0]` of a repeated `authorization` — the same silent-substitution class milestones 24 and 25 closed for parameters and properties. Not defects, measured and recorded as such: Node's parser refuses NUL, DEL and obs-fold with 400 before CORE sees them, so response splitting is not reachable — but a NUL correlation id would have been a backend divergence, since the reference backend accepts it and PostgreSQL refuses `0x00` in `text` outright. Neither `Authorization` nor `x-correlation-id` appears anywhere in `contracts/openapi/core-v1.yaml`, so the one header every route requires is undocumented. Scope: one platform module declaring the headers CORE reads and their accepted shape, router-enforced refusal of a malformed declared header **before any work**, no direct `ctx.headers[...]` read left outside it, a repeated declared header refused rather than silently narrowed, the headers documented in the contract, and a gate driven off the declaration with the same falsification discipline as 24 and 25 |
 | 27 | Routes document the response they return, and the documented shape is enforced | **Complete** (branch `http-response-declaration`) — the fourth and last surface of the HTTP contract family. Measured on `main` at `f71aba2` by *parsing* `contracts/openapi/core-v1.yaml` rather than scanning it: **34 of the 52 operations documented no response schema** (the reservation's text scan said 33; corrected additively here, and 35 if `/metrics`'s text body is counted), **nothing had ever parsed the contract as YAML** — so two response objects broken by unquoted commas inside a flow map had passed `check-contracts.mjs` for the file's whole life — and **nothing had ever compared a response body to the contract**, which hid three shipped divergences: `POST /v1/organizations` and `GET /v1/organizations/{id}` answered `{}` (unawaited promise as the body), `GET /v1/event-deliveries/undelivered` returned the `claim_token` fencing credential, and `GET /v1/sessions/current` returned six permissions the published `Permission` enum omitted. Now every operation documents the status, content type and schema it answers with; all 52 are driven to a success status and their real bodies validated strictly, an undocumented property failing the gate; the router refuses any route whose body is a thenable; and coverage is asserted three ways (contract = driven = registered). `tests/support/openapi.ts`, `tests/support/http-scenario.ts`, `tests/http-response-declaration.test.ts`, `docs/http-response-declaration.md`. | 26 |
-| 28 | Responses declare the headers they set, and every response carries the one every caller needs | **Reserved, measured, in progress on branch `http-response-headers`** — the last unclosed HTTP surface. Milestone 26 closed the headers CORE *reads*; milestone 27 closed the status, content type and body it *answers* with, and its record states explicitly that it says nothing about response **headers**. Measured on `main` at `ea793f3`, by driving all 52 operations and reading the real response: **`x-correlation-id` is set on all 52 responses and documented on none of them** — `0 of 52` operations document any response header for the status they return, and the only header documentation anywhere in `contracts/openapi/core-v1.yaml` is the four rate-limit headers on the shared `RateLimited` response; the three `x-ratelimit-*` headers are in fact returned on **every** limited response including successes and `401`s, so the contract documents them as a refusal-only feature when they are not; and — the defect — **an unmatched route answers `404` with no headers at all** (`src/platform/http/router.ts`, the `if (!matched)` branch returns a body and no `headers`), so the one response a caller gets when it cannot reach CORE at all is the one response it cannot correlate to CORE's logs, even though the body carries `correlation_id` and every other answer carries the header. Scope: one declaration of the response headers CORE sets with a reason and a shape, the router setting them on every answer including the unmatched and unhandled paths, documentation of each on the responses that carry it, and a gate driven off `registrations()` that measures the real headers of every operation rather than reading the router. | 27 |
+| 28 | Responses declare the headers they set, and every response carries the one every caller needs | **Complete** (branch `http-response-headers`) — the fifth and last undeclared HTTP surface. Measured on `main` at `ea793f3` by driving all 52 operations and reading the real answers: `x-correlation-id` set on **52 of 52** responses and documented on **0**; the three `x-ratelimit-*` headers sent on every limited response but documented only on the shared `RateLimited` 429; the unmatched `404` returning **no headers at all**; and the Node adapter's unparseable-body `400` answering `{code, message}` — the only refusal in CORE that was not the canonical `Error`. Now `src/platform/http/response-headers.ts` declares the six headers with when, why and an anchored shape; `sealHeaders` is the single place headers are produced and refuses an undeclared name or a wrong-shaped value, so an undocumented header is a 500 in a test rather than a field in production; both defective paths are fixed at the cause; and one `components/headers` section is referenced by every response object and both shared refusals, documented where the headers are really sent and withheld from the three routes `UNLIMITED_ROUTES` exempts — a set the gate derives from the limiter rather than restating. Nine gate cases, twelve falsifications (F10 invalid on its first attempt and recorded as such). 709/1272. `tests/http-response-header-declaration.test.ts`, `docs/http-response-headers.md`. | 27 |
 
 ### What was claimed complete and actually is
 
@@ -4091,6 +4135,88 @@ and unblocked. Every remaining milestone waits on something CORE does not own:
 milestone 2's multi-hold on a MARKET contract decision, 5 on MOVE/MARKET
 adoption, 7 on B-2/B-3, 9 on B-5/B-6, 10's ingestion on a MARKET producer and its
 policy on B-31…B-34, and 11 on B-35.
+## Cycle 2026-09-13 (seventeenth) — the answer nobody could trace
+
+**Reserved before any edit**, as the cycle discipline requires: measured on `main`
+at `ea793f3`, scope written into this file, branch `http-response-headers` cut from
+`main`, reservation commit `3e2eb24` pushed before a line of implementation existed.
+
+**Why this was the next item.** Rows 1–27 of the milestone table are complete or
+blocked on an owner decision recorded as a blocker (5, 7, 9 and 11 externally; B-14
+… B-19 on subscription policy, B-31 … B-34 on reputation policy, B-35 on ADR 0010's
+degradation rules, B-37 on the dead `idempotency_key` table, B-20 and B-30 on who
+owes what). Milestone 27's record ends with what it does not claim, and the first
+item is response headers. That was the only remaining item CORE owns end to end,
+needs no decision from anybody, and has a measurable defect.
+
+**What was measured, before anything changed.** All 52 operations driven through
+the real router, answers read rather than reasoned about:
+
+- `x-correlation-id`: set on 52 of 52 responses, documented on **0 of 52
+  operations**. The only header documentation anywhere in the contract was the four
+  rate-limit headers on the shared `RateLimited` response.
+- The three `x-ratelimit-*` headers: sent on **every** limited response — a `200`
+  and a `401` alike — and documented as though they belonged to the refusal.
+- The unmatched `404` (`if (!matched)` in `src/platform/http/router.ts`): **no
+  `headers` key at all**, while the body carried `correlation_id`.
+- The Node adapter's unparseable-body `400`: `{code, message}`, no
+  `correlation_id`, no `details`, no `retryable`, no header. Produced above the
+  router, which is why milestone 27's gate could not see it.
+
+**What was built.** One declaration (`src/platform/http/response-headers.ts`: name,
+when, why, anchored shape), one place headers are produced (`sealHeaders`, which
+refuses an undeclared name and a value that is not the declared shape, later parts
+winning so a route cannot overwrite CORE's own correlation id), both defective
+paths fixed at the cause, and one `components/headers` section in the contract
+referenced by every response object and by both shared refusal responses —
+replacing `RateLimited`'s four inline definitions, so each header is described once
+in the document.
+
+**The asymmetry with request headers is deliberate and recorded.** An undeclared
+*request* header is ignored, because proxies add their own and refusing them would
+refuse ordinary traffic (`headers.ts` states this). An undeclared *response* header
+is CORE's own doing, so it fails closed. `content-type` is declared in code because
+CORE sets it, and deliberately **not** documented in any response's `headers` map:
+OpenAPI ignores a response header named `Content-Type`, since the media type is
+already declared by `content`, which milestone 27 gates.
+
+**Two corrections to the contract, both the document catching up with the code.**
+The rate-limit trio is now documented on every limited response including
+successes; and it is documented on none of `/health`, `/ready` and `/metrics`,
+because `UNLIMITED_ROUTES` exempts them and documenting a header CORE never sends
+is the same defect in the other direction. The gate reads that exemption from the
+limiter, so a route added to it moves the code and the contract together.
+
+**Gate.** `tests/http-response-header-declaration.test.ts`, nine cases, no
+database. The strongest of them is the one that ties the header to the body: for
+every operation, `x-correlation-id` must equal the body's `correlation_id` wherever
+the body has one, so the two cannot drift into being two different facts about the
+same request.
+
+**Falsification.** Twelve mutations on a committed tree, all twelve caught, tree
+verified clean after each restore; the table is in `docs/http-response-headers.md`.
+F10's **first attempt was invalid**: it rewrote `"retry-after": …` as an object key
+while `rate-limit.ts` writes `headers["retry-after"] = …`, so nothing changed and
+the run reported "not caught" for a mutation that had not been made. Recorded here
+rather than deleted, and re-run correctly (`String(0)` for
+`String(Math.max(1, …))`), where the gate failed as it should. Same lesson as the
+last three cycles in a new form: check the diff before believing a negative result.
+
+**Measured, before and after.** 700 passed / 148 skipped → **709 passed / 148
+skipped** without a database; 1263 → **1272** with PostgreSQL 18.4. The nine new
+cases are the whole difference. Additive correction: an earlier summary recorded the
+skipped count at `ea793f3` as 147; it was 148. No passing count changes.
+
+**What this cycle does not claim.** It says nothing about which documented refusal
+statuses are actually reachable, or whether a produced refusal is documented — the
+obvious next cycle. It does not gate the wire format of `content-type` beyond
+`/metrics`. It makes no claim about the headers CORE sends as a *client* on
+outbound webhooks. And it does not turn the limiter's numbers into published
+promises: the gate asserts the budget counts down and reads `0` at the refusal, not
+what the budget is.
+
+**CI verdict.** Recorded below once read from GitHub Actions, not from the local run.
+
 ## Cycle 2026-09-13 (sixteenth) — the contract had never been read
 
 Scope: milestone 27. The three request surfaces were declared and gated
