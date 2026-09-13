@@ -20,6 +20,7 @@ import {
   type ReclaimOutcome,
 } from "./reclaim.js";
 import { putRow } from "../persistence/row-rules.js";
+import { inDueOrder } from "./queue-order.js";
 
 export interface EventSubscription {
   subscription_id: string;
@@ -293,10 +294,11 @@ export class InMemoryDeliveryStore implements DeliveryStore {
    * counts it, which is what makes a dying worker visible instead of merely slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<EventDelivery[]> {
-    const due = [...this.deliveries.values()]
-      .filter((d) => d.status === "pending" && d.claimed_at === null && new Date(d.next_attempt_at) <= now)
-      .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
-      .slice(0, limit);
+    const candidates = [...this.deliveries.values()].filter(
+      (d) => d.status === "pending" && d.claimed_at === null && new Date(d.next_attempt_at) <= now,
+    );
+    // Due order with an explicit tiebreak, shared with Postgres (milestone 21).
+    const due = inDueOrder(candidates, (row) => row.created_at).slice(0, limit);
     // The claimed rows, not the pre-claim ones: Postgres returns the updated
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
@@ -320,7 +322,8 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   /** See `DeliveryStore.reclaimExpired`. */
   async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
-    for (const delivery of this.deliveries.values()) {
+    // Due order (milestone 21): `limit` makes the order a selection.
+    for (const delivery of inDueOrder(this.deliveries.values(), (row) => row.created_at)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (delivery.status !== "pending" || delivery.claimed_at === null) continue;
       if (new Date(delivery.next_attempt_at).getTime() > now.getTime()) continue;

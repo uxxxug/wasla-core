@@ -16,6 +16,7 @@ import {
   type ReclaimOutcome,
 } from "./reclaim.js";
 import { putRow } from "../persistence/row-rules.js";
+import { inDueOrder } from "./queue-order.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
 
@@ -231,7 +232,12 @@ export class InMemoryOutbox implements OutboxStore {
     // acknowledgements a per-row token would. The two backends must agree on this,
     // or a test that passes in memory certifies nothing (B-12).
     const token = newClaimToken();
-    for (const record of this.records.values()) {
+    // Due order, not insertion order (milestone 21). This loop used to walk the
+    // Map, so with a retry pending the reference backend claimed the row that
+    // was appended first and Postgres claimed the row that was due first; under
+    // a limit the two backends handed a worker different work for the same
+    // call, and nothing in the suite could see it.
+    for (const record of inDueOrder(this.records.values(), (row) => row.created_at)) {
       if (record.status !== "pending") continue;
       if (record.claimed_at !== null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
@@ -259,7 +265,9 @@ export class InMemoryOutbox implements OutboxStore {
   /** See `OutboxStore.reclaimExpired`. */
   async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
-    for (const record of this.records.values()) {
+    // Due order, for the same reason as `claimDue`: `limit` makes the order a
+    // selection, so an unordered scan recovers a different subset than Postgres.
+    for (const record of inDueOrder(this.records.values(), (row) => row.created_at)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
