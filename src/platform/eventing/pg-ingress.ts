@@ -184,7 +184,11 @@ export class PgInboundEventStore implements InboundEventStore {
        where event_id in (
          select event_id from inbound_event
          where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
-         order by next_attempt_at
+         -- Two keys, not one: with a limit, ordering by next_attempt_at alone is
+         -- not a total order over rows that became due in the same millisecond,
+         -- so which rows a recovery run picked was left to the plan (milestone
+         -- 21). The reference backend spells the same two keys.
+         order by next_attempt_at, received_at
          limit $2
          for update skip locked
        )

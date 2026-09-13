@@ -17,6 +17,7 @@ import {
   type ReclaimOutcome,
 } from "./reclaim.js";
 import { putRow } from "../persistence/row-rules.js";
+import { inDueOrder } from "./queue-order.js";
 
 export type InboundStatus = "pending" | "processed" | "dead";
 
@@ -262,10 +263,12 @@ export class InMemoryInboundEventStore implements InboundEventStore {
    * counts it, which is what makes a dying dispatcher visible instead of slow.
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<InboundRecord[]> {
-    const due = [...this.records.values()]
-      .filter((r) => r.status === "pending" && r.claimed_at === null && new Date(r.next_attempt_at) <= now)
-      .sort((a, b) => a.next_attempt_at.localeCompare(b.next_attempt_at))
-      .slice(0, limit);
+    const candidates = [...this.records.values()].filter(
+      (r) => r.status === "pending" && r.claimed_at === null && new Date(r.next_attempt_at) <= now,
+    );
+    // Due order with an explicit tiebreak, shared with Postgres (milestone 21).
+    // Sorting by next_attempt_at alone left ties to the Map's insertion order.
+    const due = inDueOrder(candidates, (row) => row.received_at).slice(0, limit);
     // The claimed records, not the pre-claim ones: Postgres returns the updated
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
@@ -289,7 +292,8 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   /** See `InboundEventStore.reclaimExpired`. */
   async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
-    for (const record of this.records.values()) {
+    // Due order (milestone 21): `limit` makes the order a selection.
+    for (const record of inDueOrder(this.records.values(), (row) => row.received_at)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;

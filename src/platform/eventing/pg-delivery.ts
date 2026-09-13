@@ -254,7 +254,11 @@ export class PgDeliveryStore implements DeliveryStore {
        where delivery_id in (
          select delivery_id from event_delivery
          where status = 'pending' and claimed_at is not null and next_attempt_at <= $1
-         order by next_attempt_at
+         -- Two keys, not one: with a limit, ordering by next_attempt_at alone is
+         -- not a total order over rows that became due in the same millisecond,
+         -- so which rows a recovery run picked was left to the plan (milestone
+         -- 21). The reference backend spells the same two keys.
+         order by next_attempt_at, created_at
          limit $2
          for update skip locked
        )
