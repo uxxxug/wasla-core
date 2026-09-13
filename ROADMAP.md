@@ -4191,6 +4191,15 @@ As an
 independent cross-check, Python's `yaml.safe_load` was run against the contract
 and agrees with the new reader that no response object carries an undefined key.
 
+**CI verdict — the judgment.** GitHub Actions run
+[34780245137](https://github.com/uxxxug/wasla-core/actions/runs/34780245137) on
+commit `d973554` (PR #18). *Verify without a database*: **700 passed / 147
+skipped** across 51 files, 2 files skipped, plus the cluster file skipped.
+*Verify against PostgreSQL* (`postgres:16`, `en_US.utf8`): **1262 passed across 53
+files and 1 passed in the cluster file — 1263 in total**, none skipped. Both jobs
+green, and both counts equal the local readings above, so the local measurement
+and the judgment agree exactly this cycle.
+
 What this cycle does not claim is written out in
 `docs/http-response-declaration.md`: it does not prove the schemas cover every
 value a property can take (they cover what CORE produced here plus its own
