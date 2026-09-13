@@ -81,9 +81,60 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The referential-integrity cycle that held this slot is
-finished and recorded below; the next actionable item is milestone 16,
-trigger-invariant parity, which nothing is holding.
+**Reserved: trigger-invariant parity between the reference backend and Postgres
+(branch `trigger-parity`, milestone 16).** The three declarative families of
+B-12 are closed — 24 uniqueness rules, 100 check constraints, 30 foreign keys.
+This is what is left: the schema installs **12 triggers**, and a trigger is a
+different kind of rule from the three before it. A `CHECK` judges a row; a
+trigger can judge a **transition** (what the row was, and what it is becoming),
+can read *other* tables, and can be deferred to commit. None of that can be
+expressed in a row-shaped predicate table, which is why it was deliberately
+left last.
+
+Measured before reserving, from `pg_trigger` and `pg_get_functiondef` rather
+than from the migration text: 12 triggers, of which **4 are constraint triggers,
+`DEFERRABLE INITIALLY DEFERRED`** (the ledger balance, the two
+authorization/ledger agreements, and the period/money agreement) and 8 are
+immediate `BEFORE` triggers. Five trigger names appear anywhere in `src/`, all
+five in the subscription store. Seven do not.
+
+The gaps that measurement exposes, before any is fixed:
+
+- `subscription_currency_check` is **not restated in the reference store at
+  all**. It refuses two things: a subscription billing a plan in one currency
+  against a wallet in another, and — on insert only — a subscription to a plan
+  that is not `active`. Both are refused today by `SubscriptionService`, not by
+  the store, so any test that goes through the repository accepts a subscription
+  Postgres refuses, and the service is the only thing standing between a
+  currency mismatch and the ledger.
+- `ledger_transaction_balance` is enforced in memory by `assertBalanced` in the
+  money domain, which throws **immediately** where Postgres defers to commit,
+  and its message omits the transaction id the database names. Same verdict,
+  different timing and different wording, and the timing difference is the one
+  that matters: a transaction that is unbalanced mid-way and balanced by its own
+  last write is legal in Postgres and refused in memory.
+- The two `payment_authorization`/`ledger` agreements and the period/money
+  agreement **are** deferred in memory, through the journal, but nothing
+  measures that the two backends refuse the same cases, and no gate reads
+  `pg_trigger`, so a migration adding a trigger ships with no parity today —
+  exactly the hole the uniqueness, check and foreign-key gates were built to
+  close for their own families.
+- Three append-only triggers (`audit_entry`, `ledger_entry`, `usage_record`) and
+  the `reputation_signal` append-only trigger look unreachable through the
+  ports: there is no `updateUsage`, no entry update, no audit mutation, and
+  `retractIfStanding` narrows on `retracted_at is null` so the trigger never
+  fires. Unreachable is a legitimate exemption and a claim that has to be
+  proven per trigger, not assumed for the group — the check-constraint cycle
+  recorded twelve exemptions and one of them turned out to be a defect.
+
+Scope: an inventory of the 12 measured from the catalogue; the reachable
+transition invariants restated once in the reference backend, on the write path
+rather than at the call sites; wording that quotes what Postgres raises; a probe
+per trigger on both backends asserting the refusal **and** its reason, including
+deferred cases asserted at the commit point and not at the write; and a
+coverage gate reading `pg_trigger` at run time so a new trigger cannot ship
+without parity. Exemptions recorded with a reason each, and each exemption's
+unreachability asserted rather than asserted-in-prose.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
