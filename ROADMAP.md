@@ -4816,5 +4816,18 @@ before: counts are updated by addition, never by erasure.
 
 ### CI verdict for this cycle — read from the run, not assumed
 
-Recorded in the commit that follows the push, from the run's own log archive
-rather than from a local run.
+Head `abf8e69` on `delete-path-parity`, run `34740853198` (pull request) and
+`34740837452` (push), [PR #8](https://github.com/uxxxug/wasla-core/pull/8):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 34s | **557 passed, 56 skipped** in 41 of 43 files, then the migration-lifecycle file **1 skipped** |
+| `Verify against PostgreSQL` | **success**, 2m1s | **1026 passed in 43 files** with `DATABASE_URL` against `postgres:16`, then the migration-lifecycle pass **1 passed** |
+
+Read from the run's own log archive rather than from a local run, and the totals
+match the local ones exactly (1026 + 1, and 557 / 56). What matters for this
+cycle specifically is that the two catalog gates ran there: the referential
+actions were compared with `confdeltype`/`confupdtype`, and the deletable tables
+with `pg_constraint` and `pg_trigger`, on a database CI built from the 19
+migrations — so `delete-actions.ts` is checked against the schema CI produces
+and not only the one on this machine.
