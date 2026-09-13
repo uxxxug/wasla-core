@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createCoreApp, type CoreApp } from "../src/app.js";
 import { FixedClock } from "../src/platform/clock.js";
+import { parseHeaders } from "../src/platform/http/headers.js";
 import { makeEvent } from "../src/platform/eventing/envelope.js";
 import {
   memoryPersistence,
@@ -115,8 +116,8 @@ describe("rate limit policy", () => {
 
   it("keys on the credential, and falls back to the address only without one", () => {
     const token = `tok-${randomUUID()}`;
-    const a = subjectFor({ authorization: `Bearer ${token}` });
-    const b = subjectFor({ authorization: `bearer ${token}`, "x-forwarded-for": "203.0.113.9" });
+    const a = subjectFor(parseHeaders({ authorization: `Bearer ${token}` }));
+    const b = subjectFor(parseHeaders({ authorization: `bearer ${token}`, "x-forwarded-for": "203.0.113.9" }));
     // Same credential, different address: one subject. The address does not
     // participate when a credential is present.
     expect(a).toEqual(b);
@@ -125,15 +126,15 @@ describe("rate limit policy", () => {
     expect(a.hash).not.toContain(token);
     expect(a.hash).toMatch(/^[0-9a-f]{64}$/);
 
-    const other = subjectFor({ authorization: `Bearer tok-${randomUUID()}` });
+    const other = subjectFor(parseHeaders({ authorization: `Bearer tok-${randomUUID()}` }));
     expect(other.hash).not.toBe(a.hash);
 
-    const network = subjectFor({ "x-forwarded-for": "203.0.113.9, 70.41.3.18" });
+    const network = subjectFor(parseHeaders({ "x-forwarded-for": "203.0.113.9, 70.41.3.18" }));
     expect(network.kind).toBe("network");
     // The first hop is the client; the rest is proxy chain.
-    expect(network.hash).toBe(subjectFor({ "x-real-ip": "203.0.113.9" }).hash);
+    expect(network.hash).toBe(subjectFor(parseHeaders({ "x-real-ip": "203.0.113.9" })).hash);
     // Nothing to attribute at all is still a subject, not an exemption.
-    expect(subjectFor({}).kind).toBe("network");
+    expect(subjectFor(parseHeaders({})).kind).toBe("network");
   });
 
   it("ships defaults that are finite and tightest where the path is unknown", () => {

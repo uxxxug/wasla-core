@@ -3,6 +3,7 @@ import { CoreError } from "../errors.js";
 import { newId } from "../ids.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
 import { NO_BODY, parseBody, type Body, type BodySpec } from "./body.js";
+import { parseHeaders, type RawHeaders, type RequestHeaders } from "./headers.js";
 import { parseSelection, type ParamSpec, type Selection } from "./query.js";
 import {
   rateClassFor,
@@ -37,7 +38,16 @@ export interface RequestContext {
    * asks for it with `ctx.input.raw()` and declares `opaqueBody(reason)`.
    */
   input: Body;
-  headers: Record<string, string | string[] | undefined>;
+  /**
+   * The declared request headers, already checked.
+   *
+   * Not a `Record`, for the reason there is no `URLSearchParams` and no raw
+   * `body`: milestone 26 measured an 8000-character `x-correlation-id` accepted,
+   * echoed and stored, `"   "` accepted as the identity of record, and a repeated
+   * `authorization` silently narrowed to its first value. A reader can only ask
+   * for a header `DECLARED_HEADERS` names, and asking for anything else throws.
+   */
+  headers: RequestHeaders;
   correlation_id: string;
   request_id: string;
 }
@@ -223,15 +233,51 @@ export class Router {
     method: string;
     url: string;
     body?: unknown;
-    headers?: Record<string, string | string[] | undefined>;
+    headers?: RawHeaders;
   }): Promise<HandlerResult> {
     const started = Date.now();
     const url = new URL(input.url, "http://core.local");
-    const headers = input.headers ?? {};
-    const correlationHeader = headers["x-correlation-id"];
-    const correlationId =
-      typeof correlationHeader === "string" && correlationHeader ? correlationHeader : newId();
     const requestId = newId();
+
+    // The headers first, before the route is matched and before the limiter
+    // runs. Two reasons, both recorded in `headers.ts`: the limiter derives its
+    // subject from `authorization` and the forwarding headers, so it cannot run
+    // before those are known to be single and bounded; and the correlation id
+    // becomes CORE's own record of this request the moment anything is logged, so
+    // it has to be a value CORE is willing to store before it is used once.
+    let headers: RequestHeaders;
+    try {
+      headers = parseHeaders(input.headers ?? {});
+    } catch (err) {
+      const coreError = err instanceof CoreError ? err : new CoreError("internal", "unexpected error");
+      // A generated id, never the rejected header. Echoing the value that caused
+      // the refusal would put it in the response, the log and the metric — the
+      // three places the refusal exists to keep it out of.
+      const correlationId = newId();
+      const duration = Date.now() - started;
+      this.record(
+        {
+          level: "error",
+          request_id: requestId,
+          correlation_id: correlationId,
+          method: input.method,
+          path: url.pathname,
+          status: coreError.status,
+          duration_ms: duration,
+          error_code: coreError.code,
+        },
+        // `unmatched`, not the template: the route has deliberately not been
+        // looked up yet, and inventing a label here would be a guess.
+        "unmatched",
+        duration,
+      );
+      return {
+        status: coreError.status,
+        body: coreError.toBody(correlationId),
+        headers: { "x-correlation-id": correlationId },
+      };
+    }
+    const correlationId = headers.value("x-correlation-id") ?? newId();
 
     const matched = this.match(input.method, url.pathname);
     // `unmatched` rather than the path itself: an unknown path is attacker-
@@ -248,6 +294,7 @@ export class Router {
     let rateHeaders: Record<string, string> = {};
     if (this.options.rateLimiter && rateClass !== null) {
       const subject = subjectFor(headers);
+
       const decision = await this.options.rateLimiter.check(subject, rateClass);
       rateHeaders = rateLimitHeaders(decision);
       if (!decision.allowed) {
