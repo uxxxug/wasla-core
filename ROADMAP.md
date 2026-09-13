@@ -4191,3 +4191,16 @@ and throws, naming the constraint, for the key collision.
 Branch protection is still unconfigurable on this plan (403 on both the
 protection and rulesets endpoints), so CI remains informative rather than
 required. Recorded as **B-36** instead of left as an implied to-do.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `d52d298` on `uniqueness-parity`, run `34726940841`, [PR #4](https://github.com/uxxxug/wasla-core/pull/4):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 37s | the dependency-free pass still stands on its own |
+| `Verify against PostgreSQL` | **success**, 2m3s | **735 tests passed in 39 files** with `DATABASE_URL` set against `postgres:16`, then the migration-lifecycle pass **1 passed**; newest migration rolled back and re-applied |
+
+The local numbers and the CI numbers agree exactly (735 + 1), which is the point
+of the parity file: the eleven rules it now covers on the reference backend are
+enforced by a run nobody's machine configured.
