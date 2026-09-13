@@ -81,23 +81,22 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Milestone 20 closed the read path (see
-`docs/read-path-parity.md` and the cycle record at the end of this file); the
-reservation it held is released here in the same commit range that closed it.
+**Reserved: milestone 21 — parity for what a store selects *by*.** Branch
+`selection-parity`. Held by this reservation until the cycle closes or the
+reservation is released here.
 
-**Next actionable item: milestone 21 — the reference stores are gated on what
-they accept and what they return, and ungated on what they *select by*.** Both
-halves of milestone 20 say so in as many words: the static gate proves no column
-is unreachable and cannot prove a read returns the right *rows*; the behavioural
+Milestone 20 said this in as many words: the static gate proves no column is
+unreachable and cannot prove a read returns the right *rows*; the behavioural
 gate compares two records for one write and says nothing about a predicate over
-many. The measurable gap: every adapter's `where` clause, `order by` and
-`limit` against the reference store's filter and sort for the same call. The
-three known claim/lease queries (`claimDue`, `reclaimExpired`, `select` for
-replay) each encode a predicate twice, once in SQL and once in TypeScript, with
-nothing comparing them — and `claimDue` is where B-22 was found, so this is the
-family with the worst history in the repository. A cycle would fill both
-backends with the same population of rows, run each listing on both, and compare
-the returned ids in order.
+many. Every queue predicate in CORE is written twice — once in SQL, once in
+TypeScript — and nothing compares the two. `claimDue` is where B-22 was found
+and `reclaimExpired` is where B-24 and B-25 were, so this is the family with the
+worst history in the repository.
+
+Scope of the reservation: `tests/selection-parity.test.ts`, and whatever
+divergence the measurement shows in the listing and claiming paths of
+`outbox`, `inbound_event` and `event_delivery`. Anything outside that scope is
+recorded as a blocker rather than fixed here.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
