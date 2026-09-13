@@ -18,6 +18,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { putRow } from "../persistence/row-rules.js";
 
 export interface EventSubscription {
   subscription_id: string;
@@ -218,7 +219,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       }
     }
     journalMapWrite(scope, this.subscriptions, subscription.subscription_id);
-    this.subscriptions.set(subscription.subscription_id, subscription);
+    putRow("event_subscription", this.subscriptions, subscription.subscription_id, subscription);
   }
 
   async getSubscription(subscriptionId: string): Promise<EventSubscription | undefined> {
@@ -245,7 +246,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   async setSubscriptionActive(subscriptionId: string, active: boolean): Promise<void> {
     const existing = this.subscriptions.get(subscriptionId);
     if (!existing) return;
-    this.subscriptions.set(subscriptionId, { ...existing, active });
+    putRow("event_subscription", this.subscriptions, subscriptionId, { ...existing, active });
   }
 
   async queue(delivery: EventDelivery, scope: TransactionScope = NO_SCOPE): Promise<boolean> {
@@ -259,7 +260,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       }
     }
     journalMapWrite(scope, this.deliveries, delivery.delivery_id);
-    this.deliveries.set(delivery.delivery_id, delivery);
+    putRow("event_delivery", this.deliveries, delivery.delivery_id, delivery);
     return true;
   }
 
@@ -303,7 +304,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
         claimed_at: now.toISOString(),
         claim_token: token,
       };
-      this.deliveries.set(delivery.delivery_id, next);
+      putRow("event_delivery", this.deliveries, delivery.delivery_id, next);
       claimed.push(next);
     }
     return claimed;
@@ -318,7 +319,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
       if (new Date(delivery.next_attempt_at).getTime() > now.getTime()) continue;
       const reclaims = delivery.reclaims + 1;
       const exhausted = reclaimExhausted(delivery.reclaims, maxReclaims);
-      this.deliveries.set(delivery.delivery_id, {
+      putRow("event_delivery", this.deliveries, delivery.delivery_id, {
         ...delivery,
         reclaims,
         status: exhausted ? "dead" : delivery.status,
@@ -344,7 +345,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     // Checked and written with no await in between, so the two backends race the
     // same way (B-12).
     if (!existing || isFenced(existing.claim_token, fence)) return false;
-    this.deliveries.set(deliveryId, {
+    putRow("event_delivery", this.deliveries, deliveryId, {
       ...existing,
       status: "delivered",
       attempts: existing.attempts + 1,
@@ -371,7 +372,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   ): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
     if (!existing || isFenced(existing.claim_token, fence)) return false;
-    this.deliveries.set(deliveryId, {
+    putRow("event_delivery", this.deliveries, deliveryId, {
       ...existing,
       attempts: existing.attempts + 1,
       last_error: error,
@@ -393,7 +394,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   ): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
     if (!existing || isFenced(existing.claim_token, fence)) return false;
-    this.deliveries.set(deliveryId, {
+    putRow("event_delivery", this.deliveries, deliveryId, {
       ...existing,
       status: "dead",
       attempts: existing.attempts + 1,
@@ -409,7 +410,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   async markSuppressed(deliveryId: string, fence: Fence, reason: string): Promise<boolean> {
     const existing = this.deliveries.get(deliveryId);
     if (!existing || isFenced(existing.claim_token, fence)) return false;
-    this.deliveries.set(deliveryId, {
+    putRow("event_delivery", this.deliveries, deliveryId, {
       ...existing,
       status: "dead",
       // `attempts` and `last_status` deliberately untouched: nothing was sent.
@@ -449,7 +450,7 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   async revive(deliveryId: string, now: Date): Promise<boolean> {
     const delivery = this.deliveries.get(deliveryId);
     if (!delivery || delivery.status !== "dead") return false;
-    this.deliveries.set(deliveryId, {
+    putRow("event_delivery", this.deliveries, deliveryId, {
       ...delivery,
       status: "pending",
       next_attempt_at: now.toISOString(),

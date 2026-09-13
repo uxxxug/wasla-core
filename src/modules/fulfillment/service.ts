@@ -35,6 +35,7 @@ import {
   OPEN_STATUSES,
   requiresFinancialDecision,
 } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 const PRODUCER = "wasla-core";
 
@@ -143,7 +144,7 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     }
     this.assertJobReferenceFree(fulfillment);
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
-    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    putRow("fulfillment", this.rows, fulfillment.fulfillment_id, fulfillment);
   }
   async insertIfAbsent(
     fulfillment: Fulfillment,
@@ -153,13 +154,13 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
       return "duplicate_order_reference";
     }
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
-    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    putRow("fulfillment", this.rows, fulfillment.fulfillment_id, fulfillment);
     return "inserted";
   }
   async update(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
     this.assertJobReferenceFree(fulfillment);
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
-    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    putRow("fulfillment", this.rows, fulfillment.fulfillment_id, fulfillment);
   }
 
   /**
@@ -198,7 +199,7 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     const stored = this.rows.get(fulfillment.fulfillment_id);
     if (!stored || !expected.includes(stored.status)) return "stale";
     journalMapWrite(scope, this.rows, fulfillment.fulfillment_id);
-    this.rows.set(fulfillment.fulfillment_id, fulfillment);
+    putRow("fulfillment", this.rows, fulfillment.fulfillment_id, fulfillment);
     return "applied";
   }
   /** See `FulfillmentRepository.markExecutedAfterCancellation`. */
@@ -213,7 +214,7 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     if (!stored || stored.status !== "cancelled") return "stale";
     if (stored.executed_after_cancellation_at !== null) return "stale";
     journalMapWrite(scope, this.rows, input.fulfillment_id);
-    this.rows.set(input.fulfillment_id, {
+    putRow("fulfillment", this.rows, input.fulfillment_id, {
       ...stored,
       executed_after_cancellation_at: input.executed_at,
       executed_after_cancellation_job_reference: input.job_reference,

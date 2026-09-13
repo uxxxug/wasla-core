@@ -35,13 +35,35 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { FixedClock } from "../src/platform/clock.js";
-import { makeEvent } from "../src/platform/eventing/envelope.js";
 import {
   memoryPersistence,
   postgresPersistence,
   type Persistence,
 } from "../src/platform/persistence/backends.js";
 import { NO_SCOPE } from "../src/platform/persistence/transaction.js";
+import {
+  delivery,
+  eventSubscription,
+  fulfillment,
+  identity,
+  LATER,
+  notification,
+  NOW,
+  organization,
+  period,
+  refuse,
+  seedAuthorization,
+  seedCapturedAuthorization,
+  seedCountry,
+  seedEvent,
+  seedPlan,
+  seedPrincipal,
+  seedRecipient,
+  seedSubscription,
+  seedWallet,
+  signal,
+  type Verdict,
+} from "./support/rows.js";
 
 const url = process.env.DATABASE_URL;
 
@@ -51,12 +73,6 @@ const TABLES = `reputation_signal, notification, notification_recipient, members
   subscription_period, subscription, plan_grant, plan, event_delivery,
   event_subscription, inbound_event, organization, outbox, inbox,
   idempotency_key, audit_entry, service_area, city, region`;
-
-/** What the second write did. `accepted` is always a parity failure. */
-type Verdict =
-  | { readonly refused: false }
-  | { readonly refused: true; readonly kind: "error"; readonly detail: string }
-  | { readonly refused: true; readonly kind: "outcome"; readonly detail: string };
 
 interface ParityCase {
   /** The constraint or index name in the schema. */
@@ -81,381 +97,6 @@ interface ParityCase {
   readonly aliases?: readonly string[];
   /** Seeds whatever the second write needs, then attempts it. */
   probe(store: Persistence): Promise<Verdict>;
-}
-
-async function refuse(write: () => Promise<unknown>): Promise<Verdict> {
-  try {
-    await write();
-    return { refused: false };
-  } catch (error) {
-    return {
-      refused: true,
-      kind: "error",
-      detail: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
-const NOW = "2026-01-01T00:00:00.000Z";
-const LATER = "2026-02-01T00:00:00.000Z";
-
-function identity(id: string, legacy: string | null = null) {
-  return {
-    identity_id: id,
-    status: "active" as const,
-    canonical_identity_id: null,
-    display_name: "Parity",
-    created_at: NOW,
-    updated_at: NOW,
-    source_system: "parity",
-    legacy_id: legacy,
-  };
-}
-
-function organization(id: string, legacy: string | null = null) {
-  return {
-    organization_id: id,
-    name: `Parity ${id.slice(0, 8)}`,
-    status: "active" as const,
-    country_code: "SA",
-    created_at: NOW,
-    updated_at: NOW,
-    source_system: "parity",
-    legacy_id: legacy,
-  };
-}
-
-async function seedCountry(store: Persistence): Promise<void> {
-  await store.geography.upsertCountry(
-    { country_code: "SA", name: "Saudi Arabia", default_currency: "SAR", status: "active" },
-    NO_SCOPE,
-  );
-}
-
-/** An identity with a principal on it, which most identity-side rules need. */
-async function seedPrincipal(
-  store: Persistence,
-): Promise<{ identityId: string; principalId: string }> {
-  const identityId = randomUUID();
-  const principalId = randomUUID();
-  await store.identity.insertIdentity(identity(identityId), NO_SCOPE);
-  await store.identity.insertPrincipal(
-    { principal_id: principalId, identity_id: identityId, created_at: NOW, service_name: null },
-    NO_SCOPE,
-  );
-  return { identityId, principalId };
-}
-
-async function seedWallet(store: Persistence): Promise<string> {
-  const walletId = randomUUID();
-  await store.money.insertWallet(
-    {
-      wallet_id: walletId,
-      owner_type: "organization",
-      owner_id: randomUUID(),
-      currency: "SAR",
-      status: "active",
-      created_at: NOW,
-    },
-    NO_SCOPE,
-  );
-  return walletId;
-}
-
-async function seedAuthorization(
-  store: Persistence,
-  walletId: string,
-  reference: string,
-  amount = 1_000,
-): Promise<string> {
-  const authorizationId = randomUUID();
-  await store.money.insertAuthorization(
-    {
-      authorization_id: authorizationId,
-      wallet_id: walletId,
-      amount_minor: amount,
-      captured_minor: 0,
-      refunded_minor: 0,
-      currency: "SAR",
-      status: "authorized",
-      business_reference: reference,
-      created_at: NOW,
-      expires_at: LATER,
-      captured_at: null,
-      voided_at: null,
-      void_reason: null,
-    },
-    NO_SCOPE,
-  );
-  return authorizationId;
-}
-
-/**
- * An event row in the outbox.
- *
- * Both queue tables carry a foreign key to `outbox(event_id)`, which is the
- * schema saying a delivery cannot exist for an event CORE never published. The
- * memory store does not enforce it, so a fixture inventing an event id passes
- * there and fails on Postgres — a difference this file exists to notice rather
- * than work around.
- */
-async function seedEvent(store: Persistence): Promise<string> {
-  const event = makeEvent({
-    event_type: "core.fulfillment.completed",
-    version: 1,
-    producer: "core",
-    occurred_at: new Date(NOW),
-    correlation_id: "corr-parity",
-    entity_type: "fulfillment",
-    entity_id: randomUUID(),
-    payload: {},
-  });
-  await store.outbox.append(event, NO_SCOPE);
-  return event.event_id;
-}
-
-/**
- * A hold whose captured amount the ledger actually accounts for.
- *
- * Written in three steps because `payment_authorization_ledger_agrees` refuses
- * an authorization claiming a capture the ledger cannot show: insert the hold
- * empty, record the movement, then raise the aggregate. Doing it in one insert
- * is what the trigger is there to stop.
- */
-async function seedCapturedAuthorization(
-  store: Persistence,
-  walletId: string,
-  amount = 1_000,
-): Promise<string> {
-  const reference = `hold:${randomUUID()}`;
-  const authorizationId = await seedAuthorization(store, walletId, reference, amount);
-  const transactionId = randomUUID();
-  // One transaction, because the ledger balance rule is checked at COMMIT and
-  // the header, its entries and the raised aggregate have to reach it together.
-  await store.boundary.run(async (scope) => {
-    await store.money.insertTransaction(
-      {
-        transaction_id: transactionId,
-        kind: "capture",
-        business_reference: `capture:${authorizationId}`,
-        authorization_id: authorizationId,
-        occurred_at: NOW,
-        entries: [
-          {
-            entry_id: randomUUID(),
-            transaction_id: transactionId,
-            account_reference: `wallet:${walletId}`,
-            amount_minor: -amount,
-            currency: "SAR",
-          },
-          {
-            entry_id: randomUUID(),
-            transaction_id: transactionId,
-            account_reference: "clearing:captured",
-            amount_minor: amount,
-            currency: "SAR",
-          },
-        ],
-      },
-      scope,
-    );
-    const held = await store.money.getAuthorization(authorizationId);
-    if (!held) throw new Error("seed failed: authorization vanished");
-    await store.money.updateAuthorization(
-      { ...held, captured_minor: amount, status: "captured", captured_at: NOW },
-      scope,
-    );
-  });
-  return authorizationId;
-}
-
-async function seedPlan(store: Persistence, code: string): Promise<string> {
-  const planId = randomUUID();
-  await store.subscription.insertPlan(
-    {
-      plan_id: planId,
-      code,
-      name: "Parity plan",
-      currency: "SAR",
-      amount_minor: 1_000,
-      billing_interval: "month",
-      interval_count: 1,
-      status: "active",
-      created_at: NOW,
-      activated_at: NOW,
-      retired_at: null,
-    },
-    NO_SCOPE,
-  );
-  return planId;
-}
-
-async function seedSubscription(store: Persistence): Promise<string> {
-  const walletId = await seedWallet(store);
-  const planId = await seedPlan(store, `parity-${randomUUID().slice(0, 8)}`);
-  const subscriptionId = randomUUID();
-  await store.subscription.insertSubscription(
-    {
-      subscription_id: subscriptionId,
-      owner_type: "organization",
-      owner_id: randomUUID(),
-      plan_id: planId,
-      wallet_id: walletId,
-      status: "active",
-      created_at: NOW,
-      cancelled_at: null,
-      cancel_reason: null,
-      ended_at: null,
-    },
-    NO_SCOPE,
-  );
-  return subscriptionId;
-}
-
-function period(
-  subscriptionId: string,
-  overrides: Partial<{
-    period_id: string;
-    sequence: number;
-    starts_at: string;
-    ends_at: string;
-    status: "pending" | "settled" | "uncollectible" | "voided";
-    authorization_id: string | null;
-    settled_at: string | null;
-    amount_minor: number;
-  }> = {},
-) {
-  return {
-    period_id: overrides.period_id ?? randomUUID(),
-    subscription_id: subscriptionId,
-    sequence: overrides.sequence ?? 1,
-    starts_at: overrides.starts_at ?? NOW,
-    ends_at: overrides.ends_at ?? LATER,
-    currency: "SAR",
-    amount_minor: overrides.amount_minor ?? 1_000,
-    status: overrides.status ?? "pending",
-    authorization_id: overrides.authorization_id ?? null,
-    created_at: NOW,
-    settled_at: overrides.settled_at ?? null,
-    uncollectible_reason: null,
-  };
-}
-
-async function seedRecipient(store: Persistence, organizationId: string, identityId: string) {
-  const recipientId = randomUUID();
-  await store.notification.insertRecipient(
-    {
-      recipient_id: recipientId,
-      organization_id: organizationId,
-      event_type: "core.fulfillment.completed",
-      identity_id: identityId,
-      channel: "telegram",
-      active: true,
-      created_at: NOW,
-    },
-    NO_SCOPE,
-  );
-  return recipientId;
-}
-
-function notification(
-  recipientId: string,
-  organizationId: string,
-  overrides: Partial<{ event_id: string; idempotency_key: string }> = {},
-) {
-  return {
-    notification_id: randomUUID(),
-    event_id: overrides.event_id ?? randomUUID(),
-    recipient_id: recipientId,
-    organization_id: organizationId,
-    channel: "telegram" as const,
-    address: "12345",
-    template: "fulfillment_completed" as const,
-    subject: null,
-    body: "parity",
-    data: {},
-    idempotency_key: overrides.idempotency_key ?? `parity-${randomUUID()}`,
-    status: "pending" as const,
-    attempts: 0,
-    last_error: null,
-    provider_message_id: null,
-    claim_token: null,
-    claimed_at: null,
-    next_attempt_at: NOW,
-    created_at: NOW,
-    accepted_at: null,
-    delivered_at: null,
-    failed_at: null,
-  };
-}
-
-function fulfillment(
-  organizationId: string,
-  orderReference: string,
-  jobReference: string | null,
-) {
-  return {
-    fulfillment_id: randomUUID(),
-    organization_id: organizationId,
-    market_order_reference: orderReference,
-    move_job_reference: jobReference,
-    payment_authorization_id: null,
-    status: "coordinating" as const,
-    settlement_state: "none" as const,
-    created_at: NOW,
-    completed_at: null,
-    closure_reason: null,
-    executed_after_cancellation_at: null,
-    executed_after_cancellation_job_reference: null,
-  };
-}
-
-function eventSubscription(subscriber: string, eventType: string) {
-  return {
-    subscription_id: randomUUID(),
-    subscriber,
-    event_type: eventType,
-    endpoint_url: "https://example.invalid/hook",
-    signing_secret: "parity-secret-parity-secret",
-    active: true,
-    created_at: NOW,
-  };
-}
-
-function delivery(eventId: string, subscriptionId: string) {
-  return {
-    delivery_id: randomUUID(),
-    event_id: eventId,
-    subscription_id: subscriptionId,
-    status: "pending" as const,
-    attempts: 0,
-    last_error: null,
-    last_status: null,
-    next_attempt_at: NOW,
-    created_at: NOW,
-    delivered_at: null,
-    claimed_at: null,
-    reclaims: 0,
-    claim_token: null,
-  };
-}
-
-function signal(organizationId: string, sourceReference: string) {
-  return {
-    reputation_signal_id: randomUUID(),
-    organization_id: organizationId,
-    subject_type: "identity" as const,
-    subject_id: randomUUID(),
-    signal_kind: "service_rating" as const,
-    rating_value: 5,
-    source_system: "market",
-    source_reference: sourceReference,
-    occurred_at: NOW,
-    recorded_at: NOW,
-    correlation_id: "corr-parity",
-    retracted_at: null,
-    retraction_reason: null,
-  };
 }
 
 const CASES: readonly ParityCase[] = [

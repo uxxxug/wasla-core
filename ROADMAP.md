@@ -81,35 +81,16 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved: check-constraint parity between the reference backend and Postgres
-(branch `check-constraint-parity`).** The uniqueness cycle closed 24 rules of one
-kind. Measured now, the same way: the live schema declares **100 `CHECK`
-constraints** and only **31** are restated by name anywhere in `src/`. The
-remaining 69 are the same defect class B-12 names — an in-memory backend that
-accepts a row Postgres refuses — and they cover: ~25 closed vocabularies
-(`status`, `channel`, `kind`, `owner_type`, `rate_class`), six format rules
-(`^[A-Z]{3}$` currency, `^[A-Z]{2}$` country, `core.%` event type), six
-non-empty-string rules, ten numeric bounds (positive amounts, non-negative
-reclaims, latitude/longitude, radius ≤ 500km), and roughly twenty
-field-presence couplings that are the load-bearing ones: every worker's
-`claimed_at`/`claim_token`/`status` triple, `notification`'s five
-status/timestamp pairings, `identity_merged_requires_canonical`,
-`fulfillment_execution_after_cancellation_check`. A vocabulary is a TypeScript
-union today, which is compile-time only: a value arriving from an HTTP body or an
-external event payload reaches the reference store unchecked. Scope: one
-declarative rules table naming every schema `CHECK`, called from every
-reference-store write; probes for each on both backends; and a coverage check
-reading `pg_constraint` so a new `CHECK` cannot ship without parity. Vocabularies
-stay single-source: the runtime array and the domain union are asserted equal at
-typecheck time in both directions, so drift is a compile error rather than a
-silent gap.
+Nothing is reserved. The check-constraint parity cycle below closed the second
+and larger half of B-12; the next item is chosen from "Remaining, in dependency
+order".
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
 
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
-against both. Migrations 0001–0018 are applied and verified on real engines
+against both. Migrations 0001–0019 are applied and verified on real engines
 (PostgreSQL 18.6 locally in the latest cycle, 18.4 and 17.6 managed earlier),
 rollbacks included — 0009 and 0011 verified as *refusing* to roll back while
 money history would be falsified by doing so.
@@ -134,6 +115,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 10 | Reputation and trust signals (ADR 0015) | **CORE side complete; ingestion has no producer, and the policy above the signals is not CORE's to decide** | This row is new, and its absence was the defect the cycle opened with: reputation was on the ownership list in `docs/data-ownership.md`, named as the one remaining gap in `README.md`, and missing from this table entirely — so the document that decides what is next could not have selected it. Now: migration 0018 (`reputation_signal`, append-only by trigger, closed `signal_kind` vocabulary, `UNIQUE (organization_id, source_system, source_reference)`, retraction marker), `src/modules/reputation/` (pure domain + port + Postgres adapter + service + two read routes), four contracts, `docs/reputation.md`, 28 tests × both backends including cross-backend equality of the grouped rows a standing folds from. No score and no review text is stored anywhere: a standing is derived on every read, and there is no column or contract field text could arrive in. Not implementable here: MARKET publishes neither `market.review.rated` nor `market.review.retracted` today, so no signal reaches a deployed CORE; `completion`/`cancellation` cannot be attributed at all until MOVE names the CORE identity that executed a job (external dependency below); weighting, decay, thresholds and cross-tenant aggregation are **B-31…B-34** |
 | 11 | CORE degradation rules (ADR 0010) | **Not implemented, and until this cycle not tracked here at all** | The second roadmap-source gap this cycle found. `docs/adr/README.md` has carried ADR 0010 as `not yet implemented | pending` since the foundation cycle, and no milestone or blocker in this document ever mentioned it, so it could not be selected as next work — the same failure that hid reputation, in a row nobody was reading. What exists today is fail-closed behaviour, not degradation policy: `/ready` reports the wired backend, the outbox relay, inbound dispatcher, delivery worker and notification dispatcher classify failures, retry with backoff, lease, reclaim within a budget (B-25) and dead-letter, and the HTTP surface answers canonical errors under rate limiting. What does not exist is a decision about what CORE *serves* while a dependency is down — whether access checks answer from a cache when Postgres is unreachable, whether reads degrade while writes refuse, and what MOVE and MARKET are told to do meanwhile. That is not implementable from the ADR's title, which is all this repository records of it: the ADR text is not in the repository. Recorded as **B-35** rather than guessed at, because a wrong degradation rule fails exactly when nothing else is working |
 | 13 | Uniqueness parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The gate in milestone 12 made the database assertions run; this row is about what they assert. The schema declares 24 uniqueness rules (21 `UNIQUE`, one `EXCLUDE USING gist`, three partial unique indexes — the last kind invisible to any inventory reading `pg_constraint` alone), and 11 of them were accepted in memory where Postgres refuses: both `principal` rules, `session_token_hash_key`, the membership pair, `region_country_code_code_key`, `fulfillment_move_job_reference_key`, both `legacy_id` partial indexes, and — the one that mattered most — `notification_idempotency_key_key`, where the reference store returned `false` for a genuine key collision that the adapter raises on, so two different messages claiming one identity would vanish silently in tests and fail in production. Two more refused without naming the rule, which is not evidence: "identity link already exists" does not say which constraint fired and survives a rename. Now every refusal quotes the rule Postgres quotes, every check is synchronous check-then-set over a journalled write, and `tests/uniqueness-parity.test.ts` reads `pg_constraint` and `pg_indexes` at run time and fails if the schema declares a rule with no case. 49 assertions; `docs/uniqueness-parity.md` records the inventory, the one legitimate asymmetry, and why `false` is the right refusal for a replayed relay pair and an exception is the right refusal for a key collision. Reading alone had also mis-reported the `subscription_period` rules as missing; measurement showed all three enforced and named — recorded because the correction came from running the probe, not from re-reading |
+| 14 | Check-constraint parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The uniqueness cycle closed 24 rules of one kind; this row closes the other 100. `src/platform/persistence/row-rules.ts` restates every schema `CHECK` once — 67 rules over 25 tables, built from 23 shared closed vocabularies — and `putRow` is now the only way a reference store writes a row, so a transition added later cannot forget the check. `tests/check-parity.test.ts` probes 88 of the 100 on both backends (**178 assertions**), asserts each refusal names the schema constraint, records the other 12 as unprobeable with a stated reason each, and reads `pg_constraint` at run time so a new `CHECK` cannot ship without parity. The measurement inverted the expected result: the reference store was already stricter than the database in three places, all in Postgres' favour to fix — `membership_roles_check` enforced **nothing** since 0001 (`array_length('{}',1)` is NULL, and a NULL `CHECK` passes), so a membership granting no roles was always accepted; `PgEventDeliveryStore.queue` dropped `claimed_at`, `reclaims` and `claim_token` from its insert list; `PgFulfillmentRepository` dropped both B-29 markers on `insert`, `insertIfAbsent`, `update` and `updateIfStatusIn`. Two reference-store gaps were fixed in the rules table (`fulfillment_settlement_alignment_check` was never restated in memory). Migration 0019 replaces the ineffective constraint under the same name; `docs/check-constraint-parity.md` records the inventory, the five families, the three defects and all twelve exemptions |
 | 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 
 ### What was claimed complete and actually is
@@ -4221,3 +4203,129 @@ Head `d52d298` on `uniqueness-parity`, run `34726940841`, [PR #4](https://github
 The local numbers and the CI numbers agree exactly (735 + 1), which is the point
 of the parity file: the eleven rules it now covers on the reference backend are
 enforced by a run nobody's machine configured.
+
+## Cycle 2026-09-13 (second) — check-constraint parity between the two backends
+
+### Why this was next
+
+The uniqueness cycle closed one kind of rule and left the larger kind open. B-12
+is not "uniqueness is unenforced in memory", it is "the reference backend accepts
+rows the database refuses" — and the schema states four times as many `CHECK`
+constraints as uniqueness rules. Every test that runs twice was, for those rules,
+running once and certifying the reference half.
+
+### Measured first
+
+The live schema declares **100 `CHECK` constraints** across 28 tables: 32 closed
+vocabularies, 8 format rules, 10 non-empty-text rules, and the rest numeric
+bounds and two-column couplings. Only **31 constraint names appeared anywhere in
+`src/`**. The other 69 were Postgres-only.
+
+### The shape chosen, and why
+
+Four paths were legitimate. Restating each rule at each write site would have put
+one truth in dozens of places. Generating rules from the schema at build time
+would have made the tests depend on a live database to compile. Loading
+`pg_constraint` at boot would have made the reference backend require the very
+database it exists to replace.
+
+What shipped is a single declarative table — constraint name, the columns the
+rule reads, a predicate — called through one `putRow` helper that every reference
+store now uses. Fewest duplicated truths, strongest automatic enforcement, and a
+rule that is checked on every write rather than on the paths someone remembered.
+
+Three properties keep it from rotting:
+
+- A rule declares the columns it reads. If a row lacks one, `assertRow` throws a
+  distinct, loud error rather than passing on `undefined` — so renaming a column
+  cannot silently disable its rule.
+- Refusals use Postgres' own wording, `new row for relation "x" violates check
+  constraint "y"`, so the two backends refuse for the same named reason.
+- Rows are handled structurally (`Record<string, unknown>`), so nothing in
+  `src/platform/` imports from `src/modules/` to make the guard work.
+
+**A deviation from the reservation text, recorded rather than quietly dropped.**
+The reservation promised the runtime vocabulary arrays and the domain unions
+would be asserted equal at typecheck time in both directions. They are not. Doing
+so requires the platform to import module domain types, which ADR 0017 and
+`tests/governance.test.ts` forbid. The vocabularies are therefore single-source
+in the other direction — the runtime arrays in `row-rules.ts` are the only
+runtime statement of each set, and the parity probe fails if the schema's list
+and the runtime list disagree, because the probe's rejected value comes from the
+schema inventory. That is weaker than a compile error and is named here as such.
+
+### What the measurement found — the opposite of what was expected
+
+The reference backend was expected to be the permissive one. After the rules
+table was wired in, three cases failed on it and were fixed at root: the
+`fulfillment_settlement_alignment_check` rule was missing from the table
+entirely, and two `plan_grant` probes were refused for a *different* legitimate
+reason (grants on an active plan are immutable), so they now use a draft plan.
+
+Then the same 88 probes ran against Postgres, and **six failed — every one of
+them a database or adapter defect**:
+
+| Defect | What it allowed |
+|---|---|
+| `membership_roles_check` enforced nothing | `array_length('{}'::text[], 1)` is `NULL`, `NULL >= 1` is `NULL`, and a `CHECK` evaluating to `NULL` is satisfied. A membership granting **no roles** has been accepted since migration 0001 — a principal attached to an organization with no permission, which `listMemberships` reports as access and every authorisation check denies |
+| `PgEventDeliveryStore.queue` dropped three columns | `claimed_at`, `reclaims` and `claim_token` were absent from the insert list, so a caller's values were discarded silently. The three claim constraints (B-24, B-25, B-26) never saw the row they exist to refuse, and the two backends held different rows |
+| `PgFulfillmentRepository` dropped the two B-29 markers | Absent from the insert list, and from `update`/`updateIfStatusIn` as a consequence — a whole-row update that leaves two columns alone silently ignores part of what it was given |
+
+All three were "deliberate omissions" documented in comments as harmless because
+no CORE code path passes those values. The comments were true and the reasoning
+was wrong: a store that discards part of what it is given is worse than one that
+refuses it, because the caller learns nothing. The comments are rewritten to say
+so rather than deleted.
+
+### The fixes
+
+- **Migration `0019_membership_roles_effective`** replaces the constraint with
+  `coalesce(array_length(roles, 1), 0) >= 1` under the same name — renaming it
+  would make the reference store's message, the parity case and the operator
+  runbooks stale to fix a wrong definition. `ADD CONSTRAINT` validates existing
+  rows, so the migration fails loudly rather than passing if a role-less
+  membership was already stored. The rollback restores the ineffective form and
+  says plainly that it removes enforcement of a rule the schema still appears to
+  state.
+- **`src/platform/eventing/pg-delivery.ts`**: all three claim columns bound;
+  `DEL_SELECT_COLUMNS` is now the same list, since there is no longer a
+  difference between what is written and what is read.
+- **`src/modules/fulfillment/pg-repository.ts`**: `INSERT_COLUMNS` is now
+  `COLUMNS`, and both update statements write every mutable column (the
+  status-guarded one moved its predicate to `$10`).
+
+### Measured after
+
+| Check | Result |
+|---|---|
+| `tests/check-parity.test.ts` with `DATABASE_URL` | **178 passed** — 88 constraints × 2 backends + 2 coverage gates |
+| `npm test` with `DATABASE_URL` | **913 passed in 40 files**, then migration-lifecycle **1 passed** |
+| `npm test` without a database | **497 passed, 50 skipped** |
+| `npm run typecheck` | clean |
+| governance / contracts / migrations gates | passed — 26 event schemas, 17 emitted types, **19 forward migrations, all with rollbacks** |
+
+The 913 is the previous 735 plus this cycle's 178, with no test removed,
+weakened, skipped or renamed.
+
+### Correction to an earlier document, not an erasure
+
+`docs/adr/README.md` recorded ADR 0003 and ADR 0005 as "implemented (migration
+not yet executed)". Migrations 0001 and 0002 have been applied and their
+rollbacks verified on real engines for several cycles. The stale parenthetical is
+replaced with what is true now, and the correction is named here so the change is
+auditable rather than silent.
+
+### What this cycle did not do
+
+Twelve constraints cannot be violated through any port, so they are recorded as
+unprobeable with a reason each rather than counted as covered: the eight
+`outbox`/`inbound_event` status and claim constraints (those stores take
+envelopes and stamp their own claims), `inbound_event_processed_at_check` (no
+such field exists in the reference record), and the three `rate_limit_counter`
+constraints (the in-process limiter counts in a `Map`; it is already documented
+as not the deployable one). A second gate asserts that every exemption whose
+columns do exist in a reference row is still declared in `ROW_RULES` — an
+exemption means no caller can reach the rule, not that the store may ignore it.
+
+Branch protection is still unconfigurable on this plan, so CI remains
+informative rather than required: **B-36**, unchanged.

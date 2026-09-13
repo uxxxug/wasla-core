@@ -13,6 +13,7 @@ import type {
   SubscriptionStatus,
   UsageRecord,
 } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 export interface SubscriptionRepository {
   insertPlan(plan: Plan, scope: TransactionScope): Promise<void>;
@@ -130,7 +131,7 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       throw new Error('duplicate key value violates unique constraint "plan_code_key"');
     }
     journalMapWrite(scope, this.plans, plan.plan_id);
-    this.plans.set(plan.plan_id, plan);
+    putRow("plan", this.plans, plan.plan_id, plan);
   }
 
   /** The `plan_terms_immutable` trigger from migration 0010. */
@@ -158,7 +159,7 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     }
     this.assertPlanShape(plan);
     journalMapWrite(scope, this.plans, plan.plan_id);
-    this.plans.set(plan.plan_id, plan);
+    putRow("plan", this.plans, plan.plan_id, plan);
   }
 
   async getPlan(planId: string): Promise<Plan | undefined> {
@@ -223,12 +224,12 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
   async insertSubscription(subscription: Subscription, scope?: TransactionScope): Promise<void> {
     this.assertSubscriptionShape(subscription);
     journalMapWrite(scope, this.subscriptions, subscription.subscription_id);
-    this.subscriptions.set(subscription.subscription_id, subscription);
+    putRow("subscription", this.subscriptions, subscription.subscription_id, subscription);
   }
   async updateSubscription(subscription: Subscription, scope?: TransactionScope): Promise<void> {
     this.assertSubscriptionShape(subscription);
     journalMapWrite(scope, this.subscriptions, subscription.subscription_id);
-    this.subscriptions.set(subscription.subscription_id, subscription);
+    putRow("subscription", this.subscriptions, subscription.subscription_id, subscription);
   }
   async getSubscription(subscriptionId: string): Promise<Subscription | undefined> {
     return this.subscriptions.get(subscriptionId);
@@ -344,7 +345,7 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       );
     }
     journalMapWrite(scope, this.periods, period.period_id);
-    this.periods.set(period.period_id, period);
+    putRow("subscription_period", this.periods, period.period_id, period);
     this.deferMoneyAgreement(scope, period.period_id);
   }
 

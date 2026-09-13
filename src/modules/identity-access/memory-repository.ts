@@ -4,6 +4,7 @@ import {
 } from "../../platform/persistence/transaction.js";
 import type { ChannelType, Identity, IdentityLink, Membership, Principal, Session } from "./domain.js";
 import type { IdentityRepository } from "./ports.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 /**
  * Reference implementation of the identity repository.
@@ -55,7 +56,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   async insertIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
     this.assertIdentityLegacyFree(identity);
     journalMapWrite(_scope, this.identities, identity.identity_id);
-    this.identities.set(identity.identity_id, identity);
+    putRow("identity", this.identities, identity.identity_id, identity);
   }
   async getIdentity(identityId: string): Promise<Identity | undefined> {
     return this.identities.get(identityId);
@@ -63,7 +64,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
   async updateIdentity(identity: Identity, _scope?: TransactionScope): Promise<void> {
     this.assertIdentityLegacyFree(identity);
     journalMapWrite(_scope, this.identities, identity.identity_id);
-    this.identities.set(identity.identity_id, identity);
+    putRow("identity", this.identities, identity.identity_id, identity);
   }
   async listIdentities(): Promise<Identity[]> {
     return [...this.identities.values()];
@@ -75,7 +76,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
       throw this.duplicate("identity_link_channel_type_external_id_key");
     }
     journalMapWrite(_scope, this.links, key);
-    this.links.set(key, link);
+    putRow("identity_link", this.links, key, link);
   }
   async findLink(channelType: ChannelType, externalId: string): Promise<IdentityLink | undefined> {
     return this.links.get(this.linkKey(channelType, externalId));
@@ -97,7 +98,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
       }
     }
     journalMapWrite(_scope, this.principals, principal.principal_id);
-    this.principals.set(principal.principal_id, principal);
+    putRow("principal", this.principals, principal.principal_id, principal);
   }
   async getPrincipal(principalId: string): Promise<Principal | undefined> {
     return this.principals.get(principalId);
@@ -142,7 +143,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
       }
     }
     journalMapWrite(_scope, this.memberships, membership.membership_id);
-    this.memberships.set(membership.membership_id, membership);
+    putRow("membership", this.memberships, membership.membership_id, membership);
   }
   async listMemberships(principalId: string): Promise<Membership[]> {
     return [...this.memberships.values()].filter((m) => m.principal_id === principalId);

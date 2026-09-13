@@ -9,6 +9,7 @@ import type { AuditLog } from "../../platform/audit/audit.js";
 import { invalid, notFound } from "../../platform/errors.js";
 import { newId } from "../../platform/ids.js";
 import type { Organization } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 export interface OrganizationRepository {
   insert(organization: Organization, scope: TransactionScope): Promise<void>;
@@ -38,7 +39,7 @@ export class InMemoryOrganizationRepository implements OrganizationRepository {
       }
     }
     journalMapWrite(scope, this.rows, organization.organization_id);
-    this.rows.set(organization.organization_id, organization);
+    putRow("organization", this.rows, organization.organization_id, organization);
   }
   async get(organizationId: string): Promise<Organization | undefined> {
     return this.rows.get(organizationId);

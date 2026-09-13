@@ -3,6 +3,7 @@ import {
   type TransactionScope,
 } from "../../platform/persistence/transaction.js";
 import type { City, Country, Region, ServiceArea } from "./domain.js";
+import { putRow } from "../../platform/persistence/row-rules.js";
 
 export interface GeographyRepository {
   upsertCountry(country: Country, scope: TransactionScope): Promise<void>;
@@ -28,7 +29,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
 
   async upsertCountry(country: Country, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.countries, country.country_code);
-    this.countries.set(country.country_code, country);
+    putRow("country", this.countries, country.country_code, country);
   }
   async getCountry(countryCode: string): Promise<Country | undefined> {
     return this.countries.get(countryCode);
@@ -50,7 +51,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
       }
     }
     journalMapWrite(_scope, this.regions, region.region_id);
-    this.regions.set(region.region_id, region);
+    putRow("region", this.regions, region.region_id, region);
   }
   async getRegion(regionId: string): Promise<Region | undefined> {
     return this.regions.get(regionId);
@@ -63,7 +64,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   }
   async insertCity(city: City, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.cities, city.city_id);
-    this.cities.set(city.city_id, city);
+    putRow("city", this.cities, city.city_id, city);
   }
   async getCity(cityId: string): Promise<City | undefined> {
     return this.cities.get(cityId);
@@ -73,7 +74,7 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   }
   async insertServiceArea(area: ServiceArea, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.areas, area.service_area_id);
-    this.areas.set(area.service_area_id, area);
+    putRow("service_area", this.areas, area.service_area_id, area);
   }
   async getServiceArea(serviceAreaId: string): Promise<ServiceArea | undefined> {
     return this.areas.get(serviceAreaId);

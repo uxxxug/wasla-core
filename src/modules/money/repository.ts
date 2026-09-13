@@ -4,6 +4,7 @@ import {
   type TransactionScope,
 } from "../../platform/persistence/transaction.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
+import { assertRow, putRow, type Row } from "../../platform/persistence/row-rules.js";
 
 export interface MoneyRepository {
   insertWallet(wallet: Wallet, scope: TransactionScope): Promise<void>;
@@ -77,7 +78,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
       );
     }
     journalMapWrite(_scope, this.wallets, wallet.wallet_id);
-    this.wallets.set(wallet.wallet_id, wallet);
+    putRow("wallet", this.wallets, wallet.wallet_id, wallet);
   }
   async getWallet(walletId: string): Promise<Wallet | undefined> {
     return this.wallets.get(walletId);
@@ -103,7 +104,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
       );
     }
     journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
-    this.authorizations.set(authorization.authorization_id, authorization);
+    putRow("payment_authorization", this.authorizations, authorization.authorization_id, authorization);
   }
   /**
    * The CHECK constraints migration 0009 adds, restated.
@@ -226,7 +227,7 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.assertAuthorizationShape(authorization);
     journalMapWrite(_scope, this.authorizations, authorization.authorization_id);
-    this.authorizations.set(authorization.authorization_id, authorization);
+    putRow("payment_authorization", this.authorizations, authorization.authorization_id, authorization);
     this.deferLedgerAgreement(_scope, authorization.authorization_id);
   }
   async insertTransaction(transaction: LedgerTransaction, _scope?: TransactionScope): Promise<void> {
@@ -245,8 +246,13 @@ export class InMemoryMoneyRepository implements MoneyRepository {
         'new row for relation "ledger_transaction" violates check constraint "ledger_transaction_authorization_presence"',
       );
     }
+    // The entries are rows of their own table, with their own rules; a
+    // transaction that balances out of forbidden entries is still forbidden.
+    for (const entry of transaction.entries) {
+      assertRow("ledger_entry", entry as unknown as Row);
+    }
     journalMapWrite(_scope, this.ledger, transaction.transaction_id);
-    this.ledger.set(transaction.transaction_id, transaction);
+    putRow("ledger_transaction", this.ledger, transaction.transaction_id, transaction);
     if (transaction.authorization_id) {
       this.deferLedgerAgreement(_scope, transaction.authorization_id);
     }

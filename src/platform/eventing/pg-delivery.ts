@@ -67,16 +67,27 @@ const toDelivery = (row: DeliveryRow): EventDelivery => ({
 
 const SUB_COLUMNS = `subscription_id, subscriber, event_type, endpoint_url,
   signing_secret, active, created_at`;
-/** The insert list. Positional, so `claimed_at` stays out of it: a newly queued
- * delivery is by definition unclaimed and the column defaults to null. */
+/**
+ * The insert list.
+ *
+ * The claim columns used to be left out of it, on the grounds that a newly queued
+ * delivery is by definition unclaimed. On every path in CORE it is — but leaving
+ * them out meant a caller's `claimed_at`, `reclaims` or `claim_token` was dropped
+ * without a word, and the schema's three claim constraints never saw the row they
+ * exist to refuse. The reference store kept those fields, so the two backends
+ * held different rows; `tests/check-parity.test.ts` measured that. Bound, the
+ * database refuses a token with no claim and a claim on finished work at the
+ * moment the row is written.
+ */
 const DEL_COLUMNS = `delivery_id, event_id, subscription_id, status, attempts,
-  last_error, last_status, next_attempt_at, created_at, delivered_at`;
+  last_error, last_status, next_attempt_at, created_at, delivered_at,
+  claimed_at, reclaims, claim_token`;
 
 /**
  * Everything a read returns, including the claim (B-24), its budget (B-25) and the
  * token that fences it (B-26).
  */
-const DEL_SELECT_COLUMNS = `${DEL_COLUMNS}, claimed_at, reclaims, claim_token`;
+const DEL_SELECT_COLUMNS = DEL_COLUMNS;
 
 export class PgDeliveryStore implements DeliveryStore {
   constructor(
@@ -155,7 +166,7 @@ export class PgDeliveryStore implements DeliveryStore {
    */
   async queue(delivery: EventDelivery, scope: TransactionScope = NO_SCOPE): Promise<boolean> {
     const result = await runner(this.pool, scope).query(
-      `insert into event_delivery (${DEL_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      `insert into event_delivery (${DEL_COLUMNS}) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        on conflict (event_id, subscription_id) do nothing`,
       [
         delivery.delivery_id,
@@ -168,6 +179,9 @@ export class PgDeliveryStore implements DeliveryStore {
         delivery.next_attempt_at,
         delivery.created_at,
         delivery.delivered_at,
+        delivery.claimed_at,
+        delivery.reclaims,
+        delivery.claim_token,
       ],
     );
     return (result.rowCount ?? 0) > 0;

@@ -16,6 +16,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { putRow } from "../persistence/row-rules.js";
 
 export type InboundStatus = "pending" | "processed" | "dead";
 
@@ -207,7 +208,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     if (this.records.has(event.event_id)) return false;
     journalMapWrite(scope, this.records, event.event_id);
     const now = this.clock.now().toISOString();
-    this.records.set(event.event_id, {
+    putRow("inbound_event", this.records, event.event_id, {
       event,
       status: "pending",
       attempts: 0,
@@ -265,7 +266,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
         claimed_at: now.toISOString(),
         claim_token: token,
       };
-      this.records.set(record.event.event_id, next);
+      putRow("inbound_event", this.records, record.event.event_id, next);
       claimed.push(next);
     }
     return claimed;
@@ -280,7 +281,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
       const reclaims = record.reclaims + 1;
       const exhausted = reclaimExhausted(record.reclaims, maxReclaims);
-      this.records.set(record.event.event_id, {
+      putRow("inbound_event", this.records, record.event.event_id, {
         ...record,
         reclaims,
         status: exhausted ? "dead" : record.status,
@@ -306,7 +307,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     // Checked and written with no await in between, so the two backends race the
     // same way (B-12).
     if (!record || isFenced(record.claim_token, fence)) return false;
-    this.records.set(eventId, {
+    putRow("inbound_event", this.records, eventId, {
       ...record,
       status: "processed",
       last_error: null,
@@ -324,7 +325,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   ): Promise<boolean> {
     const record = this.records.get(eventId);
     if (!record || isFenced(record.claim_token, fence)) return false;
-    this.records.set(eventId, {
+    putRow("inbound_event", this.records, eventId, {
       ...record,
       attempts: record.attempts + 1,
       last_error: error,
@@ -340,7 +341,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
     const record = this.records.get(eventId);
     if (!record || isFenced(record.claim_token, fence)) return false;
-    this.records.set(eventId, {
+    putRow("inbound_event", this.records, eventId, {
       ...record,
       status: "dead",
       attempts: record.attempts + 1,

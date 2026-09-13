@@ -1,6 +1,7 @@
 import { journalAppend, type TransactionScope } from "../persistence/transaction.js";
 import type { Clock } from "../clock.js";
 import { newId } from "../ids.js";
+import { assertRow, type Row } from "../persistence/row-rules.js";
 
 /**
  * Append-only audit trail. Every state-changing action in CORE writes one entry.
@@ -49,6 +50,7 @@ export class InMemoryAuditLog implements AuditLog {
       audit_id: newId(),
       occurred_at: this.clock.now().toISOString(),
     };
+    assertRow("audit_entry", full as unknown as Row);
     journalAppend(scope, this.log);
     this.log.push(full);
     return full;

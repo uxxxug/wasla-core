@@ -14,6 +14,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { putRow } from "../persistence/row-rules.js";
 
 export type OutboxStatus = "pending" | "published" | "dead";
 
@@ -150,7 +151,7 @@ export class InMemoryOutbox implements OutboxStore {
   async append(event: EventEnvelope, scope?: TransactionScope): Promise<void> {
     if (this.records.has(event.event_id)) return;
     journalMapWrite(scope, this.records, event.event_id);
-    this.records.set(event.event_id, {
+    putRow("outbox", this.records, event.event_id, {
       event,
       status: "pending",
       attempts: 0,
@@ -211,7 +212,7 @@ export class InMemoryOutbox implements OutboxStore {
         // previous holder of this row can be told apart from this one's (B-26).
         claim_token: token,
       };
-      this.records.set(record.event.event_id, claimed);
+      putRow("outbox", this.records, record.event.event_id, claimed);
       // The claimed record, not the pre-claim one: Postgres returns the updated
       // row and the two backends must not disagree about what a claim returns
       // (B-12). Callers read `event` and `attempts`, which the claim leaves
@@ -236,7 +237,7 @@ export class InMemoryOutbox implements OutboxStore {
       // explain itself — without it, `status = 'dead'` on a row with
       // `attempts = 0` looks like a bug rather than a payload nobody survived.
       const exhausted = reclaimExhausted(record.reclaims, maxReclaims);
-      this.records.set(record.event.event_id, {
+      putRow("outbox", this.records, record.event.event_id, {
         ...record,
         reclaims,
         status: exhausted ? "dead" : record.status,
@@ -282,7 +283,7 @@ export class InMemoryOutbox implements OutboxStore {
     // does not have, and a permissive memory backend certifies bugs (B-12).
     if (!record || isFenced(record.claim_token, fence)) return false;
     journalMapWrite(scope, this.records, eventId);
-    this.records.set(eventId, {
+    putRow("outbox", this.records, eventId, {
       ...record,
       status: "published",
       last_error: null,
@@ -300,7 +301,7 @@ export class InMemoryOutbox implements OutboxStore {
   ): Promise<boolean> {
     const record = this.records.get(eventId);
     if (!record || isFenced(record.claim_token, fence)) return false;
-    this.records.set(eventId, {
+    putRow("outbox", this.records, eventId, {
       ...record,
       attempts: record.attempts + 1,
       last_error: error,
@@ -316,7 +317,7 @@ export class InMemoryOutbox implements OutboxStore {
   async markDead(eventId: string, fence: Fence, error: string): Promise<boolean> {
     const record = this.records.get(eventId);
     if (!record || isFenced(record.claim_token, fence)) return false;
-    this.records.set(eventId, {
+    putRow("outbox", this.records, eventId, {
       ...record,
       attempts: record.attempts + 1,
       status: "dead",
@@ -368,7 +369,7 @@ export class InMemoryOutbox implements OutboxStore {
     // Postgres does this in one statement and the memory backend must not be the
     // permissive one (B-12).
     if (!record || record.status !== "dead") return false;
-    this.records.set(eventId, {
+    putRow("outbox", this.records, eventId, {
       ...record,
       status: "pending",
       next_attempt_at: now.toISOString(),
