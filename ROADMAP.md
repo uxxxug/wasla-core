@@ -81,22 +81,57 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Milestone 18 closed the sixth parity cycle (column-level
-parity — `NOT NULL`, types, lengths and defaults; see the cycle record at the
-end of this file and `docs/column-parity.md`), and the reservation it held is
-released here in the same commit range that closed it.
+**Reserved: parity for the three runtime tables no gate reaches (branch
+`runtime-table-parity`, milestone 19).**
 
-**Next actionable item: milestone 19 — the column gate reaches only the 28 ruled
-tables.** Four of the schema's 32 tables have no `ROW_RULES` entry and therefore
-no column shape: they are migration bookkeeping, written by the migration runner
-rather than by a store, which is why the gate excludes them — but "excluded
-because nothing above the runner writes them" is an exemption held true by
-nothing, exactly the shape of claim milestone 17 was created to stop trusting.
-Measured while closing this cycle: 32 tables, 270 columns, 212 `NOT NULL`, 49
-defaults, of which **254 / 197 / 45 are now gated** and 16 columns across 4
-tables are not. The cycle would either bring the runner's writes through a gate
-of their own or record the exclusion as an enforced, falsifiable exemption the
-way `delete-actions.ts` records its one unmodelled cascade.
+**Correction to the record, made additively.** The cycle that closed milestone 18
+wrote that the four tables outside `ROW_RULES` are "migration bookkeeping,
+written by the migration runner rather than by a store". Re-measuring before
+starting the next item found that sentence is **wrong**, and it is corrected here
+rather than edited out of the cycle record where it was written. Only
+`schema_migrations` is written by the runner. The other three are written at run
+time by platform stores:
+
+| Table | Columns | `NOT NULL` | Defaults | `CHECK`s | Primary key | Written by |
+|---|---|---|---|---|---|---|
+| `inbox` | 3 | 3 | 1 | 0 | `(consumer, event_id)` | `InMemoryInbox` / `PgInbox` — every consumer claim, ADR 0009 |
+| `rate_limit_counter` | 6 | 6 | 1 | **3** | `(subject_kind, subject_hash, rate_class, window_start)` | `InMemoryRateLimitWindowStore` / `PgRateLimitWindowStore` — every request |
+| `idempotency_key` | 5 | 4 | 1 | 0 | `(key)` | **nothing in `src/`** |
+| `schema_migrations` | 2 | 2 | 1 | 0 | `(version)` | the migration runner |
+
+So the untrusted claim was larger than the claim: two tables on the hottest paths
+in the system — one write per consumer claim, one write per request — sit outside
+every parity gate this repository has built. They have no `ROW_RULES` entry, so
+no uniqueness, no `CHECK`s and no column shapes; the reference stores model them
+as a `Set<string>` and a `Map<string, {count, window_start}>` rather than as rows
+at all.
+
+Measured against a real Postgres 16 before reserving, by inserting each value:
+
+| Write | Postgres | Reference backend |
+|---|---|---|
+| `inbox.claim(consumer, "not-a-uuid")` | `invalid input syntax for type uuid: "not-a-uuid"` | accepted, and `seen` then returns true |
+| `rate_limit_counter.subject_kind = "nope"` | violates `rate_limit_counter_subject_kind_ck` | no such rule exists in memory |
+| `rate_limit_counter.rate_class = "nope"` | violates `rate_limit_counter_rate_class_ck` | no such rule exists in memory |
+| `rate_limit_counter.hits = -1` | violates `rate_limit_counter_hits_ck` | no such rule exists in memory |
+| duplicate `(consumer, event_id)` | `duplicate key value violates unique constraint "inbox_pkey"` | modelled, by the `Set` |
+
+Two further findings to settle in the cycle rather than leave in a comment:
+`idempotency_key` is a table **no code writes** — migration 0001 creates it, the
+notification module's identically-named *column* is unrelated, and an unenforced
+table is a claim nobody can falsify; and `PgRateLimitWindowStore` writes
+`updated_at` from the database's `now()` while every other store in CORE takes
+time from the injected clock, so under a fake clock the two backends disagree
+about when a window was touched.
+
+Scope: bring `inbox` and `rate_limit_counter` under the same discipline as the
+28 — rules and column shapes declared once, applied on the reference write path,
+refusals in Postgres' wording, gated against the catalog — decide
+`idempotency_key` by either dropping it in a forward migration with a rollback or
+recording it as an enforced exemption, settle the `now()`/clock divergence, and
+extend the column-parity coverage gate so it can no longer pass while a
+runtime table has no shape. `schema_migrations` stays out, as an exemption
+asserted by a test rather than a sentence.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
