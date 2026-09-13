@@ -4508,3 +4508,21 @@ use that fixture and the comment records what its author believed.
 - **The 12 triggers are untouched**, and are now milestone 16.
 - Branch protection is still unconfigurable on this plan, so CI remains
   informative rather than required: **B-36**, unchanged.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `d495063` on `foreign-key-parity`, run `34737379147` (pull request) and
+`34737363114` (push), [PR #6](https://github.com/uxxxug/wasla-core/pull/6):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 38s | **529 passed, 52 skipped** in 39 of 41 files, then the migration-lifecycle file **1 skipped** — the dependency-free pass still stands on its own, and typecheck, governance, contracts, migrations, roadmap freshness and the secret scan all ran |
+| `Verify against PostgreSQL` | **success**, 2m14s | **976 passed in 41 files** with `DATABASE_URL` against `postgres:16`, then the migration-lifecycle pass **1 passed** — the newest migration rolled back and re-applied against a schema built from the migrations |
+
+The CI totals match the local ones exactly (976 + 1, and 529 / 52), which is
+what makes this cycle's claim worth anything: the 29 foreign keys the reference
+backend now restates are enforced by a run nobody's machine configured, on a
+database created from the migrations rather than from a developer's schema. The
+declaration gate and the coverage gate ran there too, against that database's
+own `pg_constraint`, so the inventory in `docs/foreign-key-parity.md` is checked
+against the schema CI builds and not only the one on this machine.
