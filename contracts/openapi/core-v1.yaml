@@ -225,6 +225,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
       summary: Grant a principal membership of an organization
+      description: |
+        Requires `organization.write` on `organization_id`: `platform_admin`
+        everywhere, `org_admin` inside its own tenant. Until milestone 29 this
+        route required no credential at all, which made an anonymous
+        `POST /v1/identities` followed by this call and `POST /v1/sessions` a full
+        escalation into any organization whose id the caller knew.
       requestBody:
         required: true
         content:
@@ -240,6 +246,8 @@ paths:
                   minItems: 1
                   items: { $ref: "#/components/schemas/Role" }
       responses:
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
           headers:

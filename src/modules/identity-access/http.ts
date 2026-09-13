@@ -134,6 +134,27 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
     ),
     async (ctx) => {
     const roles = [...ctx.input.strings("roles")] as Role[];
+    // Authenticated and authorized **on the organization being granted into**,
+    // which this route required neither of until milestone 29 measured it. With
+    // nothing at all — no token, no session, no membership — three ordinary calls
+    // were a full escalation: `POST /v1/identities` makes a principal (anonymous
+    // by design, since an unknown caller has to be able to appear), this route
+    // granted that principal `org_admin` in **any organization id the caller
+    // could name**, and `POST /v1/sessions` minted a bearer token for it. The
+    // resulting token read another tenant's organization and answered 200.
+    //
+    // `organization.write` scoped to the target organization is the permission
+    // that already means "may change who this organization is": `platform_admin`
+    // holds it everywhere and `org_admin` holds it inside its own tenant, so an
+    // administrator can add a colleague and nobody can add themselves. The first
+    // membership of a brand-new organization is therefore a `platform_admin`
+    // action, which is the same shape `POST /v1/organizations` already has.
+    await requirePrincipal(
+      ctx,
+      identity,
+      "organization.write",
+      ctx.input.requiredText("organization_id"),
+    );
     const membership = await identity.grantMembership({
       principal_id: ctx.input.requiredText("principal_id"),
       organization_id: ctx.input.requiredText("organization_id"),
