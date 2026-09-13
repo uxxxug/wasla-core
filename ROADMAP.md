@@ -4989,3 +4989,80 @@ declaration was compared against the `pg_attribute` of a database CI built from
 the 19 migrations, and the six refusal probes were compared with the wording of
 CI's own `postgres:16` — so `column-shapes.ts` quotes a message this repository
 has seen a real database produce on a machine that is not this one.
+
+## Cycle 2026-09-13 (seventh) — parity for the runtime tables no gate reached
+
+The seventh parity cycle, and the first whose subject is the *scope* of the
+previous six rather than a new kind of rule. Full account, with every measured
+message and every falsification, in `docs/runtime-table-parity.md`.
+
+**The cycle began by disproving its predecessor.** The milestone-18 record
+stated that the four tables outside `ROW_RULES` "are migration bookkeeping,
+written by the migration runner rather than by a store". The mandate says not to
+treat an earlier report as final truth, so it was re-measured, and it was wrong.
+`inbox` is written on every consumer claim and `rate_limit_counter` on every
+request — the two hottest write paths in CORE — and both sat outside every gate
+six cycles had built. The original sentence stands where it was written; the
+correction is additive, made first in the reservation commit and recorded in the
+milestone table.
+
+**What the gap actually was.** `rate_limit_counter` carries three `CHECK`
+constraints that nothing enforced. They were not missing by oversight:
+`tests/check-parity.test.ts` had recorded them as *unprobeable*, with true
+reasons of the form "the subject kind is part of the reference limiter's
+in-process map key, not a stored column". The reason was true because the
+reference limiter held no row — a description of the gap, not a justification
+for it. An exemption whose reason describes the defect is the shape of thing
+this cycle looked for. Measured against a real Postgres before any code
+changed: a non-uuid `event_id` was accepted in memory and refused by the
+database with `invalid input syntax for type uuid`; a bad `subject_kind`, a bad
+`rate_class` and a negative `hits` were each refused by the database and
+unmodelled in memory.
+
+**The fix is structural, not a list of new checks.** Both reference stores are
+row stores now, writing through `putRow`, so they inherit columns, checks,
+foreign keys and transitions at once instead of getting a bespoke check each.
+Two of the three exemptions became real dual-backend probes; the third was
+narrowed to the half that is still true and promoted to `declared: true`.
+
+**A third divergence, found on the way.** `PgRateLimitWindowStore` wrote
+`updated_at` from the database's `now()` — the one store in CORE that told the
+time by itself, so under a fixed clock the two backends disagreed about when a
+window was touched. The clock is injected now and a fixed-clock database probe
+keeps it that way. This is the third divergence in three cycles with the same
+shape — a column one backend writes and the other never surfaces — which is why
+the next actionable item gates the **read** path.
+
+**`idempotency_key` is recorded, not removed.** Nothing writes it. Dropping it
+needs `DROP TABLE`, which `scripts/check-migrations.mjs` refuses in a forward
+migration on purpose; weakening that gate to tidy up a dead table is not a trade
+this repository makes. It is blocker **B-37** and an enforced exemption that
+fails the moment anything writes it.
+
+**Gates.** `tests/runtime-table-parity.test.ts`, 12 assertions, 4 needing a
+database. The load-bearing two are general rather than about these tables: a
+gate that parses `CREATE TABLE` out of every migration and fails when a table is
+neither gated nor excused, so the *next* table added to the schema cannot repeat
+this cycle; and a source scan that proves each exemption's stated writers are
+still its actual writers. That second gate corrected this cycle's own first
+draft — the exemption claimed `scripts/db-migrate.mjs` writes
+`schema_migrations`, and the scan found nothing writes it, because each forward
+migration records its own version inside the same transaction as its DDL. That
+is the stronger arrangement, and it is now asserted for all 19 migrations.
+
+**Falsification: six attempts, six caught.** Stopping the reference limiter
+writing rows, reverting the Postgres limiter to `now()`, dropping `received_at`
+from the inbox row, adding a migration with an ungoverned table, and widening
+the enforced `rate_class` vocabulary by one value each produced a failure, and
+the migration-count vacuity guard fired on the fourth as well.
+
+**Local measurement.** `typecheck`, `check:governance`, `check:contracts`,
+`check:migrations` pass. Without `DATABASE_URL`: 584 passed, 64 skipped. With
+`DATABASE_URL` against local PostgreSQL 16: 1063 passed in 45 files.
+Whole-schema coverage is 263 columns, 206 `NOT NULL`, 47 defaults, up from
+254/197/45. One flake is recorded rather than hidden: in the first combined run
+against Postgres, `tests/migration-0011-lifecycle.test.ts` reported its single
+test passing and the file failing; it passed standalone and on re-run.
+
+**CI verdict:** pending — recorded below once the run for this branch's head
+commit has been read from its logs, not inferred from the local run.
