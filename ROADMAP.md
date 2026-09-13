@@ -81,24 +81,23 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Milestone 19 closed the runtime-table gap (see the cycle
-record at the end of this file and `docs/runtime-table-parity.md`), and the
-reservation it held is released here in the same commit range that closed it.
+**Reserved: milestone 20 — the reference stores are gated on write and ungated
+on read.** Branch `read-path-parity`. Held by this reservation until the cycle
+closes or the reservation is released here.
 
-**Next actionable item: milestone 20 — the reference stores are gated on write
-and ungated on read.** Every parity cycle so far gates the write path: `putRow`
-refuses a row the database would refuse. Nothing gates what a *read* returns.
-Measured while closing milestone 19: the two divergences that cycle and the one
-before it found — `outbox.created_at`, `inbound_event.processed_at`,
-`rate_limit_counter.updated_at` — were all invisible for the same reason, that a
+Six parity cycles gate the write path: `putRow` refuses what the database would
+refuse. Nothing gates what a *read* returns. The three divergences the last
+three cycles found — `outbox.created_at`, `inbound_event.processed_at`,
+`rate_limit_counter.updated_at` — were each invisible for the same reason: a
 column written by one backend and never selected by the other is a difference no
-test could see. `pg-outbox.ts` and `pg-ingress.ts` now select every column they
-insert, but nothing keeps that true, and four other adapters have their own
-`SELECT_COLUMNS`. The cycle would gate the read path: for each ruled table, the
-columns an adapter selects compared against the columns the table has and the
-fields the reference record carries, so a column that exists in the schema and
-in neither backend's read is a failure rather than a discovery three cycles
-later.
+assertion could see. Two were fixed by adding the column to a `SELECT_COLUMNS`
+list, and nothing keeps those lists complete.
+
+Scope of the reservation: `tests/read-path-parity.test.ts`, whatever the
+measurement shows is genuinely divergent in the adapters under
+`src/**/pg-*.ts`, and the reference records they are compared against. Anything
+outside that scope found on the way is recorded as a blocker rather than fixed
+here.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
