@@ -81,10 +81,40 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The trigger-parity cycle that held this slot is finished
-and recorded below, which closes the fourth and last family of B-12; the next
-actionable item is milestone 17, `ON DELETE` and delete-path parity, which
-nothing is holding.
+**Reserved: `ON DELETE` and delete-path parity (branch `delete-path-parity`,
+milestone 17).** The four parity cycles each closed a family of rules about
+rows that *exist*. All four left the same hole, and each recorded it as a
+"not done" rather than fixing it: the reference backend does not model
+referential actions, and the delete halves of the four append-only triggers are
+unreachable rather than enforced. Unreachable is a fact about today's ports, not
+a property of the design, and nothing in the repository holds it true.
+
+Measured before reserving, from `pg_constraint` and the source rather than from
+the documents: of the 30 foreign keys, **29 are `ON DELETE NO ACTION`** and
+exactly one — `plan_grant_plan_id_fkey` — is **`ON DELETE CASCADE`**; all 30 are
+`ON UPDATE NO ACTION`. **15 of the 32 tables are a foreign-key parent**, so a
+delete there either orphans a child or cascades. And in the whole of `src/`
+there are **three** places a row is removed: `pg-inbox`/`inbox` releasing a
+claim, the rate-limit counter pruning old windows, and
+`InMemoryTransactionBoundary` unwinding a write on rollback. `inbox` and
+`rate_limit_counter` are neither a parent nor a child of any key and carry no
+trigger; the rollback path is not a delete a caller can reach.
+
+So the claim the four cycles rested on is true today. What is missing is
+anything that keeps it true: a migration can add `ON DELETE SET NULL` tomorrow,
+or a store can grow a `deleteUsage`, and every exemption that said "no caller
+can express this" would quietly become false while the suite stayed green.
+
+Scope: the referential action of all 30 keys declared once and checked against
+`confdeltype`/`confupdtype` at run time, so a migration that adds a cascade or a
+`SET NULL` the reference backend does not model fails; an inventory of the three
+delete paths with, for each, the reason it is safe — no referential structure and
+no trigger on the table it touches — asserted against the catalog rather than
+stated; and a source-and-port gate that fails when a new delete appears anywhere
+else, which is what converts the four cycles' "unreachable" from a claim into an
+enforced invariant. Adding a delete path CORE has no requirement for is
+explicitly **not** in scope: the append-only tables are append-only by design,
+and the cycle's job is to make that design enforced, not to weaken it.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
