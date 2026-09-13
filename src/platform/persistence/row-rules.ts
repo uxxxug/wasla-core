@@ -21,6 +21,7 @@
  */
 
 import { assertReferences, registryFor } from "./reference-keys.js";
+import { assertTransition } from "./transition-rules.js";
 
 /** A row as its table sees it. Dotted paths reach into a nested record. */
 export type Row = Readonly<Record<string, unknown>>;
@@ -483,5 +484,16 @@ export function putRow<T>(table: RuledTable, map: Map<string, T>, key: string, r
   // that adding referential enforcement changed no call site: every existing
   // write got it, including the ones written before this cycle existed.
   assertReferences(table, row as unknown as Row, registryFor(map));
+  // Triggers judge the transition, so they need the row this one replaces as
+  // well as the row itself, and they run after the immediate families above:
+  // Postgres refuses a missing parent or a failed CHECK before a `BEFORE`
+  // trigger's body ever runs, and a refusal ordered the other way would quote
+  // the wrong constraint for the same write.
+  assertTransition(
+    table,
+    map.get(key) as unknown as Row | undefined,
+    row as unknown as Row,
+    registryFor(map),
+  );
   map.set(key, row);
 }

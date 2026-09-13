@@ -89,11 +89,29 @@ export function normalizeCurrency(value: string): Currency {
   return currency;
 }
 
+/**
+ * The `ledger_transaction_balance` constraint trigger, restated.
+ *
+ * Postgres defers this to commit and names the transaction in the refusal:
+ * `ledger transaction % is not balanced`, grouped per currency. The reference
+ * backend checks it eagerly, and that is not a difference a caller can observe
+ * through the port: `insertTransaction` takes a header with all of its entries
+ * nested inside it, so a transaction is never half-written the way it can be
+ * across two `INSERT` statements in one SQL transaction. The wording is matched
+ * so the two backends' stack traces read the same; the timing difference is
+ * recorded in `docs/trigger-parity.md` rather than papered over.
+ */
 export function assertBalanced(entries: readonly LedgerEntry[]): void {
   if (entries.length < 2) throw new Error("ledger transaction requires at least two entries");
+  const id = entries[0]?.transaction_id ?? "unknown";
   const currencies = new Set(entries.map((entry) => entry.currency));
+  // Stricter than the trigger on purpose: Postgres sums per currency, so two
+  // currencies each balancing to zero would pass there. CORE has no
+  // multi-currency transaction, and `ledger_entry_currency_matches_transaction`
+  // is why — refusing the mix here keeps the reference backend from accepting a
+  // shape no caller may write.
   if (currencies.size !== 1) throw new Error("ledger transaction cannot mix currencies");
   if (entries.reduce((sum, entry) => sum + entry.amount_minor, 0) !== 0) {
-    throw new Error("ledger transaction is not balanced");
+    throw new Error(`ledger transaction ${id} is not balanced`);
   }
 }
