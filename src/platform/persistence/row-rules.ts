@@ -182,6 +182,23 @@ export const VOCABULARIES = {
   reputation_subject_type: ["identity", "organization"],
 } as const satisfies Record<string, readonly string[]>;
 
+/**
+ * The rate limiter's two closed vocabularies.
+ *
+ * Kept here rather than in `VOCABULARIES` above because that table's entries are
+ * each tied to a domain union by a compile-time equality assertion, and these
+ * two unions live in `platform/http`, which this file must not import from to
+ * stay within ADR 0017's layering. Exported instead, and held to the schema by
+ * `tests/runtime-table-parity.test.ts`, which reads the two `CHECK` expressions
+ * out of `pg_constraint` and compares their vocabularies with these arrays —
+ * so drift in either direction fails rather than silently widening what the
+ * reference limiter accepts.
+ */
+export const RATE_LIMIT_VOCABULARIES = {
+  subject_kind: ["credential", "network"],
+  rate_class: ["ingress_events", "write", "read", "unmatched"],
+} as const satisfies Record<string, readonly string[]>;
+
 const CURRENCY = /^[A-Z]{3}$/;
 const COUNTRY = /^[A-Z]{2}$/;
 
@@ -424,6 +441,22 @@ export const ROW_RULES = {
    * than that nobody looked.
    */
   session: [],
+  /**
+   * No `CHECK` constraints — the table is a claim ledger whose only rule is its
+   * primary key. It is here so `putRow` will accept it at all, which is what
+   * brings the column gate (and with it the `uuid` on `event_id`) to a table
+   * five parity cycles never reached. See `tests/runtime-table-parity.test.ts`.
+   */
+  inbox: [],
+  rate_limit_counter: [
+    vocabulary(
+      "subject_kind",
+      RATE_LIMIT_VOCABULARIES.subject_kind,
+      "rate_limit_counter_subject_kind_ck",
+    ),
+    vocabulary("rate_class", RATE_LIMIT_VOCABULARIES.rate_class, "rate_limit_counter_rate_class_ck"),
+    numeric("hits", "rate_limit_counter_hits_ck", (v) => v >= 0),
+  ],
   reputation_signal: [
     vocabulary("signal_kind", VOCABULARIES.reputation_kind, "reputation_signal_kind_check"),
     vocabulary(

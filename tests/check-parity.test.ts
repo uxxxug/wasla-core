@@ -170,18 +170,14 @@ const UNPROBEABLE: readonly Unprobeable[] = [
   },
   {
     constraint: "rate_limit_counter_hits_ck",
-    why: "the reference limiter counts in a Map and increments by one from zero; there is no row and no caller-supplied count",
-    declared: false,
-  },
-  {
-    constraint: "rate_limit_counter_rate_class_ck",
-    why: "the rate class reaches the limiter as a policy lookup key, not as a stored column, in the reference limiter",
-    declared: false,
-  },
-  {
-    constraint: "rate_limit_counter_subject_kind_ck",
-    why: "the subject kind is part of the reference limiter's in-process map key, not a stored column",
-    declared: false,
+    // Rewritten in milestone 19. The old reason was "there is no row and no
+    // caller-supplied count"; the first half stopped being true when the
+    // reference limiter started writing rows, so the exemption is now the
+    // narrower claim that survives: the count is still not caller-supplied. It
+    // is `declared: true` now, so the rule runs on the store's own writes and
+    // the gate below checks it is restated in `ROW_RULES`.
+    why: "hits is incremented by the limiter from zero and reaches no caller's hand; the rule is declared and runs on the store's own row, but no caller can express a negative count to probe it with",
+    declared: true,
   },
 ];
 
@@ -192,6 +188,36 @@ const CASES: readonly CheckCase[] = [
     what: "an audit trail whose actor is a kind no reviewer can interpret",
     async probe(store) {
       return refuse(() => store.audit.record(broken(auditEntry(), { actor_type: "ghost" }), NO_SCOPE));
+    },
+  },
+
+  // ---- rate limiting -----------------------------------------------------
+  // Both of these were recorded as unprobeable until milestone 19, on the
+  // grounds that the reference limiter kept a map key rather than a row. It
+  // keeps a row now, so the claim is testable and is tested: these two run on
+  // both backends like every other case in this file.
+  {
+    constraint: "rate_limit_counter_subject_kind_ck",
+    what: "a rate-limit window for a subject kind no policy can price",
+    async probe(store) {
+      return refuse(() =>
+        store.rateLimit.hit(
+          { subject_kind: "ghost" as never, subject_hash: "h", rate_class: "read" },
+          new Date("2026-01-01T00:00:00.000Z"),
+        ),
+      );
+    },
+  },
+  {
+    constraint: "rate_limit_counter_rate_class_ck",
+    what: "a rate-limit window counted against a class no route belongs to",
+    async probe(store) {
+      return refuse(() =>
+        store.rateLimit.hit(
+          { subject_kind: "network", subject_hash: "h", rate_class: "ghost" as never },
+          new Date("2026-01-01T00:00:00.000Z"),
+        ),
+      );
     },
   },
 

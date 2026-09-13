@@ -81,22 +81,24 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. Milestone 18 closed the sixth parity cycle (column-level
-parity — `NOT NULL`, types, lengths and defaults; see the cycle record at the
-end of this file and `docs/column-parity.md`), and the reservation it held is
-released here in the same commit range that closed it.
+Nothing is reserved. Milestone 19 closed the runtime-table gap (see the cycle
+record at the end of this file and `docs/runtime-table-parity.md`), and the
+reservation it held is released here in the same commit range that closed it.
 
-**Next actionable item: milestone 19 — the column gate reaches only the 28 ruled
-tables.** Four of the schema's 32 tables have no `ROW_RULES` entry and therefore
-no column shape: they are migration bookkeeping, written by the migration runner
-rather than by a store, which is why the gate excludes them — but "excluded
-because nothing above the runner writes them" is an exemption held true by
-nothing, exactly the shape of claim milestone 17 was created to stop trusting.
-Measured while closing this cycle: 32 tables, 270 columns, 212 `NOT NULL`, 49
-defaults, of which **254 / 197 / 45 are now gated** and 16 columns across 4
-tables are not. The cycle would either bring the runner's writes through a gate
-of their own or record the exclusion as an enforced, falsifiable exemption the
-way `delete-actions.ts` records its one unmodelled cascade.
+**Next actionable item: milestone 20 — the reference stores are gated on write
+and ungated on read.** Every parity cycle so far gates the write path: `putRow`
+refuses a row the database would refuse. Nothing gates what a *read* returns.
+Measured while closing milestone 19: the two divergences that cycle and the one
+before it found — `outbox.created_at`, `inbound_event.processed_at`,
+`rate_limit_counter.updated_at` — were all invisible for the same reason, that a
+column written by one backend and never selected by the other is a difference no
+test could see. `pg-outbox.ts` and `pg-ingress.ts` now select every column they
+insert, but nothing keeps that true, and four other adapters have their own
+`SELECT_COLUMNS`. The cycle would gate the read path: for each ruled table, the
+columns an adapter selects compared against the columns the table has and the
+fields the reference record carries, so a column that exists in the schema and
+in neither backend's read is a failure rather than a discovery three cycles
+later.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -134,6 +136,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 16 | Trigger-invariant parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The fourth and last family of B-12. The schema installs **12 triggers**, measured from `pg_trigger`; five were named anywhere in `src/`. Two were enforced by no reference store at all: `subscription_currency_check` (a plan priced in one currency billed against a wallet in another, and a subscription to a plan that was never offered) lived only in `SubscriptionService`, and `ledger_transaction_balance` only in `MoneyService` — so a caller reaching the stores directly could post entries summing to -1 and the reference backend accepted money appearing from nowhere. `src/platform/persistence/transition-rules.ts` declares the immediate triggers as transition rules over (operation, previous row, next row) and `putRow` applies them after the checks and the foreign keys, the order Postgres uses; the four `DEFERRABLE INITIALLY DEFERRED` constraint triggers stay on the transaction journal, because a write-time refusal would reject a legal sequence. The same file carries `TRIGGER_INVENTORY`, which names all twelve exactly once as immediate, deferred (naming the store that defers it) or exempt with a reason. `tests/trigger-parity.test.ts` holds **39 assertions** with a database: a refusal probe per reachable trigger on both backends asserting Postgres' own words, an outcome probe for the one path both backends narrow away before it can fire, three exemptions that assert the absent port operations rather than claiming unreachability in prose, and five gates — coverage against `pg_trigger` at run time, a timing gate reading `tgdeferrable`/`tginitdeferred`, `unresolvedReads() === []`, a reason per exemption, and agreement between the inventory and the rules. `docs/trigger-parity.md` records the inventory, the two gaps, and the four places the backends still differ |
 | 17 | `ON DELETE` and delete-path parity | **Complete, and self-enforcing from here** | The fifth parity cycle, the last of the four families B-12 named, and the only one where nothing in the code was wrong. All four earlier cycles ended with the same admission — the reference backend models no referential action, and the delete halves of the four append-only triggers are *unreachable* rather than enforced — and nothing in the repository kept that true: a migration adding `ON DELETE SET NULL`, or a store growing a `deleteUsage`, would have turned every "no caller can express this write" exemption false while the suite stayed green. Measured from `pg_constraint` and the source rather than the documents: **30 foreign keys, 29 `ON DELETE NO ACTION`**, exactly one `ON DELETE CASCADE` (`plan_grant_plan_id_fkey`), **no** non-default `ON UPDATE`, **15 of 32 tables are a foreign-key parent**, and **three** places in `src/` remove a row — the inbox releasing a claim, the rate-limit counter pruning closed windows, and the in-memory boundary unwinding a rollback. `src/platform/persistence/delete-actions.ts` declares the action of all 30 keys (`NO ACTION` is modelled by construction: the database refuses a delete that would orphan a child, and in memory there is no delete to refuse) and the one cascade as **`modelled: false`** with its reason, plus the three delete paths with the reason each is safe. `tests/delete-parity.test.ts` holds **11 assertions** with a database: an action for every key, unmodelled-means-unreachable, no port that deletes an unmodelled parent, row removal only where declared (scanning for `delete from`, `truncate`, `.delete(` and `.clear(` — the last two appear nowhere in `src/` and are scanned for anyway), every removal-shaped port operation classified as deleting a row or releasing a lease (the four `reclaimExpired` methods are `UPDATE`s and say so), the declarations read against `confdeltype`/`confupdtype` at run time, the deletable tables checked against `pg_constraint` and `pg_trigger`, and two outcome probes on both backends for the one delete a caller can reach. No delete path was added: the append-only tables are append-only by design, and the cycle's job was to make that enforced rather than to weaken it so a cascade becomes observable. `docs/delete-path-parity.md` records the inventory, the five falsifications, and the four things the cycle does not claim |
 | 18 | Column-level parity: `NOT NULL`, defaults and types | **Complete** | The sixth parity cycle, and the family the first five never touched: all of them are rules *about* a value, none asks whether the value fits the column. Measured from `pg_attribute` and from the rows the stores actually write — the second by instrumenting `putRow` and running the whole suite, 7578 writes across 26 of the 28 tables, not by reading the stores and guessing. Across the 28 ruled tables: **254 columns, 197 `NOT NULL`, 45 with a database default**, in 11 types. The reference backend enforced none of it. `src/platform/persistence/column-shapes.ts` declares every column with its type, its `character(n)` width, its nullability, its default expression and **the path the value takes in the reference row** — without the path the gate would have checked nothing for the 20 columns `outbox` and `inbound_event` nest under `event.*`. `assertColumns` runs in `putRow` **before** the `CHECK` rules, the order Postgres uses, and directly in the two ruled tables whose rows never pass through `putRow` (`audit_entry`, an append-only array; `ledger_entry`, nested inside its transaction). No default is ever applied: a column the database would have filled must be written by the store or the row is refused, because completing the row here would make the declaration a second source of truth for what a row contains. An absent key is refused even for a nullable column — a tuple has no absent state. The measurement found **two live divergences**, both default-reliance, both fixed at the root rather than exempted: `outbox.created_at` (`NOT NULL DEFAULT now()`, inserted by the adapter, selected by neither backend, written by the reference store never) and `inbound_event.processed_at` (set by the adapter, selected by neither, omitted rather than null in memory) are now fields of `OutboxRecord` and `InboundRecord`, written from the injected clock and added to both adapters' `SELECT_COLUMNS`. `tests/column-parity.test.ts` holds **21 assertions**, 4 needing a database: coverage in both directions against `pg_attribute` including the default *expression*, the three counts as live measurements, six offending rows inserted into a real `plan` and rolled back so the database's message is compared to the reference backend's character for character, and a probe that the **three deliberate strictnesses** are still strictnesses (Postgres coerces `1` into `text` and `"yes"` into `boolean`, and accepts a `bigint` JavaScript has already rounded; memory refuses all three, because accepting would leave the two backends holding different values for one write). Five falsifications, five caught. `docs/column-parity.md` records the inventory, the asymmetries, the falsifications and what the cycle does not claim |
+| 19 | Parity for the runtime tables no gate reached | **Complete** | The cycle that closed milestone 18 wrote that the four tables outside `ROW_RULES` are migration bookkeeping written by the runner. Re-measuring before starting the next item found that **wrong**, and the correction is additive — the sentence stands where it was written and this row records what measurement found instead. Only `schema_migrations` is not written by a store, and it is not written by the runner either: each forward migration records its own version in the same transaction as its DDL, which is stronger, and is now asserted for all 19. `inbox` is written on every consumer claim and `rate_limit_counter` on every request — the two hottest write paths in CORE — and both sat outside every gate five parity cycles built: no rules, no column shapes, and for `rate_limit_counter` **three unenforced `CHECK` constraints** that `tests/check-parity.test.ts` had recorded as unprobeable *because the reference limiter held no row*. Measured against a real Postgres before any code changed: `inbox.claim(consumer, "not-a-uuid")` was accepted in memory and refused by the database with `invalid input syntax for type uuid`; a bad `subject_kind`, a bad `rate_class` and a negative `hits` were all refused by the database and unmodelled in memory. Both reference stores are row stores now — `InMemoryInbox` writes `{consumer, event_id, received_at}` and `InMemoryRateLimitWindowStore` writes the counter's six columns, both through `putRow`, so they inherit every gate at once. Two of the three exemptions became real dual-backend probes; the third was **narrowed** to the half that is still true (no caller can express a negative count) and promoted to `declared: true` so the rule runs on the store's own writes. A third divergence surfaced on the way: `PgRateLimitWindowStore` wrote `updated_at` from the database's `now()`, the one store in CORE that told time by itself, so under a fixed clock the two backends disagreed about when a window was touched. The clock is injected now, and a database probe with a fixed clock is what keeps it that way. `tests/runtime-table-parity.test.ts` holds **12 assertions**, 4 needing a database, including a gate that parses `CREATE TABLE` out of every migration and fails when a table is neither gated nor excused, a source scan proving each exemption's reason still true, and the two rate-limit vocabularies read out of `pg_constraint` and compared with the arrays the reference limiter actually enforces. Six falsifications, six caught. `idempotency_key` — a table nothing writes — is recorded as **B-37** rather than dropped, because removing it needs a destructive migration and `scripts/check-migrations.mjs` refuses those in a forward migration on purpose |
 
 ### What was claimed complete and actually is
 
@@ -202,6 +205,7 @@ Nothing.
 | B-28 | **Resolved.** `DeliveryFanOut` filtered `subscriptionsFor` on `active`, so no new delivery was queued for a deactivated subscription — but `DeliveryWorker.drainOnce` never re-checked it, and a delivery that was already `pending` when the subscription was switched off was still claimed, signed and POSTed, for up to `maxAttempts` across hours of backoff. Found while building B-27, whose revival refuses an inactive subscription; the worker's own behaviour was the other half and contradicted it. The documented reasoning for the old behaviour — those deliveries were promised, and dropping them is worse than delivering them late — was right that they must not be dropped and wrong that "late" is what an operator asked for when switching off a leaking endpoint | Closed by `markSuppressed` on `DeliveryStore` in both backends and an `active` re-check in the worker: the row is dead-lettered with the reason recorded, unsent, with `attempts` and `last_status` untouched, and reported as `suppressed` in the worker result. Read as **stop sending**, not *stop queueing*, because the realistic reasons to deactivate are urgent — a compromised endpoint, a leaked secret, a partner asking to be switched off. Checked at the moment of sending rather than swept at deactivation, since a sweep cannot close the race where fan-out reads the active subscriptions, the deactivation commits and fan-out then queues its row. `dead` reused rather than a fourth status, following the precedent B-25 set for its own new route to `dead`. Recovery is reactivate then `npm run revive` |
 | B-29 | **Resolved.** MOVE executes over minutes, so a cancellation can arrive mid-execution. CORE closed the fulfillment `cancelled`, released the hold and published `core.fulfillment.cancelled`, and then refused MOVE's already in-flight `move.job.completed` with `409 fulfillment was cancelled` and recorded nothing. Two failures followed, both worse than the race: the inbound dispatcher retries whatever is thrown at it and this refusal can never come good — a cancelled fulfillment does not reopen — so the report was retried five times across hours of backoff and dead-lettered as an error string; and the row read `cancelled` + `released`, which `financialDisposition` calls `settled`, so `listFinanciallyInconsistent()` and `listPendingFinancialDecision()` both returned empty while a driver had delivered an order whose payer had been refunded. Found by reading CORE's own code and proved with a throwaway probe before anything was changed; the existing single-closure test covered only the *simultaneous* race, where refusing the loser is still correct, and nothing covered the sequential shape | Closed by recording the fact instead of refusing it. Migration 0017 adds `executed_after_cancellation_at` (MOVE's `completed_at`, not CORE's receipt time) and `executed_after_cancellation_job_reference` (separate from `move_job_reference`, which is null whenever the cancellation beat MOVE's acceptance — the commonest ordering for this case), both nullable, with check constraints for both-or-neither and marker-only-on-cancelled. A conditional store write `markExecutedAfterCancellation` makes the marker single-valued the same way B-21 made the closure single-valued, so one report produces one marker, one event and one audit entry however often it is redelivered. `financialDisposition` returns `decision_required` — placed after the `unsettled` and still-`held` checks so a CORE defect is never masked by a business question — and the additive event `core.fulfillment.executed_after_cancellation` v1 tells MARKET, the only side that can talk to the customer it already told the order was cancelled. No existing contract changed and the cancellation is not re-published. CORE moves **no** money, deliberately: the voided hold cannot be captured and re-charging a refunded payer is not CORE's decision — who pays MOVE and who absorbs the loss is a B-20-class owner question, recorded as **B-30**. Scope is the `cancelled` branch only: a late `completed` on a `failed` row is either MOVE contradicting itself or a redelivery of the report that closed the row, and keeps its existing refusal; a late `failed` after a cancellation records nothing and is answered rather than refused, since both sides agree the work was not delivered and a 409 would only be dead-lettered for nothing. Reports lost before the deploy can be recovered by reviving the `inbound_event` rows carrying `fulfillment was cancelled` (B-27, `npm run revive`); the migration performs no backfill and invents no history |
 | B-36 | Branch protection and rulesets cannot be configured on this repository's plan | CI's two jobs are informative, not required: a red run blocks no merge automatically, so the enforcement milestone 12 delivered stops at the run and does not reach the merge button. Measured rather than assumed — `gh api repos/uxxxug/wasla-core/branches/main/protection` and `.../rulesets` both answer HTTP 403 "Upgrade to GitHub Pro or make this repository public", so this is not a setting anyone forgot | Either a paid plan on the owning account or making the repository public. Neither is a code change and neither is CORE's call |
+| B-37 | `idempotency_key` is a table nothing writes | Created by migration 0001 with a primary key, a scope column, a body and an expiry, and written by no code in `src/` or `scripts/` — the notification module's identically-named *column* is unrelated. Found while bringing the runtime tables under the parity gates (milestone 19): an unused table is a claim nobody can falsify, and an HTTP idempotency layer that looks implemented in the schema and is absent from the code is worse than one that is visibly missing. It is recorded as an enforced exemption in `tests/runtime-table-parity.test.ts`, which fails the moment anything starts writing it | One of two deliberate decisions, neither of which belongs in a parity cycle: implement request idempotency against it (an owner decision about the HTTP contract, since it changes what a repeated `POST` means), or remove it in a reviewed destructive migration. `scripts/check-migrations.mjs` refuses `DROP TABLE` in a forward migration on purpose, and weakening that gate to tidy up a dead table is exactly the trade this repository does not make |
 | B-8 | *Resolved.* Managed repository credentials are available; CORE is published to `uxxxug/wasla-core` by fast-forward without rewriting history. `package-lock.json` is now committed, so installs are reproducible; previously `npm ci` failed outright because no lockfile existed | — | — |
 
 ## Open questions
@@ -4985,3 +4989,94 @@ declaration was compared against the `pg_attribute` of a database CI built from
 the 19 migrations, and the six refusal probes were compared with the wording of
 CI's own `postgres:16` — so `column-shapes.ts` quotes a message this repository
 has seen a real database produce on a machine that is not this one.
+
+## Cycle 2026-09-13 (seventh) — parity for the runtime tables no gate reached
+
+The seventh parity cycle, and the first whose subject is the *scope* of the
+previous six rather than a new kind of rule. Full account, with every measured
+message and every falsification, in `docs/runtime-table-parity.md`.
+
+**The cycle began by disproving its predecessor.** The milestone-18 record
+stated that the four tables outside `ROW_RULES` "are migration bookkeeping,
+written by the migration runner rather than by a store". The mandate says not to
+treat an earlier report as final truth, so it was re-measured, and it was wrong.
+`inbox` is written on every consumer claim and `rate_limit_counter` on every
+request — the two hottest write paths in CORE — and both sat outside every gate
+six cycles had built. The original sentence stands where it was written; the
+correction is additive, made first in the reservation commit and recorded in the
+milestone table.
+
+**What the gap actually was.** `rate_limit_counter` carries three `CHECK`
+constraints that nothing enforced. They were not missing by oversight:
+`tests/check-parity.test.ts` had recorded them as *unprobeable*, with true
+reasons of the form "the subject kind is part of the reference limiter's
+in-process map key, not a stored column". The reason was true because the
+reference limiter held no row — a description of the gap, not a justification
+for it. An exemption whose reason describes the defect is the shape of thing
+this cycle looked for. Measured against a real Postgres before any code
+changed: a non-uuid `event_id` was accepted in memory and refused by the
+database with `invalid input syntax for type uuid`; a bad `subject_kind`, a bad
+`rate_class` and a negative `hits` were each refused by the database and
+unmodelled in memory.
+
+**The fix is structural, not a list of new checks.** Both reference stores are
+row stores now, writing through `putRow`, so they inherit columns, checks,
+foreign keys and transitions at once instead of getting a bespoke check each.
+Two of the three exemptions became real dual-backend probes; the third was
+narrowed to the half that is still true and promoted to `declared: true`.
+
+**A third divergence, found on the way.** `PgRateLimitWindowStore` wrote
+`updated_at` from the database's `now()` — the one store in CORE that told the
+time by itself, so under a fixed clock the two backends disagreed about when a
+window was touched. The clock is injected now and a fixed-clock database probe
+keeps it that way. This is the third divergence in three cycles with the same
+shape — a column one backend writes and the other never surfaces — which is why
+the next actionable item gates the **read** path.
+
+**`idempotency_key` is recorded, not removed.** Nothing writes it. Dropping it
+needs `DROP TABLE`, which `scripts/check-migrations.mjs` refuses in a forward
+migration on purpose; weakening that gate to tidy up a dead table is not a trade
+this repository makes. It is blocker **B-37** and an enforced exemption that
+fails the moment anything writes it.
+
+**Gates.** `tests/runtime-table-parity.test.ts`, 12 assertions, 4 needing a
+database. The load-bearing two are general rather than about these tables: a
+gate that parses `CREATE TABLE` out of every migration and fails when a table is
+neither gated nor excused, so the *next* table added to the schema cannot repeat
+this cycle; and a source scan that proves each exemption's stated writers are
+still its actual writers. That second gate corrected this cycle's own first
+draft — the exemption claimed `scripts/db-migrate.mjs` writes
+`schema_migrations`, and the scan found nothing writes it, because each forward
+migration records its own version inside the same transaction as its DDL. That
+is the stronger arrangement, and it is now asserted for all 19 migrations.
+
+**Falsification: six attempts, six caught.** Stopping the reference limiter
+writing rows, reverting the Postgres limiter to `now()`, dropping `received_at`
+from the inbox row, adding a migration with an ungoverned table, and widening
+the enforced `rate_class` vocabulary by one value each produced a failure, and
+the migration-count vacuity guard fired on the fourth as well.
+
+**Local measurement.** `typecheck`, `check:governance`, `check:contracts`,
+`check:migrations` pass. Without `DATABASE_URL`: 584 passed, 64 skipped. With
+`DATABASE_URL` against local PostgreSQL 16: 1063 passed in 45 files.
+Whole-schema coverage is 263 columns, 206 `NOT NULL`, 47 defaults, up from
+254/197/45. One flake is recorded rather than hidden: in the first combined run
+against Postgres, `tests/migration-0011-lifecycle.test.ts` reported its single
+test passing and the file failing; it passed standalone and on re-run.
+
+**CI verdict: both jobs green**, read from the run logs for head `69151e5` on
+`runtime-table-parity` (PR run `34745320035`, push run `34745318738`), not
+inferred from the local run:
+
+| Job | Result | Wall time | Totals |
+|---|---|---|---|
+| Verify without a database | success | 38s | 584 passed, 64 skipped in 43 of 45 files; the lifecycle file skipped |
+| Verify against PostgreSQL | success | 2m02s | 1063 passed in 45 files; the lifecycle file 1 passed |
+
+Both totals match the local measurement exactly. What that buys specifically:
+the four database-only assertions in `runtime-table-parity.test.ts` ran against
+a `postgres:16` CI built from the 19 migrations — so the two `CHECK`
+vocabularies this cycle put under one source of truth were compared with a real
+`pg_constraint` on a machine that is not this one, and the fixed-clock stamp
+probe was verified against a database this repository did not create. The
+lifecycle flake seen locally did not reproduce in CI.

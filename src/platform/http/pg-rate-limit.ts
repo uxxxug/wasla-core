@@ -1,3 +1,4 @@
+import type { Clock } from "../clock.js";
 import type { Queryable } from "../persistence/postgres.js";
 import type { RateLimitKey, RateLimitWindowStore } from "./rate-limit.js";
 
@@ -21,17 +22,27 @@ import type { RateLimitKey, RateLimitWindowStore } from "./rate-limit.js";
  * must not hold a transaction open at all.
  */
 export class PgRateLimitWindowStore implements RateLimitWindowStore {
-  constructor(private readonly db: Queryable) {}
+  /**
+   * `updated_at` used to be the database's `now()`, which made this the one
+   * store in CORE that told time by itself: under a fixed clock the reference
+   * limiter wrote the fixed instant and this one wrote wall time, for the same
+   * write. Found while bringing the table under the parity gates (milestone
+   * 19). The clock is injected now, like everywhere else.
+   */
+  constructor(
+    private readonly db: Queryable,
+    private readonly clock: Clock,
+  ) {}
 
   async hit(key: RateLimitKey, windowStart: Date): Promise<number> {
     const result = await this.db.query<{ hits: string }>(
       `insert into rate_limit_counter
          (subject_kind, subject_hash, rate_class, window_start, hits, updated_at)
-       values ($1, $2, $3, $4, 1, now())
+       values ($1, $2, $3, $4, 1, $5)
        on conflict (subject_kind, subject_hash, rate_class, window_start)
-       do update set hits = rate_limit_counter.hits + 1, updated_at = now()
+       do update set hits = rate_limit_counter.hits + 1, updated_at = $5
        returning hits`,
-      [key.subject_kind, key.subject_hash, key.rate_class, windowStart],
+      [key.subject_kind, key.subject_hash, key.rate_class, windowStart, this.clock.now()],
     );
     // bigint arrives as a string from the driver; the count is far below the
     // safe-integer range for any window length CORE would use.
