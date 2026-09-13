@@ -112,15 +112,40 @@ Each mutation applied to a committed tree, suite re-run, then restored and
 
 | # | mutation | expected | result |
 | --- | --- | --- | --- |
-| F1 | remove the `requirePrincipal` call from the membership route | anonymous grant answers 201 again | caught — 3 cases fail |
-| F2 | change the required permission to `organization.read` | an org_member could grant | caught |
-| F3 | drop the `organization_id` argument, leaving the permission unscoped | org_admin reaches another tenant | caught |
-| F4 | remove `"401"` from the contract operation | documented-status gate disagrees with reality | caught |
-| F5 | remove `"403"` from the contract operation | same | caught |
+| F1 | remove the `requirePrincipal` call from the membership route | anonymous grant answers 201 again | caught — 6 of 8 cases fail |
+| F2 | require `organization.read` instead of `organization.write` | a colleague could promote themselves | **passed the first version of the gate** — see below; caught after the gate was strengthened, 2 cases fail |
+| F3 | drop the `organization_id` argument, leaving the permission unscoped | an org_admin reaches another tenant | caught |
+| F4 | delete `"401"` from the contract operation | a reachable refusal is undocumented | **passed the first version** — caught after the gate was strengthened |
+| F5 | delete `"403"` from the contract operation | same | **passed the first version** — caught after the gate was strengthened |
+
+Three of five passed, which is the most this repository has recorded in one cycle,
+and both reasons are worth keeping.
+
+**F2 passed because no case in the file held the one principal that can tell the
+two permissions apart.** An outsider holds neither `organization.read` nor
+`organization.write`; an `org_admin` holds neither *outside* its own tenant. Both
+answer `403` under either permission, so every case passed while the route
+accepted a permission that any `org_member` holds — meaning any colleague could
+have promoted themselves to administrator, which is most of the original defect
+back again. The gate now has an `org_member` of the victim organization attempting
+exactly that, with a premise assertion that the same token really does read the
+organization (`200`), so its `403` is demonstrably about the write permission and
+not about having no access at all.
+
+**F4 and F5 passed because this route's refusals are reached by no other test.**
+The milestone 27 and 28 gates compare the contract against statuses they *observe*
+while driving the 52 operations authenticated, so a `401` and a `403` that only
+this file produces were documented by nobody's measurement. The file now records
+every status it drives out of the route in a set and asserts the contract documents
+each one — asserted against what the cases actually saw, not against a list written
+in the test, so a case that stops reaching a refusal cannot leave a stale
+expectation passing. This is the fourth cycle in a row in which a falsification
+passed until the gate itself was made stronger, and the second in which the
+strengthening found a further real weakness rather than only a missing assertion.
 
 ## Evidence
 
 - Route: `src/modules/identity-access/http.ts`, `POST /v1/memberships`.
-- Gate: `tests/anonymous-privilege-escalation.test.ts`, 6 cases.
+- Gate: `tests/anonymous-privilege-escalation.test.ts`, 8 cases.
 - Contract: `contracts/openapi/core-v1.yaml`, `/v1/memberships`.
-- Local: 715 passed / 148 skipped without a database (was 709 / 148).
+- Local: 717 passed / 148 skipped without a database (was 709 / 148), 1280 with one (was 1272).
