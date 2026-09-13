@@ -4,6 +4,7 @@ import {
   journalOf,
   type TransactionScope,
 } from "../../platform/persistence/transaction.js";
+import { assertBalanced } from "./domain.js";
 import type { LedgerTransaction, PaymentAuthorization, Wallet } from "./domain.js";
 import { assertRow, putRow, type Row } from "../../platform/persistence/row-rules.js";
 
@@ -162,6 +163,20 @@ export class InMemoryMoneyRepository implements MoneyRepository {
    * about to make consistent. Outside a transaction there is nothing to defer
    * to, so the check runs immediately, which matches autocommit.
    */
+  /**
+   * The balance rule, at the commit point Postgres checks it.
+   *
+   * Keyed by transaction id, so a transaction written and then rolled back
+   * inside the same scope is not checked twice, and two transactions in one
+   * scope are each checked once.
+   */
+  private deferBalance(scope: TransactionScope | undefined, transaction: LedgerTransaction): void {
+    const check = () => assertBalanced(transaction.entries);
+    const journal = journalOf(scope);
+    if (journal) journal.defer(`balance:${transaction.transaction_id}`, check);
+    else check();
+  }
+
   private deferLedgerAgreement(scope: TransactionScope | undefined, authorizationId: string): void {
     const check = () => this.assertLedgerAgreement(authorizationId);
     const journal = journalOf(scope);
@@ -260,6 +275,14 @@ export class InMemoryMoneyRepository implements MoneyRepository {
     }
     journalMapWrite(_scope, this.ledger, transaction.transaction_id);
     putRow("ledger_transaction", this.ledger, transaction.transaction_id, transaction);
+    // `ledger_transaction_balance`, the deferred constraint trigger from
+    // migration 0009. The trigger-parity cycle found this store did not enforce
+    // it at all: `assertBalanced` was called by `MoneyService` alone, so a
+    // caller reaching the store directly could post entries summing to -1 and
+    // the reference backend accepted money appearing from nowhere that Postgres
+    // refuses at commit. Deferred through the journal for the same reason the
+    // agreement checks are: the refusal belongs to the commit.
+    this.deferBalance(_scope, transaction);
     if (transaction.authorization_id) {
       this.deferLedgerAgreement(_scope, transaction.authorization_id);
     }

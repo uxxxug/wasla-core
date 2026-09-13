@@ -143,29 +143,14 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     putRow("plan", this.plans, plan.plan_id, plan);
   }
 
-  /** The `plan_terms_immutable` trigger from migration 0010. */
+  /**
+   * The `plan_terms_immutable` trigger from migration 0010 now lives in
+   * `TRANSITION_RULES` and is applied by `putRow`, which reads the row this one
+   * replaces out of the same map. It was restated here until the trigger-parity
+   * cycle; the three refusals it raised are unchanged, they are simply declared
+   * once for both this store and any other write that reaches the `plan` table.
+   */
   async updatePlan(plan: Plan, scope?: TransactionScope): Promise<void> {
-    const previous = this.plans.get(plan.plan_id);
-    if (previous) {
-      if (previous.status === "retired" && plan.status !== "retired") {
-        throw new Error(`plan ${plan.plan_id} is retired and cannot return to ${plan.status}`);
-      }
-      if (plan.status === "draft" && previous.status !== "draft") {
-        throw new Error(`plan ${plan.plan_id} has been offered and cannot return to draft`);
-      }
-      if (
-        previous.status !== "draft" &&
-        (previous.code !== plan.code ||
-          previous.currency !== plan.currency ||
-          previous.amount_minor !== plan.amount_minor ||
-          previous.billing_interval !== plan.billing_interval ||
-          previous.interval_count !== plan.interval_count)
-      ) {
-        throw new Error(
-          `plan ${plan.plan_id} is ${previous.status}; its commercial terms cannot change because periods have already been priced from them - publish a new plan instead`,
-        );
-      }
-    }
     this.assertPlanShape(plan);
     journalMapWrite(scope, this.plans, plan.plan_id);
     putRow("plan", this.plans, plan.plan_id, plan);
@@ -182,14 +167,13 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     return status ? all.filter((plan) => plan.status === status) : all;
   }
 
-  /** The `plan_grant_immutable` trigger: grants freeze with the plan. */
+  /**
+   * The `plan_grant_immutable` trigger — grants freeze with the plan — is a
+   * `TRANSITION_RULE` as of the trigger-parity cycle, read from the registered
+   * `plan` map rather than from this store's own field, so the rule holds for
+   * any writer of the table and not only for this method.
+   */
   async insertGrant(grant: PlanGrant, scope?: TransactionScope): Promise<void> {
-    const plan = this.plans.get(grant.plan_id);
-    if (plan && plan.status !== "draft") {
-      throw new Error(
-        `plan ${grant.plan_id} is ${plan.status}; its grants cannot change because usage has already been measured against them - publish a new plan instead`,
-      );
-    }
     const key = this.grantKey(grant.plan_id, grant.feature_key);
     if (this.grants.has(key)) {
       throw new Error('duplicate key value violates unique constraint "plan_grant_pkey"');
@@ -430,7 +414,9 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
    *
    * There is no `updateUsage` or `deleteUsage` on the port at all, which is
    * the strongest form of the append-only rule: the operation cannot be
-   * expressed, so no backend has to refuse it.
+   * expressed, so no backend has to refuse it. That is recorded as this
+   * trigger's exemption in `TRIGGER_INVENTORY`, where the parity suite asserts
+   * the absence rather than trusting this sentence.
    */
   async insertUsage(usage: UsageRecord, scope?: TransactionScope): Promise<void> {
     const period = this.periods.get(usage.period_id);
@@ -442,9 +428,6 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       // declaration so there is still one copy of it.
       throw new Error(foreignKeyRefusal("usage_record", "usage_record_period_id_fkey"));
     }
-    if (period.status === "voided") {
-      throw new Error(`period ${usage.period_id} was voided and cannot accrue usage`);
-    }
     const at = Date.parse(usage.recorded_at);
     // An unparseable instant has to be refused rather than compared: NaN makes
     // every comparison below false, so the window check would silently pass
@@ -453,11 +436,10 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     if (Number.isNaN(at)) {
       throw new Error('null value in column "recorded_at" violates not-null constraint');
     }
-    if (at < Date.parse(period.starts_at) || at >= Date.parse(period.ends_at)) {
-      throw new Error(
-        `usage recorded at ${usage.recorded_at} falls outside period ${usage.period_id} (${period.starts_at} to ${period.ends_at})`,
-      );
-    }
+    // The voided-period and window refusals of `usage_record_within_period`
+    // are declared in `TRANSITION_RULES` and raised by `putRow` below. Only
+    // the unparseable-instant case stays here, because it is not the trigger's
+    // refusal: Postgres refuses that row for a null `recorded_at`.
     for (const existing of this.usage.values()) {
       if (
         existing.period_id === usage.period_id &&

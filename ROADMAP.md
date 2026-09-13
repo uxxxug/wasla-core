@@ -81,60 +81,10 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved: trigger-invariant parity between the reference backend and Postgres
-(branch `trigger-parity`, milestone 16).** The three declarative families of
-B-12 are closed — 24 uniqueness rules, 100 check constraints, 30 foreign keys.
-This is what is left: the schema installs **12 triggers**, and a trigger is a
-different kind of rule from the three before it. A `CHECK` judges a row; a
-trigger can judge a **transition** (what the row was, and what it is becoming),
-can read *other* tables, and can be deferred to commit. None of that can be
-expressed in a row-shaped predicate table, which is why it was deliberately
-left last.
-
-Measured before reserving, from `pg_trigger` and `pg_get_functiondef` rather
-than from the migration text: 12 triggers, of which **4 are constraint triggers,
-`DEFERRABLE INITIALLY DEFERRED`** (the ledger balance, the two
-authorization/ledger agreements, and the period/money agreement) and 8 are
-immediate `BEFORE` triggers. Five trigger names appear anywhere in `src/`, all
-five in the subscription store. Seven do not.
-
-The gaps that measurement exposes, before any is fixed:
-
-- `subscription_currency_check` is **not restated in the reference store at
-  all**. It refuses two things: a subscription billing a plan in one currency
-  against a wallet in another, and — on insert only — a subscription to a plan
-  that is not `active`. Both are refused today by `SubscriptionService`, not by
-  the store, so any test that goes through the repository accepts a subscription
-  Postgres refuses, and the service is the only thing standing between a
-  currency mismatch and the ledger.
-- `ledger_transaction_balance` is enforced in memory by `assertBalanced` in the
-  money domain, which throws **immediately** where Postgres defers to commit,
-  and its message omits the transaction id the database names. Same verdict,
-  different timing and different wording, and the timing difference is the one
-  that matters: a transaction that is unbalanced mid-way and balanced by its own
-  last write is legal in Postgres and refused in memory.
-- The two `payment_authorization`/`ledger` agreements and the period/money
-  agreement **are** deferred in memory, through the journal, but nothing
-  measures that the two backends refuse the same cases, and no gate reads
-  `pg_trigger`, so a migration adding a trigger ships with no parity today —
-  exactly the hole the uniqueness, check and foreign-key gates were built to
-  close for their own families.
-- Three append-only triggers (`audit_entry`, `ledger_entry`, `usage_record`) and
-  the `reputation_signal` append-only trigger look unreachable through the
-  ports: there is no `updateUsage`, no entry update, no audit mutation, and
-  `retractIfStanding` narrows on `retracted_at is null` so the trigger never
-  fires. Unreachable is a legitimate exemption and a claim that has to be
-  proven per trigger, not assumed for the group — the check-constraint cycle
-  recorded twelve exemptions and one of them turned out to be a defect.
-
-Scope: an inventory of the 12 measured from the catalogue; the reachable
-transition invariants restated once in the reference backend, on the write path
-rather than at the call sites; wording that quotes what Postgres raises; a probe
-per trigger on both backends asserting the refusal **and** its reason, including
-deferred cases asserted at the commit point and not at the write; and a
-coverage gate reading `pg_trigger` at run time so a new trigger cannot ship
-without parity. Exemptions recorded with a reason each, and each exemption's
-unreachability asserted rather than asserted-in-prose.
+Nothing is reserved. The trigger-parity cycle that held this slot is finished
+and recorded below, which closes the fourth and last family of B-12; the next
+actionable item is milestone 17, `ON DELETE` and delete-path parity, which
+nothing is holding.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -169,7 +119,8 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 14 | Check-constraint parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The uniqueness cycle closed 24 rules of one kind; this row closes the other 100. `src/platform/persistence/row-rules.ts` restates every schema `CHECK` once — 67 rules over 25 tables, built from 23 shared closed vocabularies — and `putRow` is now the only way a reference store writes a row, so a transition added later cannot forget the check. `tests/check-parity.test.ts` probes 88 of the 100 on both backends (**178 assertions**), asserts each refusal names the schema constraint, records the other 12 as unprobeable with a stated reason each, and reads `pg_constraint` at run time so a new `CHECK` cannot ship without parity. The measurement inverted the expected result: the reference store was already stricter than the database in three places, all in Postgres' favour to fix — `membership_roles_check` enforced **nothing** since 0001 (`array_length('{}',1)` is NULL, and a NULL `CHECK` passes), so a membership granting no roles was always accepted; `PgEventDeliveryStore.queue` dropped `claimed_at`, `reclaims` and `claim_token` from its insert list; `PgFulfillmentRepository` dropped both B-29 markers on `insert`, `insertIfAbsent`, `update` and `updateIfStatusIn`. Two reference-store gaps were fixed in the rules table (`fulfillment_settlement_alignment_check` was never restated in memory). Migration 0019 replaces the ineffective constraint under the same name; `docs/check-constraint-parity.md` records the inventory, the five families, the three defects and all twelve exemptions |
 | 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
 | 15 | Referential-integrity parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The third and last large family of B-12. The schema declares **30 foreign keys** across 20 child tables and exactly **one** — `usage_record_period_id_fkey` — was restated anywhere in `src/`, so the reference backend accepted a fulfillment in no tenant, a membership for no principal, a session for a principal nobody created, a notification addressed to a recipient row that was never inserted, and a webhook delivery of an envelope the outbox never recorded. `src/platform/persistence/reference-keys.ts` declares one rule per referencing column (name, child column, parent table, nullability, because `MATCH SIMPLE` makes a null reference satisfy the key) and `putRow` now calls `assertReferences` on every reference write, refusing with Postgres' own wording. Parents are found through a bundle-scoped registry that reads the stores' **live** maps, so no row is copied and no second source of truth exists. `tests/fk-parity.test.ts` probes 29 of the 30 on both backends (**63 assertions**), records the thirtieth as exempt with its reason, and holds four gates: coverage against `pg_constraint` at run time, a declaration gate comparing every rule's child column, parent table and nullability with the catalog, an assertion that the bundle resolved every parent the rules read — the design's single fail-open path, measured rather than trusted — and a reason for every exemption. Enforcement immediately falsified six passing suites: **29 failures**, all `fulfillment_organization_id_fkey` or `membership_organization_id_fkey`, because those fixtures had never created the tenant they wrote into. Fixed in the fixtures (`seedTenant`, `coreWithTenants`), not by relaxing the rule. A second finding: `session`, `plan_grant` and `usage_record` were still writing with a bare `map.set`, so the previous cycle's claim that `putRow` is the only reference write path held for 25 of 28 tables and their five `CHECK`s were duplicated inline; all three now go through `putRow` and their rules are declared in `ROW_RULES`. `docs/foreign-key-parity.md` records the inventory, the six nullable columns and what null means in each, the one weakening, the exemption, and a stale fixture comment claiming `organization` has a country foreign key when the catalog shows none |
-| 16 | Trigger-invariant parity between the reference backend and Postgres | **Not started; the next actionable item** | What is left of B-12 after uniqueness (24 rules), checks (100) and foreign keys (30): the schema installs **12 triggers**, and unlike the three declarative families a trigger can refuse a *transition* rather than a row, which is why it is last and separate. Several are already mirrored in the reference stores by hand — append-only audit, usage-record append-only, the deferred ledger-balance and period-money agreements — but nothing measures the set, and no gate reads `pg_trigger` at run time, so a migration adding a trigger ships with no parity today. The cycle is the same shape as the three before it: an inventory measured from the catalog, one declaration, enforcement on the single write path where the invariant is row-shaped and on the transition where it is not, a probe per trigger on both backends, and a coverage gate |
+| 16 | Trigger-invariant parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The fourth and last family of B-12. The schema installs **12 triggers**, measured from `pg_trigger`; five were named anywhere in `src/`. Two were enforced by no reference store at all: `subscription_currency_check` (a plan priced in one currency billed against a wallet in another, and a subscription to a plan that was never offered) lived only in `SubscriptionService`, and `ledger_transaction_balance` only in `MoneyService` — so a caller reaching the stores directly could post entries summing to -1 and the reference backend accepted money appearing from nowhere. `src/platform/persistence/transition-rules.ts` declares the immediate triggers as transition rules over (operation, previous row, next row) and `putRow` applies them after the checks and the foreign keys, the order Postgres uses; the four `DEFERRABLE INITIALLY DEFERRED` constraint triggers stay on the transaction journal, because a write-time refusal would reject a legal sequence. The same file carries `TRIGGER_INVENTORY`, which names all twelve exactly once as immediate, deferred (naming the store that defers it) or exempt with a reason. `tests/trigger-parity.test.ts` holds **39 assertions** with a database: a refusal probe per reachable trigger on both backends asserting Postgres' own words, an outcome probe for the one path both backends narrow away before it can fire, three exemptions that assert the absent port operations rather than claiming unreachability in prose, and five gates — coverage against `pg_trigger` at run time, a timing gate reading `tgdeferrable`/`tginitdeferred`, `unresolvedReads() === []`, a reason per exemption, and agreement between the inventory and the rules. `docs/trigger-parity.md` records the inventory, the two gaps, and the four places the backends still differ |
+| 17 | `ON DELETE` and delete-path parity | **Not started; the next actionable item** | What the four parity cycles deliberately left: the reference backend does not model cascades, and no reference store deletes a row outside a transaction rollback, so the delete halves of the four append-only triggers and the one `ON DELETE CASCADE` key (`plan_grant_plan_id_fkey`) are unreachable rather than enforced. Today that is recorded as exemptions whose absent port operations the suite asserts, which is honest but is not parity. The cycle would decide whether CORE's ports get a delete path at all — the append-only tables argue no — and if any do, model the cascade and probe it on both backends |
 
 ### What was claimed complete and actually is
 
@@ -264,11 +215,14 @@ Nothing.
 
 ## Tests that pass at this commit
 
-**976 of 976 across 41 files** with `DATABASE_URL` set (both backends), plus the
-migration-lifecycle pass (1), and **529 passed / 52 skipped** without. Counted by
-running the suite at this commit, twice.
+**1015 of 1015 across 42 files** with `DATABASE_URL` set (both backends), plus
+the migration-lifecycle pass (1), and **550 passed / 54 skipped** without.
+Counted by running the suite at this commit, twice.
 
-The earlier figure on this line — 488 across 31 files, 273 / 41 without — was
+The figure this line carried through the foreign-key cycle — 976 across 41
+files, 529 / 52 without — is superseded by the trigger-parity cycle and kept
+here for the same reason the one before it was: the count's history stays
+auditable. The earlier figure on this line — 488 across 31 files, 273 / 41 without — was
 true when it was written and was not updated by the cycles in between, so it had
 become a stale claim about "this commit". It is replaced rather than deleted:
 the previous number is recorded here so the history of the count stays
@@ -4577,3 +4531,144 @@ database created from the migrations rather than from a developer's schema. The
 declaration gate and the coverage gate ran there too, against that database's
 own `pg_constraint`, so the inventory in `docs/foreign-key-parity.md` is checked
 against the schema CI builds and not only the one on this machine.
+
+## Cycle 2026-09-13 (fourth) — trigger-invariant parity between the two backends
+
+### Why this was next
+
+B-12's three declarative families were closed: 24 uniqueness rules, 100 check
+constraints, 30 foreign keys. The triggers were what was left, and nothing above
+them in the dependency order was actionable — B-35/ADR 0010 has no ADR text in
+the repository, B-14…B-20 and B-30…B-34 are policy decisions that are not
+CORE's to make, and B-36 is a plan limitation. The order was also not arbitrary:
+a trigger that refuses a transition is only meaningful once the rows it fires on
+are known to exist, which is what the foreign-key cycle established.
+
+### Measured first
+
+From `pg_trigger` and `pg_get_functiondef`, not from the migration text: **12
+triggers**, of which **4 are `CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY
+DEFERRED`** and 8 immediate `BEFORE` triggers. Five trigger names appeared
+anywhere in `src/`, all five in the subscription store.
+
+Two of the twelve were enforced by **no reference store at all**:
+
+- **`subscription_currency_check`.** Its two refusals — a plan priced in one
+  currency billed against a wallet held in another, and, on insert, a
+  subscription to a plan that is not `active` — lived in
+  `SubscriptionService.subscribe` and nowhere below it. Every test that reached
+  the repository directly could create a subscription production refuses, and
+  the service was the only thing standing between a currency mismatch and the
+  ledger.
+- **`ledger_transaction_balance`.** `assertBalanced` was called by
+  `MoneyService` alone. `InMemoryMoneyRepository.insertTransaction` checked the
+  business-reference key, the authorization-presence `CHECK` and each entry's
+  row rules — and never that the entries sum to zero. A caller reaching the
+  store directly could post `-1000` against `+999` and the reference backend
+  accepted money appearing from nowhere that Postgres refuses at commit.
+
+The second one was not found by reading the code. It was found because the probe
+failed on the memory half the first time the new suite ran, which is the only
+reason to write the probe before trusting the restatement.
+
+### Why this needed a second mechanism, not more `ROW_RULES`
+
+A `CHECK` reads the row being written; a foreign key reads one other row. A
+trigger can judge a **transition** (`plan_terms_immutable` refuses a change from
+one legal row to another legal row), can read **other tables**
+(`subscription_currency_check` compares plan and wallet), and can run **at
+commit**. None of that fits a row-shaped predicate, so:
+
+- `src/platform/persistence/transition-rules.ts` declares the immediate triggers
+  as rules over (operation, previous row, next row), with the tables each rule
+  reads declared alongside it. `putRow` applies them **after** the check
+  constraints and the foreign keys — the order Postgres uses, so a refusal
+  quotes the constraint the database would quote rather than the trigger that
+  would not have run yet.
+- The four deferred triggers stay on the transaction journal in the stores that
+  already defer, and the balance rule joins them there (`deferBalance`, keyed by
+  transaction id). Enforcing a deferred trigger at the write would refuse a
+  sequence Postgres allows to be repaired before commit.
+- Parent rows are read through the **same bundle registry** the foreign keys
+  use, extended from `has` to `get`. No second wiring, no copied rows: a row
+  rolled back by `InMemoryTransactionBoundary` stops satisfying a trigger at the
+  moment it stops existing.
+- `TRIGGER_INVENTORY` names all twelve exactly once — `immediate`, `deferred`
+  (naming the store that defers it), or `exempt` with its reason — so "which
+  triggers does the reference backend account for" has one answer in one place.
+
+### Proven, not assumed
+
+`tests/trigger-parity.test.ts` carries three kinds of case, because the twelve
+are not alike:
+
+| Kind | What it asserts |
+|---|---|
+| refusal probe | a write valid in every other respect and illegal only as a transition is refused by **both** backends, in Postgres' own words. For the deferred four the probe wraps the whole `boundary.run`, because the refusal belongs to the commit — asserting it at the write would pass in memory and fail on Postgres |
+| outcome probe | for `reputation_signal_append_only`, whose guarded path both backends narrow away: `retractIfStanding` filters on `retracted_at is null` in memory and in SQL, so a second retraction is not a refusal in either — it is a `stale` verdict, and both are asserted to return it |
+| exemption | three append-only triggers no caller can reach. Each names the port operations that must stay **absent** and the case asserts their absence, so adding `updateUsage` to the port fails the exemption instead of quietly leaving the reference backend permissive |
+
+Five gates:
+
+| Gate | What it catches |
+|---|---|
+| coverage against `pg_trigger` | a migration installing a trigger with neither a restatement nor a recorded exemption; an inventory entry naming a trigger the schema no longer installs; an inventory entry naming the wrong table |
+| timing vs. catalog (`tgdeferrable`, `tginitdeferred`) | a trigger the reference backend enforces at the write that the schema defers to commit, and the reverse. Timing is not cosmetic: the first refuses legal sequences, the second accepts illegal ones until commit |
+| `unresolvedReads() === []` | the design's single fail-open path: a table a rule reads that no store handed to the registry |
+| a reason per exemption, and an absent-operation assertion per exemption | an exemption used as a silent excuse |
+| inventory vs. rules | a trigger called `immediate` with no rule behind it, and a rule enforcing a trigger the inventory does not call immediate |
+
+The gates were falsified before being trusted. Emptying the `subscription` rule
+list failed three tests — both currency probes on the memory half and the
+inventory/rules gate — while the Postgres half stayed green, which is exactly
+the asymmetry the suite exists to catch. Reclassifying
+`ledger_transaction_agrees_with_authorization` from `deferred` to `exempt`
+failed the timing gate and the probe-versus-exemption gate.
+
+### Measured after
+
+| Check | Result |
+|---|---|
+| `tests/trigger-parity.test.ts` with `DATABASE_URL` | **39 passed** — 12 triggers across refusal, outcome and exemption cases on both backends, plus 5 gates |
+| `tests/trigger-parity.test.ts` without a database | **21 passed, 2 skipped** — the memory half and the database-free gates |
+| `npm test` with `DATABASE_URL` | **1015 passed in 42 files**, then migration-lifecycle **1 passed** |
+| `npm test` without a database | **550 passed, 54 skipped** |
+| `npm run typecheck` | clean |
+| governance / contracts / migrations gates | passed — 26 event schemas, 17 emitted types, 19 forward migrations, all with rollbacks |
+
+The 1015 is the previous 976 plus this cycle's 39, with no test removed,
+weakened, skipped or renamed. Three inline restatements were **moved**, not
+deleted: `plan_terms_immutable`, `plan_grant_immutable` and the window half of
+`usage_record_within_period` were hand-written in
+`InMemorySubscriptionRepository` and are now declared once in
+`TRANSITION_RULES`, so they hold for any writer of those tables rather than for
+the three methods that remembered them. Their refusal wording is unchanged, and
+the suites that assert it still pass.
+
+### What this cycle did not do
+
+- **Delete parity is not claimed.** No reference store deletes a row outside a
+  rollback, so the delete halves of the four append-only triggers are
+  unreachable rather than enforced. That is now milestone 17, together with the
+  one `ON DELETE CASCADE` key the reference backend does not model.
+- **The balance rule is stricter than the trigger, on purpose.** Postgres sums
+  per currency, so two currencies each balancing to zero would pass there; the
+  reference store refuses a transaction that mixes currencies at all. CORE has
+  no multi-currency transaction and
+  `ledger_entry_currency_matches_transaction` is the schema saying so. Recorded
+  in `docs/trigger-parity.md` rather than silently narrowed.
+- **Insert and update are not told apart.** `putRow` sees only whether a row
+  exists under the key, so a repeated insert is judged by the update rules.
+  Postgres refuses that write too, as a primary-key violation — a different
+  family's refusal, not a missing one. Never more permissive; the wording
+  differs.
+- **The period-window message is matched on its stable part.** Postgres renders
+  a `timestamptz` its own way and the reference backend quotes the ISO string it
+  was given, so the probe asserts `falls outside period` and not the instants.
+- Branch protection is still unconfigurable on this plan, so CI remains
+  informative rather than required: **B-36**, unchanged.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Recorded in the commit that follows the push, from `gh run view` and the run's
+own log archive rather than from a local run.

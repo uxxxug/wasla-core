@@ -186,8 +186,17 @@ export function foreignKeyRefusal(table: string, constraint: string): string {
   return `insert or update on table "${table}" violates foreign key constraint "${constraint}"`;
 }
 
-/** Tells a key apart from a row: the map's key is the table's primary key. */
-type KeyedMap = { has(key: string): boolean };
+/**
+ * Tells a key apart from a row: the map's key is the table's primary key.
+ *
+ * `get` is part of the shape because a foreign key is not the only rule that
+ * reads another table. The schema's triggers read parent *rows* — a
+ * subscription's plan and wallet currency, a usage record's period window — and
+ * `TRANSITION_RULES` reads them through this same registry rather than through
+ * a second set of wiring. Every `Map` satisfies both members, so no store
+ * changed to expose it.
+ */
+type KeyedMap = { has(key: string): boolean; get(key: string): unknown };
 
 /**
  * Which reference store holds which table, for one persistence bundle.
@@ -224,6 +233,20 @@ export class ReferenceKeys {
 
   exists(table: string, key: string): boolean {
     return this.tables.get(table)?.has(key) ?? false;
+  }
+
+  /**
+   * The live row a trigger-shaped rule needs to read, or `undefined`.
+   *
+   * `undefined` means either "no such row" or "no store attached this table",
+   * and the caller must not tell those apart by guessing: a rule that cannot
+   * read what it judges has to say so, which is why `TRANSITION_RULES`
+   * declares the tables it reads and `assertTransition` skips a rule whose
+   * reads are unresolved rather than passing on an absent row.
+   */
+  row(table: string, key: string): Row | undefined {
+    const value = this.tables.get(table)?.get(key);
+    return value === undefined ? undefined : (value as Row);
   }
 
   /**
