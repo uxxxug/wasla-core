@@ -5064,5 +5064,19 @@ Whole-schema coverage is 263 columns, 206 `NOT NULL`, 47 defaults, up from
 against Postgres, `tests/migration-0011-lifecycle.test.ts` reported its single
 test passing and the file failing; it passed standalone and on re-run.
 
-**CI verdict:** pending — recorded below once the run for this branch's head
-commit has been read from its logs, not inferred from the local run.
+**CI verdict: both jobs green**, read from the run logs for head `69151e5` on
+`runtime-table-parity` (PR run `34745320035`, push run `34745318738`), not
+inferred from the local run:
+
+| Job | Result | Wall time | Totals |
+|---|---|---|---|
+| Verify without a database | success | 38s | 584 passed, 64 skipped in 43 of 45 files; the lifecycle file skipped |
+| Verify against PostgreSQL | success | 2m02s | 1063 passed in 45 files; the lifecycle file 1 passed |
+
+Both totals match the local measurement exactly. What that buys specifically:
+the four database-only assertions in `runtime-table-parity.test.ts` ran against
+a `postgres:16` CI built from the 19 migrations — so the two `CHECK`
+vocabularies this cycle put under one source of truth were compared with a real
+`pg_constraint` on a machine that is not this one, and the fixed-clock stamp
+probe was verified against a database this repository did not create. The
+lifecycle flake seen locally did not reproduce in CI.
