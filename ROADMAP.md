@@ -5282,5 +5282,12 @@ governance, contract and migration checks. The known
 reported FAIL in the combined run while its single test is reported passed, and
 it passes standalone. It is recorded rather than hidden, and CI is the judgment.
 
-**CI verdict: pending.** Recorded below once the run on this branch has
-finished.
+**CI verdict: green.** Run 34761604654 on `82831f7`, both jobs successful (the
+duplicate run 34761588024 on the same commit, from opening the pull request,
+also green). *Verify without a database*: 599 passed / 147 skipped across 46
+files, plus the cluster file skipped. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations): 1161 passed across 48 files and 1
+passed in the cluster file — 1162 in total, matching the local measurement
+exactly. `tests/migration-0011-lifecycle.test.ts` passed in CI in the same
+combined run where it is reported FAIL locally, which keeps that oddity a
+local-environment observation rather than a defect in the file.
