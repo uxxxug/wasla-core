@@ -1,3 +1,4 @@
+import { compareValues } from "../persistence/list-order.js";
 /**
  * Bringing a dead queue row back (B-27).
  *
@@ -195,5 +196,5 @@ export function compareRevivalPosition(
   a: { primary: string; secondary: string },
   b: { primary: string; secondary: string },
 ): number {
-  return a.primary.localeCompare(b.primary) || a.secondary.localeCompare(b.secondary);
+  return compareValues(a.primary, b.primary) || compareValues(a.secondary, b.secondary);
 }

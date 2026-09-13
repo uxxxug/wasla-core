@@ -1,5 +1,5 @@
-import { invalid } from "../../platform/errors.js";
 import type { Router } from "../../platform/http/router.js";
+import { requiredParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { Fulfillment } from "./domain.js";
@@ -28,8 +28,7 @@ export function registerFulfillmentRoutes(
   // Reconciliation read: execution state versus money state. An empty list is
   // the invariant CORE is expected to hold.
   router.get("/v1/fulfillments/reconciliation/inconsistent", async (ctx) => {
-    const organizationId = ctx.query.get("organization_id") ?? "";
-    if (!organizationId) throw invalid("organization_id is required");
+    const organizationId = requiredParam(ctx.query, "organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listFinanciallyInconsistent(organizationId);
     return {
@@ -47,8 +46,7 @@ export function registerFulfillmentRoutes(
   // unmade, and it is kept apart from the defect queue so an operator can tell
   // a business question from an incident.
   router.get("/v1/fulfillments/reconciliation/pending-financial-decision", async (ctx) => {
-    const organizationId = ctx.query.get("organization_id") ?? "";
-    if (!organizationId) throw invalid("organization_id is required");
+    const organizationId = requiredParam(ctx.query, "organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listPendingFinancialDecision(organizationId);
     return {
@@ -65,8 +63,7 @@ export function registerFulfillmentRoutes(
   // alone can find it. Reporting only — what happens to work whose funding is
   // gone is a decision CORE has not been given.
   router.get("/v1/fulfillments/reconciliation/stale-holds", async (ctx) => {
-    const organizationId = ctx.query.get("organization_id") ?? "";
-    if (!organizationId) throw invalid("organization_id is required");
+    const organizationId = requiredParam(ctx.query, "organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
     const items = await fulfillment.listStaleHolds(organizationId);
     return {

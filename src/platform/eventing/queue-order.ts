@@ -1,3 +1,4 @@
+import { compareValues } from "../persistence/list-order.js";
 /**
  * The order in which a queue serves its rows.
  *
@@ -55,8 +56,8 @@ export function inDueOrder<T extends DueRow>(
 ): T[] {
   return [...rows].sort(
     (left, right) =>
-      left.next_attempt_at.localeCompare(right.next_attempt_at) ||
-      arrivalOf(left).localeCompare(arrivalOf(right)) ||
-      idOf(left).localeCompare(idOf(right)),
+      compareValues(left.next_attempt_at, right.next_attempt_at) ||
+      compareValues(arrivalOf(left), arrivalOf(right)) ||
+      compareValues(idOf(left), idOf(right)),
   );
 }

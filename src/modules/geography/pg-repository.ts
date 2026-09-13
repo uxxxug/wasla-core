@@ -111,7 +111,7 @@ export class PgGeographyRepository implements GeographyRepository {
 
   async listCountries(): Promise<readonly Country[]> {
     const result = await this.pool.query<CountryRow>(
-      `select ${COUNTRY} from country order by country_code`,
+      `select ${COUNTRY} from country order by country_code collate "C"`,
     );
     return result.rows.map(toCountry);
   }
@@ -143,7 +143,7 @@ export class PgGeographyRepository implements GeographyRepository {
 
   async listRegions(countryCode: string): Promise<readonly Region[]> {
     const result = await this.pool.query<RegionRow>(
-      `select ${REGION} from region where country_code = $1 order by code`,
+      `select ${REGION} from region where country_code = $1 order by code collate "C"`,
       [countryCode],
     );
     return result.rows.map(toRegion);
@@ -174,7 +174,7 @@ export class PgGeographyRepository implements GeographyRepository {
 
   async listCities(regionId: string): Promise<readonly City[]> {
     const result = await this.pool.query<CityRow>(
-      `select ${CITY} from city where region_id = $1 order by name, city_id`,
+      `select ${CITY} from city where region_id = $1 order by name collate "C", city_id`,
       [regionId],
     );
     return result.rows.map(toCity);
@@ -209,10 +209,10 @@ export class PgGeographyRepository implements GeographyRepository {
     const result =
       countryCode === undefined
         ? await this.pool.query<ServiceAreaRow>(
-            `select ${AREA} from service_area order by name, service_area_id`,
+            `select ${AREA} from service_area order by name collate "C", service_area_id`,
           )
         : await this.pool.query<ServiceAreaRow>(
-            `select ${AREA} from service_area where country_code = $1 order by name, service_area_id`,
+            `select ${AREA} from service_area where country_code = $1 order by name collate "C", service_area_id`,
             [countryCode],
           );
     return result.rows.map(toServiceArea);

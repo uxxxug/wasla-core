@@ -1,5 +1,6 @@
 import { invalid } from "../../platform/errors.js";
 import type { Router } from "../../platform/http/router.js";
+import { limitParam, requiredParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import { isReputationSubjectType, type ReputationSubject } from "./domain.js";
@@ -18,8 +19,7 @@ function subjectOf(ctx: {
   params: Record<string, string | undefined>;
   query: URLSearchParams;
 }): ReputationSubject {
-  const organizationId = ctx.query.get("organization_id") ?? "";
-  if (!organizationId) throw invalid("organization_id is required");
+  const organizationId = requiredParam(ctx.query, "organization_id");
   const subjectType = ctx.params["subject_type"] ?? "";
   if (!isReputationSubjectType(subjectType)) {
     throw invalid("subject_type must be identity or organization");
@@ -61,14 +61,7 @@ export function registerReputationRoutes(
   router.get("/v1/reputation/:subject_type/:subject_id/signals", async (ctx) => {
     const subject = subjectOf(ctx);
     await requirePrincipal(ctx, identity, "reputation.read", subject.organization_id);
-    const raw = ctx.query.get("limit");
-    let limit = 50;
-    if (raw !== null) {
-      limit = Number(raw);
-      if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_SIGNAL_PAGE) {
-        throw invalid(`limit must be an integer between 1 and ${MAX_SIGNAL_PAGE}`);
-      }
-    }
+    const limit = limitParam(ctx.query, "limit", { default: 50, min: 1, max: MAX_SIGNAL_PAGE });
     const items = await reputation.listSignals(subject, limit);
     return { status: 200, body: { count: items.length, items } };
   });

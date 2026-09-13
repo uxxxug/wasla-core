@@ -15,6 +15,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { orderedBy } from "../persistence/list-order.js";
 import { putRow } from "../persistence/row-rules.js";
 import { inDueOrder } from "./queue-order.js";
 
@@ -369,8 +370,18 @@ export class InMemoryOutbox implements OutboxStore {
     return true;
   }
 
+  /**
+   * `order by created_at, event_id`, the same keys as `PgOutbox.all`. Map
+   * insertion order agreed with that only while every fixture appended in
+   * timestamp order; a replay, a back-dated append or a redelivered event breaks
+   * the coincidence.
+   */
   async all(): Promise<OutboxRecord[]> {
-    return [...this.records.values()];
+    return orderedBy(
+      this.records.values(),
+      (r) => r.created_at,
+      (r) => r.event.event_id,
+    );
   }
 
   async byStatus(status: OutboxStatus): Promise<OutboxRecord[]> {

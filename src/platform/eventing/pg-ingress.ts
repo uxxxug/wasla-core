@@ -286,7 +286,7 @@ export class PgInboundEventStore implements InboundEventStore {
 
   async byStatus(status: InboundStatus): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `select ${SELECT_COLUMNS} from inbound_event where status = $1 order by received_at`,
+      `select ${SELECT_COLUMNS} from inbound_event where status = $1 order by received_at, event_id`,
       [status],
     );
     return result.rows.map(toRecord);
@@ -294,7 +294,7 @@ export class PgInboundEventStore implements InboundEventStore {
 
   async all(): Promise<InboundRecord[]> {
     const result = await this.pool.query<InboundRow>(
-      `select ${SELECT_COLUMNS} from inbound_event order by received_at`,
+      `select ${SELECT_COLUMNS} from inbound_event order by received_at, event_id`,
     );
     return result.rows.map(toRecord);
   }

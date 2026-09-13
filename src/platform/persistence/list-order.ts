@@ -37,11 +37,41 @@ function isDescending<T>(key: SortKey<T>): boolean {
   return (key as { desc?: boolean }).desc === true;
 }
 
-function compare(left: string | number, right: string | number): number {
+/**
+ * Code-unit comparison, not `localeCompare`, and this is the third defect
+ * milestone 23 measured rather than a style choice.
+ *
+ * `localeCompare` sorts the way a human reads a phone book: case-insensitively,
+ * ignoring punctuation, accents near their base letter. No Postgres collation
+ * this repository can be deployed against sorts that way. Measured on the same
+ * eight subscriber names:
+ *
+ *   postgres (`collate "C"`) : MOVE-c Move-b "move a" move-A move-a move1 move_a móve
+ *   javascript `<`           : MOVE-c Move-b "move a" move-A move-a move1 move_a móve
+ *   javascript localeCompare : móve "move a" move_a move-a move-A Move-b MOVE-c move1
+ *
+ * The first two agree exactly; the third agrees with neither. Worse, the server
+ * collation is a property of the *deployment*: this machine's database was
+ * initialised `C`, and CI's `postgres:16` container comes up `en_US.utf8`, so a
+ * declared text order asserted against the server default would have been a test
+ * whose verdict depended on which database it met. Both halves are therefore
+ * pinned: every collatable `order by` in the repository carries `collate "C"`,
+ * and this comparison is by code unit. Same order, stated twice, and neither
+ * statement can be moved by an operator's `initdb` flags.
+ *
+ * Exported because the same comparison is needed by the hand-written comparators
+ * that order the queues and the replay/revival selections. They each called
+ * `String.prototype.localeCompare` directly, which ignores the hyphens in a
+ * UUID and the punctuation in a code, so two comparators in one process could
+ * disagree about the same pair of rows. One function, one order.
+ */
+export function compareValues(left: string | number, right: string | number): number {
   if (typeof left === "number" && typeof right === "number") {
     return left < right ? -1 : left > right ? 1 : 0;
   }
-  return String(left).localeCompare(String(right));
+  const a = String(left);
+  const b = String(right);
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
@@ -52,7 +82,7 @@ function compare(left: string | number, right: string | number): number {
 export function orderedBy<T>(rows: Iterable<T>, ...keys: readonly SortKey<T>[]): T[] {
   return [...rows].sort((left, right) => {
     for (const key of keys) {
-      const result = compare(key(left), key(right));
+      const result = compareValues(key(left), key(right));
       if (result !== 0) return isDescending(key) ? -result : result;
     }
     return 0;

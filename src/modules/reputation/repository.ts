@@ -11,6 +11,7 @@ import {
   type ReputationSubject,
 } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { compareValues } from "../../platform/persistence/list-order.js";
 
 /**
  * Whether the insert was the first report of this fact.
@@ -205,8 +206,8 @@ export class InMemoryReputationRepository implements ReputationRepository {
     return this.forSubject(subject)
       .sort(
         (a, b) =>
-          b.recorded_at.localeCompare(a.recorded_at) ||
-          b.reputation_signal_id.localeCompare(a.reputation_signal_id),
+          compareValues(b.recorded_at, a.recorded_at) ||
+          compareValues(b.reputation_signal_id, a.reputation_signal_id),
       )
       .slice(0, limit);
   }

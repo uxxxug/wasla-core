@@ -19,6 +19,7 @@ import {
   reclaimExhaustedError,
   type ReclaimOutcome,
 } from "./reclaim.js";
+import { orderedBy } from "../persistence/list-order.js";
 import { putRow } from "../persistence/row-rules.js";
 import { inDueOrder } from "./queue-order.js";
 
@@ -157,6 +158,19 @@ export interface DeliveryStore {
   markSuppressed(deliveryId: string, fence: Fence, reason: string): Promise<boolean>;
   byStatus(status: DeliveryStatus): Promise<EventDelivery[]>;
   /**
+   * Deliveries in any of these statuses, as **one** listing in
+   * `(created_at, delivery_id)` order.
+   *
+   * Exists because `SubscriptionRegistry.undelivered()` used to concatenate
+   * `byStatus("pending")` with `byStatus("dead")`. Both halves were sorted and
+   * the result was not: every pending row preceded every dead row regardless of
+   * age, so the operator view of "what is stuck" put a delivery that died a week
+   * ago below one queued a second ago, and page one of a bounded read would have
+   * shown only pending rows. Two ordered queries cannot be appended into an
+   * ordered answer; the merge has to be the store's, which is what this is.
+   */
+  byStatuses(statuses: readonly DeliveryStatus[]): Promise<EventDelivery[]>;
+  /**
    * A scoped page of **dead** deliveries, in `(created_at, delivery_id)` order
    * (B-27). Filtered, bounded and resumable, for the same reasons as
    * `OutboxStore.selectDead`.
@@ -243,12 +257,23 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     );
   }
 
+  /** `order by subscriber, subscription_id`, the same keys as `PgDeliveryStore`. */
   async subscriptionsFor(eventType: string): Promise<EventSubscription[]> {
-    return [...this.subscriptions.values()].filter((s) => s.active && s.event_type === eventType);
+    return orderedBy(
+      [...this.subscriptions.values()].filter((s) => s.active && s.event_type === eventType),
+      (s) => s.subscriber,
+      (s) => s.subscription_id,
+    );
   }
 
+  /** `order by subscriber, event_type, subscription_id`, as the SQL does. */
   async listSubscriptions(): Promise<EventSubscription[]> {
-    return [...this.subscriptions.values()];
+    return orderedBy(
+      this.subscriptions.values(),
+      (s) => s.subscriber,
+      (s) => s.event_type,
+      (s) => s.subscription_id,
+    );
   }
 
   async setSubscriptionActive(subscriptionId: string, active: boolean): Promise<void> {
@@ -440,7 +465,16 @@ export class InMemoryDeliveryStore implements DeliveryStore {
   }
 
   async byStatus(status: DeliveryStatus): Promise<EventDelivery[]> {
-    return [...this.deliveries.values()].filter((d) => d.status === status);
+    return this.byStatuses([status]);
+  }
+
+  /** See `DeliveryStore.byStatuses`. One order over the whole selection. */
+  async byStatuses(statuses: readonly DeliveryStatus[]): Promise<EventDelivery[]> {
+    return orderedBy(
+      [...this.deliveries.values()].filter((d) => statuses.includes(d.status)),
+      (d) => d.created_at,
+      (d) => d.delivery_id,
+    );
   }
 
   /** See `DeliveryStore.selectDead`. */
@@ -471,12 +505,21 @@ export class InMemoryDeliveryStore implements DeliveryStore {
     return true;
   }
 
+  /** `order by created_at, delivery_id`, the same keys as the SQL. */
   async forEvent(eventId: string): Promise<EventDelivery[]> {
-    return [...this.deliveries.values()].filter((d) => d.event_id === eventId);
+    return orderedBy(
+      [...this.deliveries.values()].filter((d) => d.event_id === eventId),
+      (d) => d.created_at,
+      (d) => d.delivery_id,
+    );
   }
 
   async all(): Promise<EventDelivery[]> {
-    return [...this.deliveries.values()];
+    return orderedBy(
+      this.deliveries.values(),
+      (d) => d.created_at,
+      (d) => d.delivery_id,
+    );
   }
 }
 
@@ -934,8 +977,6 @@ export class SubscriptionRegistry {
 
   /** Operator view of what is stuck. Never includes a secret. */
   async undelivered(): Promise<EventDelivery[]> {
-    const pending = await this.store.byStatus("pending");
-    const dead = await this.store.byStatus("dead");
-    return [...pending, ...dead];
+    return this.store.byStatuses(["pending", "dead"]);
   }
 }

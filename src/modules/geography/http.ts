@@ -1,5 +1,6 @@
 import { invalid } from "../../platform/errors.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
+import { decimalParam, optionalParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { GeographyService } from "./service.js";
@@ -16,13 +17,6 @@ function requiredString(input: Record<string, unknown>, key: string): string {
 function requiredNumber(input: Record<string, unknown>, key: string): number {
   const value = input[key];
   if (typeof value !== "number") throw invalid(`${key} is required`);
-  return value;
-}
-function numberParam(ctx: RequestContext, key: string): number {
-  const raw = ctx.query.get(key);
-  if (raw === null || raw.trim() === "") throw invalid(`${key} is required`);
-  const value = Number(raw);
-  if (!Number.isFinite(value)) throw invalid(`${key} must be a number`);
   return value;
 }
 
@@ -49,10 +43,13 @@ export function registerGeographyRoutes(
 
   router.get("/v1/geography/service-areas/resolve", async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const countryCode = ctx.query.get("country_code");
+    const countryCode = optionalParam(ctx.query, "country_code");
     const matches = await geography.resolve(
-      { latitude: numberParam(ctx, "latitude"), longitude: numberParam(ctx, "longitude") },
-      countryCode !== null && countryCode.trim() !== "" ? { country_code: countryCode } : {},
+      {
+        latitude: decimalParam(ctx.query, "latitude"),
+        longitude: decimalParam(ctx.query, "longitude"),
+      },
+      countryCode === undefined ? {} : { country_code: countryCode },
     );
     return { status: 200, body: { serviceable: matches.length > 0, matches } };
   });

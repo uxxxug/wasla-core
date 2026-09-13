@@ -22,6 +22,7 @@ import {
   type UsageRecord,
 } from "./domain.js";
 import type { SubscriptionRepository } from "./repository.js";
+import { compareValues } from "../../platform/persistence/list-order.js";
 
 const PRODUCER = "wasla-core";
 
@@ -891,7 +892,7 @@ export class SubscriptionService {
     // is the right one: a feature granted by any plan they pay for is granted.
     // Iterating in a fixed order and taking the first allowance keeps the
     // answer stable rather than dependent on row order.
-    const ordered = [...subscriptions].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const ordered = [...subscriptions].sort((a, b) => compareValues(a.created_at, b.created_at));
     let best: EntitlementDecision | undefined;
 
     for (const subscription of ordered) {

@@ -88,6 +88,21 @@ export class Router {
   get(path: string, handler: Handler) {
     this.add("GET", path, handler);
   }
+
+  /**
+   * Every registered route, as `(method, template)`.
+   *
+   * Exists for the selection-parity gate. That gate can only assert that a read
+   * route returns the same rows in the same order on both backends for the
+   * routes it knows about, and a list of routes maintained by hand inside a test
+   * goes stale the first time somebody adds one — silently, because a missing
+   * case is a case that cannot fail. Reading the registrations back off the
+   * router turns "a new read route was added and nobody gated it" into a failing
+   * test instead of a gap.
+   */
+  registrations(): readonly { readonly method: string; readonly template: string }[] {
+    return this.routes.map((route) => ({ method: route.method, template: route.template }));
+  }
   post(path: string, handler: Handler) {
     this.add("POST", path, handler);
   }

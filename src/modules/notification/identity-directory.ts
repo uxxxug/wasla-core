@@ -1,6 +1,7 @@
 import type { IdentityService } from "../identity-access/service.js";
 import type { NotificationChannelType } from "./domain.js";
 import type { ChannelDirectory } from "./ports.js";
+import { compareValues } from "../../platform/persistence/list-order.js";
 
 /**
  * `ChannelDirectory` over the identity module's published service.
@@ -28,7 +29,7 @@ export class IdentityChannelDirectory implements ChannelDirectory {
     const links = await this.identity.channelLinks(identityId);
     const usable = links
       .filter((link) => link.channel_type === channel && link.verified_at !== null)
-      .sort((a, b) => (a.verified_at ?? "").localeCompare(b.verified_at ?? ""));
+      .sort((a, b) => compareValues(a.verified_at ?? "", b.verified_at ?? ""));
     // `external_id` is the address as the channel issued it: a Telegram chat id,
     // an e.164 number, an email. CORE stores it and never reformats it.
     return usable[0]?.external_id ?? null;
