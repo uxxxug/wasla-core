@@ -43,6 +43,9 @@ paths:
       responses:
         "200":
           description: Process is alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
   /ready:
     get:
       parameters:
@@ -52,6 +55,9 @@ paths:
       responses:
         "200":
           description: Ready to serve, with pending outbox depth
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
   /v1/identities:
     post:
       parameters:
@@ -200,7 +206,11 @@ paths:
                   items: { $ref: "#/components/schemas/Role" }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Membership granted }
+        "201":
+          description: Membership granted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Membership" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/organizations:
     post:
@@ -262,7 +272,11 @@ paths:
                 currency: { type: string, pattern: "^[A-Z]{3}$" }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Wallet created }
+        "201":
+          description: Wallet created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Wallet" }
         "200": { description: Existing wallet resolved }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
@@ -317,7 +331,11 @@ paths:
                 expires_at: { type: string, format: date-time, nullable: true }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Payment authorized }
+        "201":
+          description: Payment authorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentAuthorization" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/payment-authorizations/{authorization_id}/capture:
     post:
@@ -352,7 +370,11 @@ paths:
                   description: Caller's idempotency key. Required for a partial capture.
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Capture transaction, idempotent on the capture reference }
+        "200":
+          description: Capture transaction, idempotent on the capture reference
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerTransaction" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -387,7 +409,11 @@ paths:
                 reason: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Refund transaction, idempotent on the refund reference }
+        "200":
+          description: Refund transaction, idempotent on the refund reference
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LedgerTransaction" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -417,6 +443,9 @@ paths:
             captured, and as partially_captured when some money had already
             moved - calling that one voided would claim nothing moved when
             something did. Only the uncaptured remainder is released.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentAuthorization" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/plans:
@@ -467,7 +496,11 @@ paths:
                         description: null means granted but unmetered; 0 means none.
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Draft plan created with its grants. No event is published, because terms that can still change are not a business fact anyone outside CORE can act on. }
+        "201":
+          description: Draft plan created with its grants. No event is published, because terms that can still change are not a business fact anyone outside CORE can act on.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Plan" }
         "400": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
     get:
@@ -480,7 +513,17 @@ paths:
           schema: { type: string, enum: [draft, active, retired] }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Plans, newest first. }
+        "200":
+          description: Plans, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plans]
+                properties:
+                  plans:
+                    type: array
+                    items: { $ref: "#/components/schemas/Plan" }
         "400": { $ref: "#/components/responses/Error" }
 
   /v1/plans/{plan_id}:
@@ -494,7 +537,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: The plan and its grants. }
+        "200":
+          description: The plan and its grants.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Plan" }
         "404": { $ref: "#/components/responses/Error" }
 
   /v1/plans/{plan_id}/activate:
@@ -512,7 +559,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Plan active; terms and grants are now immutable. }
+        "200":
+          description: Plan active; terms and grants are now immutable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Plan" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
@@ -533,7 +584,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Plan retired; existing subscriptions are unaffected. }
+        "200":
+          description: Plan retired; existing subscriptions are unaffected.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Plan" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
@@ -566,7 +621,19 @@ paths:
                 starts_at: { type: string, format: date-time }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Subscription created with its first period. collected reports whether the first charge was collected; false leaves the subscription past_due and the period retryable. }
+        "201":
+          description: Subscription created with its first period. collected reports whether the first charge was collected; false leaves the subscription past_due and the period retryable.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Subscription"
+                  - type: object
+                    required: [current_period, collected]
+                    properties:
+                      current_period: { $ref: "#/components/schemas/SubscriptionPeriod" }
+                      collected: { type: boolean }
+                      uncollectible_reason: { type: string, nullable: true }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -582,7 +649,19 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: The subscription and every period it has had, so its billing history can be read without reconstructing it from events. }
+        "200":
+          description: The subscription and every period it has had, so its billing history can be read without reconstructing it from events.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Subscription"
+                  - type: object
+                    required: [periods]
+                    properties:
+                      periods:
+                        type: array
+                        items: { $ref: "#/components/schemas/SubscriptionPeriod" }
         "404": { $ref: "#/components/responses/Error" }
 
   /v1/subscriptions/{subscription_id}/cancel:
@@ -613,7 +692,17 @@ paths:
                 reason: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Subscription cancelled. voided_period_id names the period voided when it had not been paid, otherwise null. }
+        "200":
+          description: Subscription cancelled. voided_period_id names the period voided when it had not been paid, otherwise null.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Subscription"
+                  - type: object
+                    required: [voided_period_id]
+                    properties:
+                      voided_period_id: { type: string, format: uuid, nullable: true }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -649,7 +738,11 @@ paths:
                 at: { type: string, format: date-time }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Usage recorded for the first time. }
+        "201":
+          description: Usage recorded for the first time.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageRecord" }
         "200": { description: The same usage_reference was already recorded; the original record is returned unchanged. }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -675,7 +768,18 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: The period after the attempt. collected reports whether money moved; reason carries why not when it did not. }
+        "200":
+          description: The period after the attempt. collected reports whether money moved; reason carries why not when it did not.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SubscriptionPeriod"
+                  - type: object
+                    required: [collected]
+                    properties:
+                      collected: { type: boolean }
+                      reason: { type: string, nullable: true }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
@@ -686,7 +790,17 @@ paths:
       summary: List reference countries
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Countries }
+        "200":
+          description: Countries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [countries]
+                properties:
+                  countries:
+                    type: array
+                    items: { $ref: "#/components/schemas/Country" }
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
@@ -709,7 +823,11 @@ paths:
                 default_currency: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Country registered }
+        "201":
+          description: Country registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Country" }
         "409": { $ref: "#/components/responses/Error" }
   /v1/geography/countries/{country_code}/regions:
     get:
@@ -722,7 +840,17 @@ paths:
           schema: { type: string }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Regions }
+        "200":
+          description: Regions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [regions]
+                properties:
+                  regions:
+                    type: array
+                    items: { $ref: "#/components/schemas/Region" }
   /v1/geography/regions/{region_id}/cities:
     get:
       summary: List cities of a region
@@ -734,7 +862,17 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Cities }
+        "200":
+          description: Cities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cities]
+                properties:
+                  cities:
+                    type: array
+                    items: { $ref: "#/components/schemas/City" }
   /v1/geography/regions:
     post:
       parameters:
@@ -753,7 +891,11 @@ paths:
                 name: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Region registered }
+        "201":
+          description: Region registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Region" }
   /v1/geography/cities:
     post:
       parameters:
@@ -773,7 +915,11 @@ paths:
                 longitude: { type: number }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: City registered }
+        "201":
+          description: City registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/City" }
   /v1/geography/service-areas:
     post:
       parameters:
@@ -797,7 +943,11 @@ paths:
                 centre_longitude: { type: number }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "201": { description: Service area registered }
+        "201":
+          description: Service area registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceArea" }
   /v1/geography/service-areas/resolve:
     get:
       summary: Resolve a coordinate to covering service areas
@@ -822,7 +972,18 @@ paths:
           schema: { type: string, minLength: 2, maxLength: 2 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Matching service areas ordered by distance }
+        "200":
+          description: Matching service areas ordered by distance
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serviceable, matches]
+                properties:
+                  serviceable: { type: boolean }
+                  matches:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServiceAreaMatch" }
         "400": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/reconciliation/inconsistent:
     get:
@@ -849,7 +1010,18 @@ paths:
           schema: { type: string }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Count and list of inconsistent fulfillments }
+        "200":
+          description: Count and list of inconsistent fulfillments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Fulfillment" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/reconciliation/pending-financial-decision:
@@ -876,7 +1048,18 @@ paths:
           schema: { type: string }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Count and list of fulfillments awaiting a financial decision }
+        "200":
+          description: Count and list of fulfillments awaiting a financial decision
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Fulfillment" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/reconciliation/stale-holds:
@@ -911,7 +1094,18 @@ paths:
           schema: { type: string }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Count and list of open fulfillments with an unusable hold }
+        "200":
+          description: Count and list of open fulfillments with an unusable hold
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/StaleHold" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}:
@@ -939,7 +1133,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Fulfillment coordination record }
+        "200":
+          description: Fulfillment coordination record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fulfillment" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/fulfillments/{fulfillment_id}/cancel:
@@ -962,7 +1160,11 @@ paths:
                 reason: { type: string }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: Cancelled fulfillment }
+        "200":
+          description: Cancelled fulfillment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Fulfillment" }
         "409": { description: Fulfillment already closed }
   /v1/events:
     post:
@@ -999,7 +1201,7 @@ paths:
                   first_delivery:
                     type: boolean
                     description: False when CORE already held this event; no retry needed.
-        "400": { description: Invalid envelope, or no consumer for this event type }
+        "400": { description: "Invalid envelope, or no consumer for this event type" }
         "403": { description: This caller may not submit this event type }
   /v1/event-subscriptions:
     post:
@@ -1042,7 +1244,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EventSubscription" }
-        "400": { description: Not a core.* type, not https, or secret too short }
+        "400": { description: "Not a core.* type, not https, or secret too short" }
         "403": { description: Caller is not an operator }
     get:
       parameters:
@@ -1278,8 +1480,24 @@ paths:
                   count: { type: integer }
                   summary:
                     type: object
-                    description: Row counts per state, plus the derived retrying count.
-                    additionalProperties: { type: integer }
+                    description: >-
+                      Row counts per state, plus the derived retrying count.
+                      Named one by one rather than declared as free-form integer
+                      keys: a state added to the notification machine has to be
+                      published here before it can appear in a response.
+                    required:
+                      [pending, processing, accepted, delivered, failed, retrying]
+                    properties:
+                      pending: { type: integer }
+                      processing: { type: integer }
+                      accepted: { type: integer }
+                      delivered: { type: integer }
+                      failed: { type: integer }
+                      retrying:
+                        type: integer
+                        description: >-
+                          Derived, not a state: failed rows whose attempt budget
+                          is not spent and which will be tried again.
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/Notification" }
@@ -1351,7 +1569,11 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: The derived standing, with per-kind counts and the standing rating average. }
+        "200":
+          description: The derived standing, with per-kind counts and the standing rating average.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReputationStanding" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
 
@@ -1384,7 +1606,18 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
-        "200": { description: The recorded signals, newest first, each stating whether and when it was retracted. }
+        "200":
+          description: The recorded signals, newest first, each stating whether and when it was retracted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count, items]
+                properties:
+                  count: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ReputationSignal" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
 
@@ -1539,6 +1772,24 @@ components:
         next_attempt_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
         delivered_at: { type: string, format: date-time, nullable: true }
+        claimed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When a worker claimed this delivery, or null when nobody holds it
+            (B-24). While it is set, next_attempt_at is a lease expiry rather
+            than a retry schedule.
+        reclaims:
+          type: integer
+          description: >-
+            How many times a worker claimed this delivery and never came back
+            (B-25). Counted apart from attempts, which counts responses the
+            subscriber actually gave.
+        # The claim token is deliberately absent, for the reason
+        # EventSubscription has no signing_secret: it is a fencing credential a
+        # worker presents to acknowledge work, and CORE stopped returning it in
+        # milestone 27.
     EventEnvelope:
       type: object
       description: >-
@@ -1581,6 +1832,17 @@ components:
         - fulfillment.read
         - money.authorize
         - support.act
+        # Added in milestone 27: CORE has issued these since the eventing,
+        # subscription and reputation modules shipped, and the published list
+        # stopped short at support.act — so a client validating the principal
+        # CORE returned against this contract would have rejected CORE's own
+        # answer. Kept in the order ROLE_PERMISSIONS grants them.
+        - events.submit
+        - events.replay
+        - events.revive
+        - subscription.read
+        - subscription.write
+        - reputation.read
     IdentityResolved:
       type: object
       required: [identity_id, principal_id, status, created]
@@ -1605,6 +1867,13 @@ components:
         permissions:
           type: array
           items: { $ref: "#/components/schemas/Permission" }
+        service_name:
+          type: string
+          nullable: true
+          description: >-
+            The system this credential speaks for, or null for a human principal.
+            It is what `POST /v1/events` compares a submitted event's producer
+            against, so a caller can see which system CORE believes it is.
     Organization:
       type: object
       required: [organization_id, name, status, country_code]
@@ -1639,3 +1908,392 @@ components:
         details: { type: object }
         retryable: { type: boolean }
         correlation_id: { type: string }
+    # ── shapes added by milestone 27 ──────────────────────────────────────────
+    # Every schema below was written from a response CORE actually produced,
+    # measured over its own router by tests/support/http-scenario.ts, and is
+    # checked against that response on every run by
+    # tests/http-response-declaration.test.ts. A property documented here that
+    # CORE does not return, or a property CORE returns that is not documented
+    # here, fails that gate.
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    Readiness:
+      type: object
+      description: >-
+        outbox_pending is the depth an operator should expect to be zero or
+        falling; persistence names the backend serving this process.
+      required: [status, persistence, outbox_pending]
+      properties:
+        status: { type: string, enum: [ready] }
+        persistence: { type: string, enum: [memory, postgres] }
+        outbox_pending: { type: integer }
+    Membership:
+      type: object
+      required: [membership_id, principal_id, organization_id, roles, created_at]
+      properties:
+        membership_id: { type: string, format: uuid }
+        principal_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/Role" }
+        created_at: { type: string, format: date-time }
+    Wallet:
+      type: object
+      required: [wallet_id, owner_type, owner_id, currency, status, created_at]
+      properties:
+        wallet_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [identity, organization] }
+        owner_id: { type: string, format: uuid }
+        currency: { type: string }
+        status: { type: string, enum: [active, frozen, closed] }
+        created_at: { type: string, format: date-time }
+    PaymentAuthorization:
+      type: object
+      description: >-
+        A hold. captured_minor and refunded_minor are cumulative across the split
+        captures migration 0009 allows, so a partially captured hold reports both
+        the ceiling consented to and the part that moved.
+      required:
+        [
+          authorization_id,
+          wallet_id,
+          amount_minor,
+          captured_minor,
+          refunded_minor,
+          currency,
+          status,
+          business_reference,
+          created_at,
+        ]
+      properties:
+        authorization_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        amount_minor: { type: integer }
+        captured_minor: { type: integer }
+        refunded_minor: { type: integer }
+        currency: { type: string }
+        status:
+          type: string
+          enum: [authorized, captured, partially_captured, voided]
+        business_reference: { type: string }
+        created_at: { type: string, format: date-time }
+        captured_at: { type: string, format: date-time, nullable: true }
+        voided_at: { type: string, format: date-time, nullable: true }
+        expires_at: { type: string, format: date-time, nullable: true }
+        void_reason: { type: string, nullable: true }
+    LedgerEntry:
+      type: object
+      required: [entry_id, transaction_id, account_reference, amount_minor, currency]
+      properties:
+        entry_id: { type: string, format: uuid }
+        transaction_id: { type: string, format: uuid }
+        account_reference: { type: string }
+        amount_minor: { type: integer }
+        currency: { type: string }
+    LedgerTransaction:
+      type: object
+      description: >-
+        A balanced double entry. The entries of one transaction always sum to
+        zero; a capture moves the payer's money to a clearing account and a
+        refund moves it back.
+      required: [transaction_id, kind, business_reference, occurred_at, entries]
+      properties:
+        transaction_id: { type: string, format: uuid }
+        kind: { type: string }
+        authorization_id: { type: string, format: uuid, nullable: true }
+        business_reference: { type: string }
+        occurred_at: { type: string, format: date-time }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/LedgerEntry" }
+    PlanGrant:
+      type: object
+      description: >-
+        What a plan entitles per period. limit_value null is an unmetered grant,
+        which is not the same as an absent grant.
+      required: [plan_id, feature_key, limit_value]
+      properties:
+        plan_id: { type: string, format: uuid }
+        feature_key: { type: string }
+        limit_value: { type: integer, nullable: true }
+    Plan:
+      type: object
+      required:
+        [
+          plan_id,
+          code,
+          name,
+          currency,
+          amount_minor,
+          billing_interval,
+          interval_count,
+          status,
+          created_at,
+        ]
+      properties:
+        plan_id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        currency: { type: string }
+        amount_minor: { type: integer }
+        billing_interval: { type: string, enum: [day, week, month, year] }
+        interval_count: { type: integer }
+        status: { type: string, enum: [draft, active, retired] }
+        created_at: { type: string, format: date-time }
+        activated_at: { type: string, format: date-time, nullable: true }
+        retired_at: { type: string, format: date-time, nullable: true }
+        grants:
+          type: array
+          items: { $ref: "#/components/schemas/PlanGrant" }
+    SubscriptionPeriod:
+      type: object
+      description: >-
+        One billing window. authorization_id names the hold that settled it;
+        uncollectible_reason is set only when CORE could not collect and says so
+        rather than retrying forever.
+      required:
+        [
+          period_id,
+          subscription_id,
+          sequence,
+          starts_at,
+          ends_at,
+          currency,
+          amount_minor,
+          status,
+          created_at,
+        ]
+      properties:
+        period_id: { type: string, format: uuid }
+        subscription_id: { type: string, format: uuid }
+        sequence: { type: integer }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        currency: { type: string }
+        amount_minor: { type: integer }
+        status: { type: string, enum: [pending, settled, uncollectible, voided] }
+        authorization_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        settled_at: { type: string, format: date-time, nullable: true }
+        uncollectible_reason: { type: string, nullable: true }
+    Subscription:
+      type: object
+      required:
+        [subscription_id, owner_type, owner_id, plan_id, wallet_id, status, created_at]
+      properties:
+        subscription_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [identity, organization] }
+        owner_id: { type: string, format: uuid }
+        plan_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        status: { type: string, enum: [active, past_due, cancelled, expired] }
+        created_at: { type: string, format: date-time }
+        cancelled_at: { type: string, format: date-time, nullable: true }
+        cancel_reason: { type: string, nullable: true }
+        ended_at: { type: string, format: date-time, nullable: true }
+    UsageRecord:
+      type: object
+      description: >-
+        Idempotent by usage_reference, so a repeated report is counted once.
+      required:
+        [usage_id, period_id, feature_key, quantity, usage_reference, recorded_at]
+      properties:
+        usage_id: { type: string, format: uuid }
+        period_id: { type: string, format: uuid }
+        feature_key: { type: string }
+        quantity: { type: integer }
+        usage_reference: { type: string }
+        recorded_at: { type: string, format: date-time }
+        correlation_id: { type: string }
+    Country:
+      type: object
+      required: [country_code, name, default_currency, status]
+      properties:
+        country_code: { type: string, minLength: 2 }
+        name: { type: string }
+        default_currency: { type: string }
+        status: { type: string, enum: [active, inactive] }
+    Region:
+      type: object
+      required: [region_id, country_code, code, name, status]
+      properties:
+        region_id: { type: string, format: uuid }
+        country_code: { type: string }
+        code: { type: string }
+        name: { type: string }
+        status: { type: string, enum: [active, inactive] }
+    City:
+      type: object
+      required: [city_id, region_id, country_code, name, latitude, longitude, status]
+      properties:
+        city_id: { type: string, format: uuid }
+        region_id: { type: string, format: uuid }
+        country_code: { type: string }
+        name: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        status: { type: string, enum: [active, inactive] }
+    ServiceArea:
+      type: object
+      required:
+        [
+          service_area_id,
+          city_id,
+          country_code,
+          name,
+          centre_latitude,
+          centre_longitude,
+          radius_metres,
+          status,
+        ]
+      properties:
+        service_area_id: { type: string, format: uuid }
+        city_id: { type: string, format: uuid }
+        country_code: { type: string }
+        name: { type: string }
+        centre_latitude: { type: number }
+        centre_longitude: { type: number }
+        radius_metres: { type: integer }
+        status: { type: string, enum: [active, inactive] }
+    ServiceAreaMatch:
+      type: object
+      required: [service_area, distance_metres]
+      properties:
+        service_area: { $ref: "#/components/schemas/ServiceArea" }
+        distance_metres: { type: integer }
+    Fulfillment:
+      type: object
+      description: >-
+        CORE's coordination record for one market order. It holds references to
+        MARKET and MOVE work, never their data (ADR 0007 / ADR 0018).
+        financial_disposition is derived, not stored, and says which queue a
+        fulfillment belongs to when its money is not finished.
+      required:
+        [
+          fulfillment_id,
+          organization_id,
+          market_order_reference,
+          move_job_reference,
+          payment_authorization_id,
+          status,
+          settlement_state,
+          created_at,
+          completed_at,
+          closure_reason,
+          executed_after_cancellation_at,
+          executed_after_cancellation_job_reference,
+          financial_disposition,
+        ]
+      properties:
+        fulfillment_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        market_order_reference: { type: string }
+        move_job_reference: { type: string, nullable: true }
+        payment_authorization_id: { type: string, format: uuid, nullable: true }
+        status:
+          type: string
+          enum: [coordinating, dispatched, completed, failed, cancelled]
+        settlement_state:
+          type: string
+          enum: [none, held, captured, partially_captured, released, unsettled]
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time, nullable: true }
+        closure_reason: { type: string, nullable: true }
+        executed_after_cancellation_at: { type: string, format: date-time, nullable: true }
+        executed_after_cancellation_job_reference: { type: string, nullable: true }
+        financial_disposition:
+          type: string
+          enum: [no_money, awaiting_execution, settled, decision_required, inconsistent]
+    StaleHold:
+      type: object
+      description: >-
+        Open work whose hold can no longer settle it. Reporting only:
+        settlement_state_if_closed is what the settlement WOULD become if this
+        fulfillment closed now, so an operator can see which cases will need the
+        decision blocker B-20 records as unmade.
+      required: [fulfillment, reason, hold_captured_minor, settlement_state_if_closed]
+      properties:
+        fulfillment: { $ref: "#/components/schemas/Fulfillment" }
+        reason: { type: string }
+        hold_captured_minor: { type: integer }
+        settlement_state_if_closed:
+          type: string
+          enum: [none, held, captured, partially_captured, released, unsettled]
+    ReputationStanding:
+      type: object
+      description: >-
+        Counts only, per organization. average_rating_milli is the mean rating in
+        thousandths so no float rounding enters an aggregate CORE publishes;
+        retracted signals are counted and excluded from the rating.
+      required:
+        [
+          organization_id,
+          subject_type,
+          subject_id,
+          signal_count,
+          retracted_count,
+          counts,
+          rating_count,
+          rating_sum,
+          average_rating_milli,
+        ]
+      properties:
+        organization_id: { type: string, format: uuid }
+        subject_type: { type: string, enum: [identity, organization] }
+        subject_id: { type: string, format: uuid }
+        signal_count: { type: integer }
+        retracted_count: { type: integer }
+        counts:
+          type: object
+          required:
+            [service_rating, completion, cancellation, dispute, compliment, complaint]
+          properties:
+            service_rating: { type: integer }
+            completion: { type: integer }
+            cancellation: { type: integer }
+            dispute: { type: integer }
+            compliment: { type: integer }
+            complaint: { type: integer }
+        rating_count: { type: integer }
+        rating_sum: { type: integer }
+        average_rating_milli: { type: integer, nullable: true }
+        first_signal_at: { type: string, format: date-time, nullable: true }
+        last_signal_at: { type: string, format: date-time, nullable: true }
+    ReputationSignal:
+      type: object
+      required:
+        [
+          reputation_signal_id,
+          organization_id,
+          subject_type,
+          subject_id,
+          signal_kind,
+          rating_value,
+          source_system,
+          source_reference,
+          occurred_at,
+          recorded_at,
+          retracted_at,
+          retraction_reason,
+        ]
+      properties:
+        reputation_signal_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        subject_type: { type: string, enum: [identity, organization] }
+        subject_id: { type: string, format: uuid }
+        signal_kind:
+          type: string
+          enum:
+            [service_rating, completion, cancellation, dispute, compliment, complaint]
+        rating_value: { type: integer, nullable: true }
+        source_system: { type: string }
+        source_reference: { type: string }
+        occurred_at: { type: string, format: date-time }
+        recorded_at: { type: string, format: date-time }
+        correlation_id: { type: string, nullable: true }
+        retracted_at: { type: string, format: date-time, nullable: true }
+        retraction_reason: { type: string, nullable: true }

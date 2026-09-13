@@ -117,6 +117,15 @@ export interface LogRecord {
  */
 const MAX_RETAINED_LOGS = 1000;
 
+/** A value that would serialise to `{}` while looking like a real body. */
+function isThenable(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
 export class Router {
   private routes: Route[] = [];
   readonly logs: LogRecord[] = [];
@@ -405,6 +414,19 @@ export class Router {
 
     try {
       const result = await matched.route.handler(ctx);
+      // A body that is still a promise is a route that forgot to await its own
+      // service. `JSON.stringify` renders a promise as `{}`, so the caller gets
+      // a success status with an empty object and nothing anywhere fails —
+      // which is precisely how `/v1/organizations` shipped an empty body past a
+      // full test suite, because the tests read statuses. There is no request a
+      // client could send that makes this its fault, so it is internal, and it
+      // is refused rather than repaired: awaiting it here would hide the same
+      // mistake in every route written afterwards.
+      if (isThenable(result.body)) {
+        throw new Error(
+          `route ${input.method} ${matched.route.template} returned a promise as its body`,
+        );
+      }
       const duration = Date.now() - started;
       this.record(
         {
