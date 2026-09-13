@@ -1,4 +1,4 @@
-import { invalid } from "../../platform/errors.js";
+import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
@@ -9,17 +9,17 @@ export function registerOrganizationRoutes(
   organizations: OrganizationService,
   identity: IdentityService,
 ): void {
-  router.post("/v1/organizations", async (ctx) => {
+  router.post(
+    "/v1/organizations",
+    objectBody(
+      { name: "name", kind: "text", required: true },
+      { name: "country_code", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
-    const input = ctx.body as Record<string, unknown>;
-    const name = input["name"];
-    const country = input["country_code"];
-    if (typeof name !== "string") throw invalid("name is required");
-    if (typeof country !== "string") throw invalid("country_code is required");
     const organization = organizations.create({
-      name,
-      country_code: country,
+      name: ctx.input.requiredText("name"),
+      country_code: ctx.input.requiredText("country_code"),
       correlation_id: ctx.correlation_id,
     });
     return { status: 201, body: organization };

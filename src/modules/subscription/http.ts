@@ -1,5 +1,5 @@
-import { invalid } from "../../platform/errors.js";
-import type { RequestContext, Router } from "../../platform/http/router.js";
+import { NO_BODY, objectBody } from "../../platform/http/body.js";
+import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { BillingInterval, SubscriptionOwnerType } from "./domain.js";
@@ -8,59 +8,11 @@ import type { SubscriptionService } from "./service.js";
 /** The plan statuses `GET /v1/plans` may be filtered by. */
 const PLAN_STATUSES = ["draft", "active", "retired"] as const;
 
-function objectBody(ctx: RequestContext): Record<string, unknown> {
-  if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
-  return ctx.body as Record<string, unknown>;
-}
+/** The owner kinds a subscription may belong to. */
+const OWNER_TYPES = ["identity", "organization"] as const;
 
-function requiredString(input: Record<string, unknown>, key: string): string {
-  const value = input[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-}
-
-function requiredInteger(input: Record<string, unknown>, key: string): number {
-  const value = input[key];
-  if (typeof value !== "number") throw invalid(`${key} is required`);
-  return value;
-}
-
-function ownerType(value: string): SubscriptionOwnerType {
-  if (value !== "identity" && value !== "organization") throw invalid("unsupported owner_type");
-  return value;
-}
-
-function billingInterval(value: string): BillingInterval {
-  if (value !== "day" && value !== "week" && value !== "month" && value !== "year") {
-    throw invalid("billing_interval must be day, week, month or year");
-  }
-  return value;
-}
-
-/**
- * Grants arrive as a list, and `limit_value` must be `null` explicitly.
- *
- * An omitted limit is refused rather than defaulted, because the two things it
- * could mean — "granted without a quota" and "a quota of nothing" — are
- * opposites. Guessing either one would silently decide what a plan sells.
- */
-function grants(input: Record<string, unknown>): Array<{ feature_key: string; limit_value: number | null }> {
-  const raw = input["grants"];
-  if (!Array.isArray(raw) || raw.length === 0) throw invalid("grants must be a non-empty array");
-  return raw.map((entry, index) => {
-    if (typeof entry !== "object" || entry === null) throw invalid(`grants[${index}] must be an object`);
-    const grant = entry as Record<string, unknown>;
-    const featureKey = requiredString(grant, "feature_key");
-    if (!("limit_value" in grant)) {
-      throw invalid(`grants[${index}].limit_value is required; use null for an unmetered grant`);
-    }
-    const limit = grant["limit_value"];
-    if (limit !== null && typeof limit !== "number") {
-      throw invalid(`grants[${index}].limit_value must be a number or null`);
-    }
-    return { feature_key: featureKey, limit_value: limit as number | null };
-  });
-}
+/** The intervals a plan may bill on. */
+const BILLING_INTERVALS = ["day", "week", "month", "year"] as const;
 
 /**
  * CORE's own management surface for plans and subscriptions.
@@ -79,19 +31,48 @@ export function registerSubscriptionRoutes(
   billing: SubscriptionService,
   identity: IdentityService,
 ): void {
-  router.post("/v1/plans", async (ctx) => {
+  router.post(
+    "/v1/plans",
+    objectBody(
+      { name: "code", kind: "text", required: true },
+      { name: "name", kind: "text", required: true },
+      { name: "currency", kind: "text", required: true },
+      { name: "amount_minor", kind: "integer", required: true },
+      { name: "billing_interval", kind: "enum", values: BILLING_INTERVALS, required: true },
+      { name: "interval_count", kind: "integer" },
+      {
+        name: "grants",
+        kind: "list",
+        required: true,
+        minItems: 1,
+        items: [
+          { name: "feature_key", kind: "text", required: true },
+          // Required *and* nullable: an omitted limit could mean "granted without
+          // a quota" or "a quota of nothing", which are opposites, so CORE
+          // refuses rather than choosing what a plan sells.
+          {
+            name: "limit_value",
+            kind: "nullable_integer",
+            required: true,
+            hint: "use null for an unmetered grant",
+          },
+        ],
+      },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
-    const input = objectBody(ctx);
+    const intervalCount = ctx.input.number("interval_count");
     const result = await billing.createPlan({
-      code: requiredString(input, "code"),
-      name: requiredString(input, "name"),
-      currency: requiredString(input, "currency"),
-      amount_minor: requiredInteger(input, "amount_minor"),
-      billing_interval: billingInterval(requiredString(input, "billing_interval")),
-      ...(typeof input["interval_count"] === "number"
-        ? { interval_count: input["interval_count"] }
-        : {}),
-      grants: grants(input),
+      code: ctx.input.requiredText("code"),
+      name: ctx.input.requiredText("name"),
+      currency: ctx.input.requiredText("currency"),
+      amount_minor: ctx.input.requiredNumber("amount_minor"),
+      billing_interval: ctx.input.requiredText("billing_interval") as BillingInterval,
+      ...(typeof intervalCount === "number" ? { interval_count: intervalCount } : {}),
+      grants: ctx.input.list("grants").map((grant) => ({
+        feature_key: grant.requiredText("feature_key"),
+        limit_value: grant.number("limit_value") ?? null,
+      })),
       correlation_id: ctx.correlation_id,
     });
     return { status: 201, body: { ...result.plan, grants: result.grants } };
@@ -109,7 +90,7 @@ export function registerSubscriptionRoutes(
     return { status: 200, body: { ...result.plan, grants: result.grants } };
   });
 
-  router.post("/v1/plans/:plan_id/activate", async (ctx) => {
+  router.post("/v1/plans/:plan_id/activate", NO_BODY, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -120,7 +101,7 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.post("/v1/plans/:plan_id/retire", async (ctx) => {
+  router.post("/v1/plans/:plan_id/retire", NO_BODY, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -131,15 +112,24 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.post("/v1/subscriptions", async (ctx) => {
+  router.post(
+    "/v1/subscriptions",
+    objectBody(
+      { name: "owner_type", kind: "enum", values: OWNER_TYPES, required: true },
+      { name: "owner_id", kind: "text", required: true },
+      { name: "plan_id", kind: "text", required: true },
+      { name: "wallet_id", kind: "text", required: true },
+      { name: "starts_at", kind: "text" },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
-    const input = objectBody(ctx);
+    const startsAt = ctx.input.text("starts_at");
     const result = await billing.subscribe({
-      owner_type: ownerType(requiredString(input, "owner_type")),
-      owner_id: requiredString(input, "owner_id"),
-      plan_id: requiredString(input, "plan_id"),
-      wallet_id: requiredString(input, "wallet_id"),
-      ...(typeof input["starts_at"] === "string" ? { starts_at: input["starts_at"] } : {}),
+      owner_type: ctx.input.requiredText("owner_type") as SubscriptionOwnerType,
+      owner_id: ctx.input.requiredText("owner_id"),
+      plan_id: ctx.input.requiredText("plan_id"),
+      wallet_id: ctx.input.requiredText("wallet_id"),
+      ...(typeof startsAt === "string" ? { starts_at: startsAt } : {}),
       correlation_id: ctx.correlation_id,
     });
     // 201 either way. A first charge that could not be collected still created
@@ -162,12 +152,14 @@ export function registerSubscriptionRoutes(
     return { status: 200, body: { ...result.subscription, periods: result.periods } };
   });
 
-  router.post("/v1/subscriptions/:subscription_id/cancel", async (ctx) => {
+  router.post(
+    "/v1/subscriptions/:subscription_id/cancel",
+    objectBody({ name: "reason", kind: "text", required: true }),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
-    const input = objectBody(ctx);
     const result = await billing.cancelSubscription({
       subscription_id: ctx.params["subscription_id"] ?? "",
-      reason: requiredString(input, "reason"),
+      reason: ctx.input.requiredText("reason"),
       correlation_id: ctx.correlation_id,
     });
     return {
@@ -176,15 +168,23 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.post("/v1/subscriptions/:subscription_id/usage", async (ctx) => {
+  router.post(
+    "/v1/subscriptions/:subscription_id/usage",
+    objectBody(
+      { name: "feature_key", kind: "text", required: true },
+      { name: "quantity", kind: "integer", required: true },
+      { name: "usage_reference", kind: "text", required: true },
+      { name: "at", kind: "text" },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
-    const input = objectBody(ctx);
+    const at = ctx.input.text("at");
     const result = await billing.recordUsage({
       subscription_id: ctx.params["subscription_id"] ?? "",
-      feature_key: requiredString(input, "feature_key"),
-      quantity: requiredInteger(input, "quantity"),
-      usage_reference: requiredString(input, "usage_reference"),
-      ...(typeof input["at"] === "string" ? { at: input["at"] } : {}),
+      feature_key: ctx.input.requiredText("feature_key"),
+      quantity: ctx.input.requiredNumber("quantity"),
+      usage_reference: ctx.input.requiredText("usage_reference"),
+      ...(typeof at === "string" ? { at } : {}),
       correlation_id: ctx.correlation_id,
     });
     // 200 on a replay, 201 on a first write, so a reporter can tell whether
@@ -192,7 +192,7 @@ export function registerSubscriptionRoutes(
     return { status: result.recorded ? 201 : 200, body: result.usage };
   });
 
-  router.post("/v1/subscription-periods/:period_id/collect", async (ctx) => {
+  router.post("/v1/subscription-periods/:period_id/collect", NO_BODY, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const result = await billing.chargePeriod({
       period_id: ctx.params["period_id"] ?? "",

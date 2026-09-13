@@ -1,3 +1,4 @@
+import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
@@ -94,13 +95,15 @@ export function registerFulfillmentRoutes(
 
   // Cancel before execution closes. Idempotent: cancelling twice returns the
   // same cancelled fulfillment.
-  router.post("/v1/fulfillments/:fulfillment_id/cancel", async (ctx) => {
+  router.post(
+    "/v1/fulfillments/:fulfillment_id/cancel",
+    objectBody({ name: "reason", kind: "text" }),
+    async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.request", record.organization_id);
-    const input = (ctx.body ?? {}) as Record<string, unknown>;
     const cancelled = await fulfillment.cancel({
       fulfillment_id: record.fulfillment_id,
-      reason: typeof input["reason"] === "string" ? input["reason"] : "",
+      reason: ctx.input.text("reason") ?? "",
       correlation_id: ctx.correlation_id,
     });
     return { status: 200, body: cancelled };

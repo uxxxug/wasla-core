@@ -639,6 +639,22 @@ paths:
         "200": { description: Countries }
     post:
       summary: Register a reference country
+      description: >
+        The request body was undocumented until milestone 25, which declared what
+        every write route accepts and cross-checked the declarations against this
+        file. CORE has always required these three properties; only the contract
+        was silent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [country_code, name, default_currency]
+              properties:
+                country_code: { type: string, minLength: 1 }
+                name: { type: string, minLength: 1 }
+                default_currency: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201": { description: Country registered }
@@ -668,18 +684,57 @@ paths:
   /v1/geography/regions:
     post:
       summary: Register a reference region
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [country_code, code, name]
+              properties:
+                country_code: { type: string, minLength: 1 }
+                code: { type: string, minLength: 1 }
+                name: { type: string, minLength: 1 }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201": { description: Region registered }
   /v1/geography/cities:
     post:
       summary: Register a reference city
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [region_id, name, latitude, longitude]
+              properties:
+                region_id: { type: string, format: uuid }
+                name: { type: string, minLength: 1 }
+                latitude: { type: number }
+                longitude: { type: number }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201": { description: City registered }
   /v1/geography/service-areas:
     post:
       summary: Register a service area with a coverage radius
+      description: >
+        centre_latitude and centre_longitude are optional: omitting both centres
+        the area on its city, which is what this route has always done.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [city_id, name, radius_metres]
+              properties:
+                city_id: { type: string, format: uuid }
+                name: { type: string, minLength: 1 }
+                radius_metres: { type: number, minimum: 0 }
+                centre_latitude: { type: number }
+                centre_longitude: { type: number }
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "201": { description: Service area registered }

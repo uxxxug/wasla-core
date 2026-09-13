@@ -33,7 +33,11 @@
  *     router, which is only true if the declaration is what the parse reads.
  *  3. **No route file reads a parameter any other way**: a source scan for the
  *     raw readers and for `URLSearchParams` outside the one module that owns
- *     them.
+ *     them. Milestone 25 moved the scanning helpers to `tests/support/source.ts`
+ *     and made them comment-blind and call-scoped, because `body.ts` explaining
+ *     this rule in prose is not a second reader and a declared body field is not
+ *     a query parameter. What the gate asserts is unchanged; where it looks is
+ *     more precise.
  *  4. **The declarations are well formed**: unique snake_case names, non-empty
  *     vocabularies, `min <= default <= max`.
  *  5. **A handler cannot read an undeclared name** — probed directly on
@@ -42,13 +46,13 @@
  * No database is needed: none of this depends on a store, so it runs in both CI
  * jobs rather than only the one with Postgres.
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { Selection, type ParamSpec } from "../src/platform/http/query.js";
+import { calls, readCode, sourceFiles } from "./support/source.js";
 
 const clock = new FixedClock(new Date("2026-06-01T00:00:00.000Z"));
 const core = createCoreApp({ clock, persistence: memoryPersistence(clock), rateLimit: false });
@@ -161,16 +165,6 @@ async function call(
 }
 
 /** Every `.ts` file under a directory, recursively. */
-function sourceFiles(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const path = join(dir, entry);
-    if (statSync(path).isDirectory()) out.push(...sourceFiles(path));
-    else if (path.endsWith(".ts")) out.push(path);
-  }
-  return out;
-}
-
 describe("every route refuses the parameters it does not read", () => {
   it("registers routes at all, and reports what each accepts", () => {
     // The premise. A registrations list that came back empty would make every
@@ -273,11 +267,17 @@ describe("every route refuses the parameters it does not read", () => {
     const declaredByFile = new Map<string, Set<string>>();
     const readByFile = new Map<string, Set<string>>();
     for (const file of sourceFiles("src")) {
-      const source = readFileSync(file, "utf8");
+      const source = readCode(file);
       if (!source.includes("router.get(")) continue;
       const declared = new Set<string>();
-      for (const match of source.matchAll(/\{\s*name:\s*"([a-z0-9_]+)"\s*,\s*kind:/g)) {
-        declared.add(match[1]!);
+      // Only the specs written inside a `router.get(...)` call: milestone 25
+      // declares body fields in the same `{ name, kind }` shape, and a file-wide
+      // regex counted those as query parameters no handler reads. Attributing a
+      // literal to its call is what the check meant from the start.
+      for (const call of calls(source, "router.get(")) {
+        for (const match of call.matchAll(/\{\s*name:\s*"([a-z0-9_]+)"\s*,\s*kind:/g)) {
+          declared.add(match[1]!);
+        }
       }
       const read = new Set<string>();
       for (const match of source.matchAll(
@@ -346,7 +346,7 @@ describe("every route refuses the parameters it does not read", () => {
     for (const file of sourceFiles("src")) {
       const relative = file.replace(/\\/g, "/");
       if (owners.has(relative)) continue;
-      const source = readFileSync(file, "utf8");
+      const source = readCode(file);
       for (const reader of readers) {
         if (source.includes(reader)) offenders.push(`${relative}: ${reader}`);
       }

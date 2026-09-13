@@ -1,14 +1,9 @@
-import { invalid, notFound } from "../errors.js";
+import { notFound } from "../errors.js";
+import { NO_BODY, objectBody } from "../http/body.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
 import type { IdentityService } from "../../modules/identity-access/service.js";
 import type { SubscriptionRegistry } from "./delivery.js";
-
-const str = (input: Record<string, unknown>, key: string): string => {
-  const value = input[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-};
 
 export function registerDeliveryRoutes(
   router: Router,
@@ -17,14 +12,21 @@ export function registerDeliveryRoutes(
 ): void {
   // Operator-only, deliberately: an endpoint CORE will sign payloads for is
   // infrastructure configuration, not something a tenant may add.
-  router.post("/v1/event-subscriptions", async (ctx) => {
+  router.post(
+    "/v1/event-subscriptions",
+    objectBody(
+      { name: "subscriber", kind: "text", required: true },
+      { name: "event_type", kind: "text", required: true },
+      { name: "endpoint_url", kind: "text", required: true },
+      { name: "signing_secret", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = (ctx.body ?? {}) as Record<string, unknown>;
     const created = await registry.register({
-      subscriber: str(input, "subscriber"),
-      event_type: str(input, "event_type"),
-      endpoint_url: str(input, "endpoint_url"),
-      signing_secret: str(input, "signing_secret"),
+      subscriber: ctx.input.requiredText("subscriber"),
+      event_type: ctx.input.requiredText("event_type"),
+      endpoint_url: ctx.input.requiredText("endpoint_url"),
+      signing_secret: ctx.input.requiredText("signing_secret"),
     });
     // The secret is never echoed, not even to the caller that just sent it.
     // A response body is the easiest place for a secret to end up in a log.
@@ -40,7 +42,7 @@ export function registerDeliveryRoutes(
   // Pausing a subscriber stops the fan-out queueing new work for it. Deliveries
   // already queued stay queued: they were promised, and dropping them silently
   // would be worse than delivering them late.
-  router.post("/v1/event-subscriptions/:subscription_id/deactivate", async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/deactivate", NO_BODY, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();
@@ -49,7 +51,7 @@ export function registerDeliveryRoutes(
     return { status: 200, body: { subscription_id: id, active: false } };
   });
 
-  router.post("/v1/event-subscriptions/:subscription_id/activate", async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/activate", NO_BODY, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();

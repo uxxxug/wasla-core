@@ -1,52 +1,24 @@
-import { invalid } from "../../platform/errors.js";
-import type { RequestContext, Router } from "../../platform/http/router.js";
+import { objectBody } from "../../platform/http/body.js";
+import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { WalletOwnerType } from "./domain.js";
 import type { MoneyService } from "./service.js";
 
-function objectBody(ctx: RequestContext): Record<string, unknown> {
-  if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
-  return ctx.body as Record<string, unknown>;
-}
-function requiredString(input: Record<string, unknown>, key: string): string {
-  const value = input[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-}
-function requiredAmount(input: Record<string, unknown>): number {
-  const value = input["amount_minor"];
-  if (typeof value !== "number") throw invalid("amount_minor is required");
-  return value;
-}
-/**
- * An absent amount means "all of it", which is not the same as zero and must
- * not be coerced into one. A present non-number is a malformed request rather
- * than a request for everything, so it is refused instead of defaulted.
- */
-function optionalAmount(input: Record<string, unknown>): { amount_minor?: number } {
-  if (!("amount_minor" in input) || input["amount_minor"] === undefined) return {};
-  const value = input["amount_minor"];
-  if (typeof value !== "number") throw invalid("amount_minor must be a number when present");
-  return { amount_minor: value };
-}
-function optionalString(input: Record<string, unknown>, key: string): Record<string, string> {
-  const value = input[key];
-  if (value === undefined) return {};
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} must be a non-empty string`);
-  return { [key]: value };
-}
-
 export function registerMoneyRoutes(router: Router, money: MoneyService, identity: IdentityService): void {
-  router.post("/v1/wallets", async (ctx) => {
+  router.post(
+    "/v1/wallets",
+    objectBody(
+      { name: "owner_type", kind: "enum", values: ["identity", "organization"], required: true },
+      { name: "owner_id", kind: "text", required: true },
+      { name: "currency", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
-    const input = objectBody(ctx);
-    const ownerType = requiredString(input, "owner_type");
-    if (ownerType !== "identity" && ownerType !== "organization") throw invalid("unsupported owner_type");
     const result = await money.createWallet({
-      owner_type: ownerType as WalletOwnerType,
-      owner_id: requiredString(input, "owner_id"),
-      currency: requiredString(input, "currency"),
+      owner_type: ctx.input.requiredText("owner_type") as WalletOwnerType,
+      owner_id: ctx.input.requiredText("owner_id"),
+      currency: ctx.input.requiredText("currency"),
       correlation_id: ctx.correlation_id,
     });
     return { status: result.created ? 201 : 200, body: result.wallet };
@@ -57,53 +29,77 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
     return { status: 200, body: await money.balance(ctx.params["wallet_id"] ?? "") };
   });
 
-  router.post("/v1/payment-authorizations", async (ctx) => {
+  router.post(
+    "/v1/payment-authorizations",
+    objectBody(
+      { name: "wallet_id", kind: "text", required: true },
+      { name: "amount_minor", kind: "integer", required: true },
+      { name: "business_reference", kind: "text", required: true },
+      { name: "expires_at", kind: "text" },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
-    const input = objectBody(ctx);
+    const expiresAt = ctx.input.text("expires_at");
     return {
       status: 201,
       body: await money.authorize({
-        wallet_id: requiredString(input, "wallet_id"),
-        amount_minor: requiredAmount(input),
-        business_reference: requiredString(input, "business_reference"),
+        wallet_id: ctx.input.requiredText("wallet_id"),
+        amount_minor: ctx.input.requiredNumber("amount_minor"),
+        business_reference: ctx.input.requiredText("business_reference"),
         correlation_id: ctx.correlation_id,
-        ...(typeof input["expires_at"] === "string" ? { expires_at: input["expires_at"] } : {}),
+        ...(typeof expiresAt === "string" ? { expires_at: expiresAt } : {}),
       }),
     };
   });
 
-  router.post("/v1/payment-authorizations/:authorization_id/void", async (ctx) => {
+  router.post(
+    "/v1/payment-authorizations/:authorization_id/void",
+    objectBody({ name: "reason", kind: "text", required: true }),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
-    const input = objectBody(ctx);
     return {
       status: 200,
       body: await money.voidAuthorization({
         authorization_id: ctx.params["authorization_id"] ?? "",
-        reason: requiredString(input, "reason"),
+        reason: ctx.input.requiredText("reason"),
         correlation_id: ctx.correlation_id,
       }),
     };
   });
 
-  router.post("/v1/payment-authorizations/:authorization_id/capture", async (ctx) => {
-    await requirePrincipal(ctx, identity, "money.authorize");
+  router.post(
+    "/v1/payment-authorizations/:authorization_id/capture",
     // A body is optional here: omitting it captures the whole remaining hold,
-    // which is what this route has always meant.
-    const input = typeof ctx.body === "object" && ctx.body !== null
-      ? (ctx.body as Record<string, unknown>)
-      : {};
+    // which is what this route has always meant — and is exactly why an
+    // undeclared property must be refused rather than ignored. Milestone 25 was
+    // reserved because `{"amountMinor": 500}` captured 5000 and answered 200.
+    objectBody(
+      { name: "amount_minor", kind: "integer" },
+      { name: "capture_reference", kind: "text" },
+    ),
+    async (ctx) => {
+    await requirePrincipal(ctx, identity, "money.authorize");
+    const amount = ctx.input.number("amount_minor");
+    const reference = ctx.input.text("capture_reference");
     const transaction = await money.capture({
       authorization_id: ctx.params["authorization_id"] ?? "",
       correlation_id: ctx.correlation_id,
-      ...optionalAmount(input),
-      ...optionalString(input, "capture_reference"),
+      ...(typeof amount === "number" ? { amount_minor: amount } : {}),
+      ...(typeof reference === "string" ? { capture_reference: reference } : {}),
     } as Parameters<MoneyService["capture"]>[0]);
     return { status: 200, body: transaction };
   });
 
-  router.post("/v1/payment-authorizations/:authorization_id/refund", async (ctx) => {
+  router.post(
+    "/v1/payment-authorizations/:authorization_id/refund",
+    objectBody(
+      { name: "refund_reference", kind: "text", required: true },
+      { name: "reason", kind: "text", required: true },
+      { name: "amount_minor", kind: "integer" },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
-    const input = objectBody(ctx);
+    const amount = ctx.input.number("amount_minor");
     return {
       status: 200,
       body: await money.refund({
@@ -111,10 +107,10 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
         // Required, unlike capture: there is no "the" refund of an
         // authorization, so there is no key CORE could derive on the
         // caller's behalf and no way to make a retry safe without one.
-        refund_reference: requiredString(input, "refund_reference"),
-        reason: requiredString(input, "reason"),
+        refund_reference: ctx.input.requiredText("refund_reference"),
+        reason: ctx.input.requiredText("reason"),
         correlation_id: ctx.correlation_id,
-        ...optionalAmount(input),
+        ...(typeof amount === "number" ? { amount_minor: amount } : {}),
       }),
     };
   });
