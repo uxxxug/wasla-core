@@ -14,6 +14,15 @@ info:
     Compatibility: additive changes only within v1. A breaking change ships as
     /v2 and v1 stays served for the documented overlap window.
 
+    Authorization: every endpoint below except /health, /ready and /metrics
+    requires `Authorization: Bearer <session token>` — one scheme and one token,
+    sent once. A repeated or malformed `Authorization` header is refused with 400
+    `invalid_request` at the edge rather than being narrowed to one of the values
+    sent; an unknown scheme or an invalid token is 401 `unauthenticated`.
+
+    Every endpoint accepts the `x-correlation-id` request header described in
+    components/parameters/CorrelationId. Headers CORE does not read are ignored.
+
     Rate limiting: every endpoint below except /health, /ready and /metrics is
     rate limited at the HTTP edge, per credential and per route class, and may
     answer 429 with `retry-after`. A refused request changes no state. Allowed
@@ -27,6 +36,8 @@ security:
 paths:
   /health:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Liveness probe
       security: []
       responses:
@@ -34,6 +45,8 @@ paths:
           description: Process is alive
   /ready:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Readiness probe
       security: []
       responses:
@@ -41,6 +54,8 @@ paths:
           description: Ready to serve, with pending outbox depth
   /v1/identities:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Resolve or create an identity from a channel account
       description: >
         Idempotent by (channel_type, external_id). A repeated call returns the
@@ -76,6 +91,8 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
   /v1/sessions:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Issue a session for a principal
       security: []
       requestBody:
@@ -104,6 +121,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/sessions/current:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Verify the caller's session and resolve the acting principal
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -115,6 +134,8 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
   /v1/sessions/revoke:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Revoke a session
       requestBody:
         required: true
@@ -130,6 +151,8 @@ paths:
         "204": { description: Revoked (idempotent) }
   /v1/access/check:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Authorization probe for MOVE and MARKET
       description: >
         Returns an allow/deny decision only. It never returns the data the
@@ -158,6 +181,8 @@ paths:
         "401": { $ref: "#/components/responses/Error" }
   /v1/memberships:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Grant a principal membership of an organization
       requestBody:
         required: true
@@ -179,6 +204,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /v1/organizations:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Create an organization (tenant)
       requestBody:
         required: true
@@ -202,6 +229,7 @@ paths:
     get:
       summary: Read an organization the caller belongs to
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: organization_id
           in: path
           required: true
@@ -217,6 +245,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/wallets:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Create or resolve a CORE-owned wallet
       description: Idempotent by owner type, owner id and ISO 4217 currency.
       requestBody:
@@ -245,6 +275,7 @@ paths:
         in expired_hold_minor and is already spendable; the expiry sweep then
         releases it formally.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: wallet_id
           in: path
           required: true
@@ -269,6 +300,8 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
   /v1/payment-authorizations:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Place an idempotent hold on wallet funds
       requestBody:
         required: true
@@ -300,6 +333,7 @@ paths:
         Capturing more than remains is refused because the authorization is a
         consent, not a balance.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: authorization_id
           in: path
           required: true
@@ -335,6 +369,7 @@ paths:
         always required, because there is no "the" refund of an authorization
         and therefore no key CORE could derive to make a retry safe.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: authorization_id
           in: path
           required: true
@@ -360,6 +395,7 @@ paths:
     post:
       summary: Release whatever is still held, without moving money
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: authorization_id
           in: path
           required: true
@@ -385,6 +421,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /v1/plans:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Publish a new plan as a draft, with its feature grants
       description: >
         A plan is created as a draft and its commercial terms and grants can be
@@ -435,6 +473,7 @@ paths:
     get:
       summary: List plans, optionally filtered by status
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: status
           in: query
           required: false
@@ -448,6 +487,7 @@ paths:
     get:
       summary: Read one plan with its feature grants
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: plan_id
           in: path
           required: true
@@ -465,6 +505,7 @@ paths:
         plan cannot return to draft, because subscriptions may already price
         periods from it.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: plan_id
           in: path
           required: true
@@ -485,6 +526,7 @@ paths:
         one-way: reviving a plan would silently reopen terms that were
         withdrawn.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: plan_id
           in: path
           required: true
@@ -497,6 +539,8 @@ paths:
 
   /v1/subscriptions:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Subscribe an owner to an active plan and open its first period
       description: >
         The subscription and its first period are committed first, and the
@@ -531,6 +575,7 @@ paths:
     get:
       summary: Read a subscription with its billing periods
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subscription_id
           in: path
           required: true
@@ -552,6 +597,7 @@ paths:
         recorded in ROADMAP.md, and inventing one here would put money on an
         undecided rule.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subscription_id
           in: path
           required: true
@@ -584,6 +630,7 @@ paths:
         decision's job, not the recorder's. Usage records cannot be changed or
         deleted afterwards through any route.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subscription_id
           in: path
           required: true
@@ -621,6 +668,7 @@ paths:
         collection and CORE did. A successful collection on a past_due
         subscription returns it to active.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: period_id
           in: path
           required: true
@@ -633,11 +681,15 @@ paths:
 
   /v1/geography/countries:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: List reference countries
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
         "200": { description: Countries }
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register a reference country
       description: >
         The request body was undocumented until milestone 25, which declared what
@@ -663,6 +715,7 @@ paths:
     get:
       summary: List regions of a country
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: country_code
           in: path
           required: true
@@ -674,6 +727,7 @@ paths:
     get:
       summary: List cities of a region
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: region_id
           in: path
           required: true
@@ -683,6 +737,8 @@ paths:
         "200": { description: Cities }
   /v1/geography/regions:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register a reference region
       requestBody:
         required: true
@@ -700,6 +756,8 @@ paths:
         "201": { description: Region registered }
   /v1/geography/cities:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register a reference city
       requestBody:
         required: true
@@ -718,6 +776,8 @@ paths:
         "201": { description: City registered }
   /v1/geography/service-areas:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register a service area with a coverage radius
       description: >
         centre_latitude and centre_longitude are optional: omitting both centres
@@ -743,6 +803,7 @@ paths:
       summary: Resolve a coordinate to covering service areas
       description: Reference resolution only. CORE never stores tracking, routes or driver positions.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: latitude
           in: query
           required: true
@@ -781,6 +842,7 @@ paths:
         (`inconsistent`) or a business decision (`decision_required`). It is
         computed on read and never stored.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: organization_id
           in: query
           required: true
@@ -807,6 +869,7 @@ paths:
         B-20). The list exists so those cases are counted and visible instead of
         being mixed with bookkeeping defects.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: organization_id
           in: query
           required: true
@@ -841,6 +904,7 @@ paths:
         (dependency D-6), so the queue is reported and never drained
         automatically. The read mutates nothing.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: organization_id
           in: query
           required: true
@@ -868,6 +932,7 @@ paths:
         CORE has not been told what to do with it — do not present the operation
         as refunded or as settled while it says so.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: fulfillment_id
           in: path
           required: true
@@ -881,6 +946,7 @@ paths:
     post:
       summary: Cancel a fulfillment before execution closes (idempotent)
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: fulfillment_id
           in: path
           required: true
@@ -900,6 +966,8 @@ paths:
         "409": { description: Fulfillment already closed }
   /v1/events:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Submit an event from MARKET or MOVE for durable ingestion
       description: >-
         The edge external systems push into. CORE records the envelope durably
@@ -935,6 +1003,8 @@ paths:
         "403": { description: This caller may not submit this event type }
   /v1/event-subscriptions:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register where CORE should deliver one of its own event types
       description: >-
         Operator-provisioned only; there is no self-registration. Only core.*
@@ -975,6 +1045,8 @@ paths:
         "400": { description: Not a core.* type, not https, or secret too short }
         "403": { description: Caller is not an operator }
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: List the endpoints CORE delivers events to
       responses:
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -998,6 +1070,7 @@ paths:
         Deliveries already queued stay queued. They were promised, and dropping
         them silently is worse than delivering them late.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subscription_id
           in: path
           required: true
@@ -1020,6 +1093,7 @@ paths:
     post:
       summary: Resume queueing deliveries for a subscriber
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subscription_id
           in: path
           required: true
@@ -1040,6 +1114,8 @@ paths:
         "404": { description: No such subscription }
   /v1/event-deliveries/undelivered:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: List what CORE has promised to deliver and has not
       description: >-
         Pending plus dead deliveries. An empty list is the invariant to expect;
@@ -1061,6 +1137,8 @@ paths:
         "403": { description: Caller is not an operator }
   /v1/notification-recipients:
     post:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Register who is told about one CORE event type
       description: >-
         Binds an event type to an identity and one of its verified channels.
@@ -1113,6 +1191,7 @@ paths:
     get:
       summary: List who is told about which events
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - in: query
           name: organization_id
           schema: { type: string, format: uuid }
@@ -1140,6 +1219,7 @@ paths:
         already happened, and dropping them silently would lose a message CORE
         had already committed to sending.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - in: path
           name: recipient_id
           required: true
@@ -1175,6 +1255,7 @@ paths:
         whether a subscribing *system* received an event. This answers whether a
         *person* was told.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - in: query
           name: organization_id
           schema: { type: string, format: uuid }
@@ -1206,6 +1287,8 @@ paths:
         "403": { description: Caller is not an operator }
   /metrics:
     get:
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
       summary: Operational metrics in Prometheus text exposition format
       description: >
         System-level operational metrics: ingress volume, latency and status
@@ -1248,6 +1331,7 @@ paths:
         writes a signal - signals arrive only as events from the systems that
         observed them (ADR 0008, ADR 0015).
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subject_type
           in: path
           required: true
@@ -1281,6 +1365,7 @@ paths:
         a support agent can see what a number is made of instead of having to
         believe it; no review text ever reaches CORE, so none appears here.
       parameters:
+        - $ref: "#/components/parameters/CorrelationId"
         - name: subject_type
           in: path
           required: true
@@ -1308,6 +1393,25 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+  parameters:
+    CorrelationId:
+      name: x-correlation-id
+      in: header
+      required: false
+      description: >
+        The caller's trace id for this request. CORE echoes it in the response,
+        writes it to the request log and persists it as the `correlation_id` of
+        every audit, outbox, ledger, inbound-event, notification and subscription
+        row the request creates, so it is accepted only as an identifier:
+        letters, digits and `. _ : -`, at most 128 characters, sent at most once.
+        Anything else is refused with 400 `invalid_request` before the route is
+        matched, before the rate limiter runs and before any state is touched;
+        the refusal carries a CORE-generated id rather than echoing the rejected
+        value. Omit the header and CORE generates a UUID v4 for the request.
+      schema:
+        type: string
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._:-]+$"
   responses:
     Error:
       description: Canonical error

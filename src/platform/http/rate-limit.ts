@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { Clock } from "../clock.js";
 import { CoreError } from "../errors.js";
 import { putRow } from "../persistence/row-rules.js";
+import type { RequestHeaders } from "./headers.js";
 
 /**
  * Ingress rate limiting (milestone 8).
@@ -108,15 +109,6 @@ export function rateClassFor(method: string, template: string | null): RateClass
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
 
-/** First value of a possibly-repeated header, trimmed. */
-function headerValue(
-  headers: Record<string, string | string[] | undefined>,
-  name: string,
-): string | null {
-  const raw = headers[name];
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === "string" && value.trim() ? value.trim() : null;
-}
 
 /**
  * Derives the subject without touching the database.
@@ -127,16 +119,19 @@ function headerValue(
  * network subject would let a flood of garbage tokens share one budget with
  * every other anonymous caller.
  */
-export function subjectFor(headers: Record<string, string | string[] | undefined>): RateLimitSubject {
-  const authorization = headerValue(headers, "authorization");
+export function subjectFor(headers: RequestHeaders): RateLimitSubject {
+  // Every read here goes through `RequestHeaders`, so the value has already been
+  // checked as single and bounded: before milestone 26 this function narrowed a
+  // repeated `authorization` to `[0]`, which meant the limiter could attribute a
+  // budget to a different credential than the one `bearer()` authenticated.
+  const authorization = headers.value("authorization");
   if (authorization && /^bearer\s+\S/i.test(authorization)) {
     return { kind: "credential", hash: sha256(authorization.replace(/^bearer\s+/i, "")) };
   }
-  const forwarded = headerValue(headers, "x-forwarded-for");
   const address =
-    (forwarded ? forwarded.split(",")[0]?.trim() : null) ??
-    headerValue(headers, "x-real-ip") ??
-    headerValue(headers, "x-client-ip");
+    headers.firstForwarded("x-forwarded-for") ??
+    headers.firstForwarded("x-real-ip") ??
+    headers.firstForwarded("x-client-ip");
   // A caller with neither a credential nor a reported address shares one
   // bucket. That is the correct default: unattributable traffic is limited
   // together rather than being exempt.

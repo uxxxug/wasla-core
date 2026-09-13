@@ -1,8 +1,45 @@
 # WASLA CORE — Roadmap
 
-**Last updated:** 2026-09-12
-**Last milestone:** Work that MOVE delivered *after* CORE cancelled the order is no longer lost. MOVE executes over minutes, so a cancellation can land mid-execution: CORE closed the fulfillment `cancelled`, released the hold and told MARKET, which told the customer their order was cancelled and gave the money back — and then MOVE's already in-flight `move.job.completed` arrived saying the work was done. CORE answered `409 fulfillment was cancelled` and stored nothing, so the dispatcher retried a refusal that can never come good five times across hours of backoff and dead-lettered the most consequential message MOVE can send as an error string in `inbound_event`; meanwhile the row read `cancelled` + `released`, a *consistent* pair, so both reconciliation reads returned empty and CORE asserted queryably that nothing was owed while a driver had delivered an order for free. The report is now answered and recorded: two columns (migration 0017) hold MOVE's own `completed_at` and the reporting job, `financialDisposition` reads them as `decision_required` so the case lands in B-20's queue rather than the finished pile, and the additive event `core.fulfillment.executed_after_cancellation` carries the fact to MARKET, which is the only side that can talk to that customer. CORE moves no money and says so: the hold was voided and cannot be captured, and re-charging a payer who was told their order was cancelled is not a decision CORE has been given. **B-29 resolved.** 657 tests pass with `DATABASE_URL` set.
-**Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **657 passed / 38 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **17** migrations applied — migration 0017 adds two nullable columns and two check constraints to `fulfillment` (both-or-neither, and the marker only on `status = 'cancelled'`), with no index and no backfill: the reports this cycle exists for were refused and never stored, so every existing row correctly reads as unmarked. Falsifiable and checked by mutation: removing the marker check in `financialDisposition` fails 9 tests, dropping `is null` from the conditional write fails 1, restoring the old 409 fails 19, and recording a late `failed` report as though it were a delivery fails 2 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) recurred again in this cycle's full run and passes in isolation; every one of the 657 assertions passed.
+**Last updated:** 2026-09-13
+**Last milestone:** CORE reads only the request headers it declares, and accepts
+them only in the shape it declares (milestone 26). Measured first: an
+8000-character `x-correlation-id` was accepted, echoed and persisted verbatim in
+the `correlation_id` `text` column of every audit, outbox, ledger, inbound-event,
+notification and subscription row a request creates, so any caller could write
+kilobytes of chosen text into CORE's permanent audit trail with every ordinary
+request; `"   "` became the identity of record, making the field six tables are
+traced by meaningless; a repeated header was recorded as `"a, b"`, an id belonging
+to neither half; and `bearer()` silently authenticated `[0]` of two credentials
+while the rate limiter hashed its own reading of the same header. Now
+`src/platform/http/headers.ts` declares the five headers CORE reads with a use, a
+length bound and a written reason, `RequestHeaders` throws on an undeclared read,
+and the router checks them **before the route is matched and before the limiter
+runs** — which is also what makes the credential the limiter charges and the
+credential `bearer()` authenticates the same value by construction. A refusal
+never echoes the value that caused it. `x-correlation-id` and the bearer
+credential are documented in the contract for the first time, the header parameter
+referenced from all 52 operations. **689** tests pass without `DATABASE_URL` and
+**1252** with it.
+**Verification at this working tree:** `tsc --noEmit` clean; `npm test` 689
+passed / 147 skipped without a database and 1251 + 1 = 1252 with `DATABASE_URL`
+against a real PostgreSQL 18.4, all 19 migrations applied; governance, contract,
+migration and roadmap gates passing. Eleven falsifications, each applied to a
+committed tree and restored, are tabulated in `docs/http-header-declaration.md` —
+including F7b, which **defeated the first version of the gate's source scan** and
+is recorded as such rather than removed. The CI verdict, which is the judgment,
+is in the cycle record below.
+
+### The previous state of this header, kept verbatim
+
+Corrected by addition rather than replacement, because these three lines were the
+only place this text existed. They described the B-29 cycle and were left
+unchanged by milestones 23, 24 and 25, so the counts in them are stale by four
+cycles; they are kept because a stale record is evidence of when it was written.
+
+> **Last updated:** 2026-09-12
+> **Last milestone:** Work that MOVE delivered *after* CORE cancelled the order is no longer lost. MOVE executes over minutes, so a cancellation can land mid-execution: CORE closed the fulfillment `cancelled`, released the hold and told MARKET, which told the customer their order was cancelled and gave the money back — and then MOVE's already in-flight `move.job.completed` arrived saying the work was done. CORE answered `409 fulfillment was cancelled` and stored nothing, so the dispatcher retried a refusal that can never come good five times across hours of backoff and dead-lettered the most consequential message MOVE can send as an error string in `inbound_event`; meanwhile the row read `cancelled` + `released`, a *consistent* pair, so both reconciliation reads returned empty and CORE asserted queryably that nothing was owed while a driver had delivered an order for free. The report is now answered and recorded: two columns (migration 0017) hold MOVE's own `completed_at` and the reporting job, `financialDisposition` reads them as `decision_required` so the case lands in B-20's queue rather than the finished pile, and the additive event `core.fulfillment.executed_after_cancellation` carries the fact to MARKET, which is the only side that can talk to that customer. CORE moves no money and says so: the hold was voided and cannot be captured, and re-charging a payer who was told their order was cancelled is not a decision CORE has been given. **B-29 resolved.** 657 tests pass with `DATABASE_URL` set.
+> **Verification at this working tree:** `tsc --noEmit` clean; `DATABASE_URL=… npm test` **657 passed / 38 files**; governance, contract, migration and roadmap gates passing. Verified on **real PostgreSQL 18.4** (locally hosted), all **17** migrations applied — migration 0017 adds two nullable columns and two check constraints to `fulfillment` (both-or-neither, and the marker only on `status = 'cancelled'`), with no index and no backfill: the reports this cycle exists for were refused and never stored, so every existing row correctly reads as unmarked. Falsifiable and checked by mutation: removing the marker check in `financialDisposition` fails 9 tests, dropping `is null` from the conditional write fails 1, restoring the old 409 fails 19, and recording a late `failed` report as though it were a delivery fails 2 — each mutation restored and `tsc` re-run clean afterwards. The pre-existing flake in `tests/migration-0011-lifecycle.test.ts` (teardown timeout under full-suite contention) recurred again in this cycle's full run and passes in isolation; every one of the 657 assertions passed.
+
 ## What this project is
 
 WASLA CORE is the shared operating layer of the WASLA system: an independent
@@ -156,6 +193,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 23 | Selection parity for the HTTP read surface | **Complete, and self-enforcing from here** | The ninth parity cycle and the third to gate a predicate: milestones 21 and 22 proved a **store** selects the same rows in the same order on both backends, and neither reads the layer a caller talks to. `tests/http-selection-parity.test.ts` seeds one population through the stores - several of these rows have no route that writes them - and reads it back through `core.router.handle`, the real router with real authorisation and real serialisation. **49 tests**: 19 listing cases each declaring a row count *and* an order computed from the fixture definitions rather than read out of a store, 22 refusal cases asserted on both backends, a coverage gate over the router's own `registrations()` so a `GET` added later is either measured or excused by name, and a premise test that asserts the run is comparing the halves it claims to (`["memory", "postgres"]` when `DATABASE_URL` is set), so a run that lost its Postgres half cannot report the same green count. **Five defect classes, all fixed at the root.** (1) The three platform stores returned `Map` insertion order while their SQL sorted - 7 of 11 probed listings disagreed across the backends before the fix, which is the correction to milestone 22's overclaim. (2) `SubscriptionRegistry.undelivered()` concatenated two ordered queries, so every pending delivery preceded every dead one regardless of age and **both backends were wrong in the same way** - invisible to a cross-backend comparison alone; it is one `status = any($1::text[]) order by created_at, delivery_id` query now. (3) Eight non-total SQL orders completed with a primary-key tiebreak. (4) Route parsing accepted what it then ignored: a repeated parameter kept the first value and dropped the rest, `?organization_id=` filtered on the empty string and returned a count of 0 indistinguishable from an empty tenant, and `Number()` accepted `0x10`, `1e3`, `" 5"`, `+5` and `5.0`. `src/platform/http/query.ts` is the single strict reader now and both local ad-hoc parsers are gone. (5) The discovery: **`localeCompare` matches no Postgres collation.** The local engine's databases are `C` and CI's `postgres:16` is `en_US.utf8`, so with `localeCompare` on the reference side the text order CORE produced depended on where it was deployed. `compareValues` compares code units, matching `C`, and every text order it is compared against is pinned with `collate "C"`. Ten falsifications, ten caught - two only after the **gate** was strengthened: dropping a `delivery_id` tiebreak passed until two rows shared an instant and were inserted in the opposite order to their ids, and removing a vocabulary guard passed until an *unknown* value was probed, because an unknown status had been answered with an empty page. What the cycle does not claim is recorded in `docs/http-selection-parity.md`, including the finding it declined to half-build: see milestone 24. Measured: 648/148 without a database, 1211 with one |
 | 24 | Read routes refuse only what they read | **Complete, and self-enforcing from here** | The tenth cycle in this family and the first that is not a parity cycle: nothing in it compares two backends. Milestone 23 closed the *values* a route accepts for the parameters it reads and left the *set* of parameters open, with two measurements: `GET /v1/notification-recipients?limit=abc` answered **200 with every row** because that route has no `limit`, and `?organisation_id=…` — the British spelling, or any typo — was ignored, so one tenant's question was answered with every tenant's rows. Both are the milestone 23 defect from the other end: CORE answered a question the caller did not ask and reported success. **The fix is structural, not per route**, because 23 hand-maintained lists in 23 handlers is the shape that produced the defect and a drifted list fails open. `router.get(path, accepts, handler)` takes the accepted parameters as a **required positional** argument, `add(...)` defaults to accepting nothing (fail-closed), the router parses before the handler and after the rate-limit check, refusals go through the same `CoreError` envelope as every other refusal, and — the change that makes the gate possible — **`RequestContext` carries no `URLSearchParams` at all**: `ctx.query` is gone and `ctx.selection` is the parsed result, so a handler *cannot* read an undeclared parameter. `Selection` throws rather than returning `undefined` for an undeclared name, because `undefined` would rebuild the original defect one level down. `tests/http-parameter-declaration.test.ts` — **10 tests, no database, so both CI jobs run it** — is driven off `router.registrations()` rather than a list in the test: every route of every method refuses `?__unexpected_parameter=1` by name; the 29 routes that declared nothing refuse any query string; every declared parameter is proved live by a repeat probe that fills the route's *other* parameters with valid values first; declarations are well formed (unique snake_case, non-empty vocabularies, `0 < min <= default <= max`); a source scan proves `query.ts` and `router.ts` are the only modules that touch a query string; and a **file-scoped cross-check** proves every declared name is read and every read name declared, which is the direction a liveness probe cannot see. **What it found beyond the two known cases:** comparing the declarations with `contracts/openapi/core-v1.yaml` — added to delete a second source of truth — showed `country_code` on `GET /v1/geography/service-areas/resolve` has been implemented since the geography module shipped and **appeared in no contract**, so no consumer could know a country filter existed; documented in the same commit. Nine falsifications, and F2 (a declared parameter no handler reads) **passed the first version of the gate**, which proved only that declarations are parsed — the cross-check was written in response, making this the second cycle running where a falsification passed until the gate itself was strengthened. Unknown-parameter refusal precedes authentication: deliberate, since the accepted set is published in the contract, and it keeps a request CORE cannot understand away from any store read. What it does not claim, recorded in `docs/http-parameter-declaration.md`: request **bodies** still tolerate unknown properties (strict rejection there is a breaking change for clients, unlike the query case), the cross-check is file- not handler-scoped, and `kind: "text"` carries no format so UUID-shaped parameters are still validated by the handler that knows them. Measured: 658/148 without a database, 1221 with one |
 | 25 | Write routes accept only the body they declare | **Complete** — declared bodies enforced by the router on all 29 write routes, `ctx.body` removed, 16 gate tests, nine falsifications, four undocumented request bodies found and documented; CI verdict recorded in the cycle record below | The symmetric half of milestone 24, reserved **before** any file was edited this time. Milestone 24 closed the query string and its record named the request body as a separate question; measuring the body before reserving turned that into a money defect rather than a symmetry argument. **`POST /v1/payment-authorizations/:id/capture` with `{"amountMinor": 500}` — one camelCase typo — captured 5000, the entire remaining hold, and answered 200.** The route reads `amount_minor` and treats its absence as "capture everything", which is the correct meaning of an absent amount and a catastrophic meaning for a misspelled one; `refund` has the same shape. `POST /v1/wallets` accepts `nonsense` and `CURRENCY` alongside `currency` and reports 201. Every write route hand-parses `ctx.body as Record<string, unknown>` with per-module `objectBody`/`requiredString`/`optionalString` helpers duplicated across three files, and no route refuses a property it does not read. Scope: one declared body reader owned by the platform, a per-route declaration in the registration as with `accepts`, router-enforced refusal of unknown properties, `ctx.body` removed from `RequestContext` in favour of a parsed value that throws on an undeclared read, a gate driven off `registrations()`, and a cross-check against the `requestBody` schemas in `contracts/openapi/core-v1.yaml`. **The breaking-change objection, answered rather than ignored:** milestone 24's record argued strict body rejection breaks any client sending an extra field. It does — and milestone 5 records that no external system has adopted these contracts yet, so there is no such client today and this is the cheapest moment this change will ever have. A capture that silently takes ten times what was asked is not a compatibility feature |
+| 26 | Caller-supplied headers CORE records are validated at the boundary | **Complete, and self-enforcing from here** — `src/platform/http/headers.ts` is the only reader of a request header in `src`; five declared headers with a use, a bound and a recorded reason; refusal before the route is matched and before the limiter runs; no rejected value echoed; `CorrelationId` documented and referenced from all 52 operations; 15 gate tests, eleven falsifications including one that defeated the first version of the source scan. CI verdict recorded in the cycle below. Measured cause: | The third and last request surface, after the query string (24) and the body (25), and the only one where CORE stores what the caller sent. `x-correlation-id` is taken from the request verbatim if it is a non-empty string, then echoed in the response, written to structured logs, and persisted in `correlation_id` **`text`** columns on audit, outbox, ledger, inbound-event, notification and subscription rows. Measured against `main` at `a043ab7`, end to end through `createServer(core.router.nodeListener())` and a raw socket: **an 8000-character correlation id is accepted, echoed and recorded** (Node's own 16KB header limit is the only bound, so a caller can write kilobytes of attacker-chosen text into CORE's audit trail with every ordinary request, permanently, with no gate); **`"   "` is accepted as the identity of record**, so two unrelated requests correlate to the same blank id and the field every reconciliation and audit read traces by is meaningless; **`a\tb` is accepted**; and **a repeated header is joined by Node into `"a, b"` and recorded as one id**, so a later trace lookup by either half finds nothing, while `bearer()` silently takes `[0]` of a repeated `authorization` — the same silent-substitution class milestones 24 and 25 closed for parameters and properties. Not defects, measured and recorded as such: Node's parser refuses NUL, DEL and obs-fold with 400 before CORE sees them, so response splitting is not reachable — but a NUL correlation id would have been a backend divergence, since the reference backend accepts it and PostgreSQL refuses `0x00` in `text` outright. Neither `Authorization` nor `x-correlation-id` appears anywhere in `contracts/openapi/core-v1.yaml`, so the one header every route requires is undocumented. Scope: one platform module declaring the headers CORE reads and their accepted shape, router-enforced refusal of a malformed declared header **before any work**, no direct `ctx.headers[...]` read left outside it, a repeated declared header refused rather than silently narrowed, the headers documented in the contract, and a gate driven off the declaration with the same falsification discipline as 24 and 25 |
 
 ### What was claimed complete and actually is
 
@@ -5633,3 +5671,115 @@ numbers match the local measurement on an embedded PostgreSQL 18.4 in `C` exactl
 and both exceed the baseline by the 16 tests this cycle added. Every gate in
 `tests/http-body-declaration.test.ts` therefore passed in the environment that
 gates the merge, not only locally.
+
+## Cycle 2026-09-13 (fourteenth) — CORE reads only the headers it declares
+
+**Chosen because it was the last of three surfaces, and the only one CORE stores.**
+Milestone 24 closed the query string and milestone 25 the body; both records named
+the headers as what was left. Measuring them before reserving this row turned that
+symmetry argument into three separate defects, all against `main` at `a043ab7`,
+all through `createServer(core.router.nodeListener())` and a raw socket rather
+than through the test harness:
+
+| Request | Answer on `main` |
+| --- | --- |
+| `x-correlation-id:` 8000 characters | `200`, echoed and recorded in full |
+| `x-correlation-id: "   "` | `200`, `"   "` became the identity of record |
+| `x-correlation-id: a\tb` | `200`, accepted |
+| `x-correlation-id: a` sent twice | `200`, recorded as `"a, b"` |
+| `authorization` sent twice | accepted; `bearer()` authenticated `[0]` |
+
+The router's rule was "any non-empty string, verbatim", and that string reached
+the response header, the request log, and the `correlation_id` **`text`** column of
+every audit, outbox, ledger, inbound-event, notification and subscription row the
+request created. So a caller could write kilobytes of chosen text into CORE's
+permanent audit trail with every ordinary request; two unrelated requests could
+both be traced by `"   "`; and a repeated header produced an id belonging to
+neither half, which a later lookup by either value cannot find while the row looks
+well formed. `bearer()` had the same flaw pointed the other way, narrowing two
+credentials to `[0]` in silence — and the rate limiter derived its subject from
+the same headers independently, so the credential it charged and the credential
+`bearer()` authenticated were not guaranteed to be the same value.
+
+**What changed.** `src/platform/http/headers.ts` is the only reader of a request
+header in `src`. `DECLARED_HEADERS` names five, each with a **use**, a **length
+bound** and a **recorded reason**: `x-correlation-id` (`recorded`, 128),
+`authorization` (`credential`, 4096), `x-forwarded-for` (`forwarded`, 512),
+`x-real-ip` and `x-client-ip` (`forwarded`, 128). The three uses are three
+strictnesses chosen by what CORE does with the value: a `recorded` header is
+checked against an identifier shape because everything downstream treats it as an
+identifier; a `credential` must be one `scheme token`, and deliberately is *not*
+checked for scheme or token validity, because an invalid credential is `401`
+decided against real state and moving that to the edge would turn an
+authentication answer into a syntax answer; a `forwarded` header stays a list,
+because a proxy chain is one, and its first entry is read through
+`firstForwarded` — the one declared read where taking part of a value is correct.
+`RequestHeaders` throws on an undeclared read. The router checks the headers
+before the route is matched and before the limiter runs, which is what makes the
+limiter's credential and `bearer()`'s the same value by construction, and a
+refusal carries a generated id rather than echoing the value that caused it.
+
+**Contract.** `components/parameters/CorrelationId` documents the header, its
+shape, its bound and the refusal, and is referenced from **all 52 operations** —
+a component parameter nothing references documents nothing. The `Authorization`
+rule is stated in the API description. Neither header appeared anywhere in the
+contract before this cycle, which the contract cross-check found the same way
+milestone 25's found four undocumented request bodies.
+
+**Gate.** `tests/http-header-declaration.test.ts`, 15 tests, no database, so it
+runs in both CI jobs. It also asserts on purpose that an **undeclared header is
+not refused**: HTTP requires unknown headers to be ignored and every proxy adds
+its own, so this family's rule is deliberately weaker here than for the query
+string and the body, and the gate states the weaker rule rather than leaving the
+difference unspoken — what is enforced is that CORE never *reads* an undeclared
+header.
+
+**Falsification.** Eleven mutations, each applied to a committed tree, the gate
+run, the tree restored and confirmed clean: no length bound (2 fail), the old
+"any non-empty string" rule (2), a repeated header narrowed to `[0]` (1), the
+refusal echoing the rejected value (2), headers checked only on a matched route
+(1), an undeclared read returning `undefined` (1), the raw reader restored (1),
+the raw reader hidden behind a cast (1), a reader asking for an undeclared name
+(1), one operation dropping the `CorrelationId` reference (1), the component
+parameter deleted (1).
+
+**F7b defeated the first version of the gate, and that is recorded rather than
+tidied away.** The source scan was written as `headers\s*\["name"\]`, and
+`(ctx.headers as unknown as Record<string, string>)["authorization"]` passed it,
+because the cast separates the word from the bracket. The scan was replaced with
+the rule it was approximating — a declared header name may appear in `src` only as
+the argument of `.value` or `.firstForwarded` — and both spellings then fail. Two
+commits carry that in order, `fa4b0d7` then `be6dd30`, so the branch shows the
+weak gate and its replacement rather than only the final state. A second process
+note from the same round: `git checkout -- .` reverted the sharpened but
+**uncommitted** test file, so one re-run of F7b was measured against the old scan
+again; those readings were discarded and every reading was re-taken after
+committing. That is the second cycle in a row where a dirty tree produced a false
+reading, and the lesson is written down again — commit before falsifying, and
+verify the tree is clean after each restore.
+
+**Measured, not asserted.** Without `DATABASE_URL`: 674 → **689 passed / 147
+skipped**. With it: 1237 → **1251 + 1 = 1252**, none skipped, on a real PostgreSQL
+18.4 with all 19 migrations applied. `tsc --noEmit` clean; governance, contract,
+migration and roadmap gates pass. One existing test file changed —
+`tests/rate-limit.test.ts` builds `subjectFor`'s input with `parseHeaders({...})`
+because the function now takes checked headers — and nothing was loosened to
+accommodate the new strictness.
+
+**What this cycle does not claim.** It does not make the correlation id
+trustworthy: it is still the caller's value, now a bounded identifier rather than
+arbitrary text, and `request_id` remains the only id CORE generates. It does not
+authenticate at the edge. It does not bound the total header size — Node's own
+limit does, and CORE does not restate it. It governs nothing about response
+headers, and it does not address `content-type`, which CORE still ignores when
+parsing a JSON body. Full record in `docs/http-header-declaration.md`.
+
+**CI verdict (the judgment, not the local run).** PR #17, run 34777041478 on
+commit `5fb959c`. *Verify without a database*: **689 passed / 147 skipped** across
+50 of 52 files, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1251 passed across 52
+files and 1 passed in the cluster file — 1252 in total**, none skipped. Both
+numbers match the local measurement on an embedded PostgreSQL 18.4 in `C`
+collation exactly, and both exceed the previous cycle's by the 15 tests this one
+added. Every assertion in `tests/http-header-declaration.test.ts` therefore passed
+in the environment that gates the merge, not only locally.

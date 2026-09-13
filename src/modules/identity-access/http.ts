@@ -16,8 +16,11 @@ const ROLES: readonly Role[] = [
 
 
 export function bearer(ctx: RequestContext): string {
-  const header = ctx.headers["authorization"];
-  const raw = Array.isArray(header) ? header[0] : header;
+  // One declared read. The `Array.isArray(header) ? header[0]` this replaced
+  // chose one of two credentials without saying so; a repeated `authorization`
+  // is now refused at the edge by `parseHeaders`, and what arrives here is a
+  // single bounded value whose *validity* is still this module's question.
+  const raw = ctx.headers.value("authorization");
   if (!raw || !raw.startsWith("Bearer ")) throw unauthenticated("missing bearer token");
   return raw.slice("Bearer ".length);
 }
