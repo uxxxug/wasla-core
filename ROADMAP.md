@@ -5523,3 +5523,13 @@ declared-vs-read cross-check is file-scoped, not handler-scoped, because
 `kind: "text"` carries no format, so a parameter that must be a UUID is still
 validated by the handler that knows it — pushing formats into the declaration would
 grow a second schema language next to the contract.
+
+**CI verdict (the judgment, not the local run).** PR #15, run 34774248943 on
+commit `9d1fdfa`. *Verify without a database*: **658 passed / 147 skipped across 48
+of 50 files**, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1220 passed across 50
+files and 1 passed in the cluster file — 1221 in total**, matching the local
+measurement on an embedded PostgreSQL 18.4 in `C` exactly, in both jobs and in both
+directions. The new gate runs in *both* jobs, which is the point of it needing no
+database: the guarantee that a route refuses what it does not read is checked on
+every push, not only on the pushes that reach a database.
