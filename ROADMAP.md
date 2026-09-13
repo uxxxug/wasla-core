@@ -4176,7 +4176,18 @@ correction of record.
 Without `DATABASE_URL`: 689 → **700 passed / 147 skipped**. With it: 1252 →
 **1262 + 1 = 1263**, none skipped, on a real PostgreSQL 18.4 with `C` collation,
 all 19 migrations applied. `tsc --noEmit` clean; governance, contract, migration
-and roadmap gates pass. No existing test was changed, loosened or skipped. As an
+and roadmap gates pass. No existing test was changed, loosened or skipped.
+
+**Falsification.** Eleven mutations, each applied to a committed tree and
+restored with the tree verified clean afterwards, are tabulated in
+`docs/http-response-declaration.md`. Ten are caught. The eleventh — making a
+reconciliation read answer `items: []` — is **not caught**, because an empty
+array satisfies any item schema; it is recorded as the gate's measured limitation
+rather than omitted, and it is the reason the scenario produces real rows for
+those reads. A twelfth attempt broke the scenario's setup so nothing ran, and is
+recorded as an invalid mutation rather than deleted.
+
+As an
 independent cross-check, Python's `yaml.safe_load` was run against the contract
 and agrees with the new reader that no response object carries an undefined key.
 

@@ -144,6 +144,38 @@ had to genuinely succeed first. Four things had to be built rather than asserted
   `financial_disposition: decision_required`), and an authorization voided under
   an open fulfillment.
 
+## Falsification
+
+Every mutation below was applied to a **committed** tree, the gate was run, the
+tree was restored with `git checkout -- .` and `git status --porcelain` verified
+empty afterwards. Baseline: 11 passed.
+
+| # | Mutation | Gate |
+| --- | --- | --- |
+| F1 | Drop the `await` in `POST /v1/organizations` — the original defect | **2 failed** |
+| F2 | Stop redacting delivery rows (`items` instead of `items.map(redactDelivery)`) | **2 failed** |
+| F3 | Remove `service_name` from `AuthenticatedPrincipal` | **1 failed** |
+| F4 | Remove `reputation.read` from the `Permission` enum | **1 failed** |
+| F5 | Re-break a response description into an unquoted flow map | **1 failed** |
+| F6 | Remove the router's thenable guard | **1 failed** |
+| F7 | Delete `GET /health`'s response schema | **2 failed** |
+| F8 | Register a route the contract does not publish | **1 failed** |
+| F9 | Drop `nullable: true` from `EventDelivery.last_error`, which returns null | **1 failed** |
+| F10 | Document a body for the bodyless `204 POST /v1/sessions/revoke` | **2 failed** |
+| F11 | Make the decision-required reconciliation read answer `items: []` | **11 passed — not caught** |
+
+**F11 is the limitation, measured rather than asserted.** An empty array satisfies
+any item schema, so a read that silently stops returning rows passes this gate
+untouched. That is why the scenario was extended to produce a real row for each
+reconciliation read in the first place — the schemas are validated against actual
+rows today — but nothing *forces* it to keep doing so. A cycle that wants that
+guarantee has to assert non-emptiness per operation, and this one does not.
+
+A twelfth mutation was attempted first (replacing the scenario's `organization_id`
+with a random uuid, intending to empty the list) and is recorded as **invalid**:
+it broke the scenario's setup so no test ran at all, which measures nothing about
+the gate. It was replaced with F11 rather than deleted from the record.
+
 ## Measurement
 
 | Run | Before | After |
