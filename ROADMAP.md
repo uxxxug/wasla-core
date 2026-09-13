@@ -5399,3 +5399,14 @@ clean. The known `tests/migration-0011-lifecycle.test.ts` oddity **did not
 reappear** this run: the file was reported passed in the combined run as well as
 standalone, which is recorded because it is a change in the observation, not
 because it is understood.
+
+**CI verdict (the judgment, not the local run).** PR #14, run 34772432700 on
+commit `5cbbdb2`. *Verify without a database*: 648 passed / 147 skipped across 49
+files, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1210 passed across
+49 files and 1 passed in the cluster file — 1211 in total**, matching the local
+measurement on an embedded PostgreSQL 18.4 in `C` exactly. That agreement is
+itself the check on defect class 5: before this cycle the two environments'
+collations differed and the reference comparator matched neither, so equal counts
+across them is the first run where text order was not a property of the machine.
+`tests/migration-0011-lifecycle.test.ts` passed in CI, as it always has.
