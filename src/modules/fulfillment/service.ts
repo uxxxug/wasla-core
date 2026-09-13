@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import type {
   TransactionBoundary,
   TransactionScope,
@@ -131,6 +132,10 @@ export interface FulfillmentRepository {
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   private rows = new Map<string, Fulfillment>();
+
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("fulfillment", this.rows);
+  }
   async insert(fulfillment: Fulfillment, scope?: TransactionScope): Promise<void> {
     // `fulfillment_market_order_reference_key` and
     // `fulfillment_move_job_reference_key` are both UNIQUE in the schema, and

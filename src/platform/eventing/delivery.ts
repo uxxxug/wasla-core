@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Clock } from "../clock.js";
+import type { ReferenceKeys } from "../persistence/reference-keys.js";
 import { invalid } from "../errors.js";
 import { NO_WORKER_METRICS, type WorkerMetrics } from "../observability/worker-metrics.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
@@ -198,7 +199,13 @@ export class InMemoryDeliveryStore implements DeliveryStore {
    * different things than Postgres for the same rows, which is exactly the
    * backend divergence B-12 is about.
    */
-  constructor(private readonly clock: Clock) {}
+  constructor(
+    private readonly clock: Clock,
+    keys?: ReferenceKeys,
+  ) {
+    keys?.attach("event_subscription", this.subscriptions);
+    keys?.attach("event_delivery", this.deliveries);
+  }
 
   async insertSubscription(
     subscription: EventSubscription,

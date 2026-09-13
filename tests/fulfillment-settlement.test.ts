@@ -5,7 +5,8 @@ import { testId } from "./support/ids.js";
  * explicit rather than silent.
  */
 import { describe, expect, it } from "vitest";
-import { createCoreApp, type CoreApp } from "../src/app.js";
+import type { CoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { InMemoryTransactionBoundary } from "../src/platform/persistence/transaction.js";
 import { makeEvent, type EventEnvelope } from "../src/platform/eventing/envelope.js";
@@ -101,7 +102,7 @@ async function closureEvent(core: CoreApp, fulfillmentId: string) {
 
 describe("settlement state binds money to execution", () => {
   it("holds the money while the work is open and captures it on success", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const { wallet, authorization } = await fundedHold(core, "success");
 
     const created = await core.fulfillment.consumeMarketOrder(
@@ -124,7 +125,7 @@ describe("settlement state binds money to execution", () => {
   });
 
   it("releases the hold when MOVE reports a failed execution", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const { wallet, authorization } = await fundedHold(core, "failure");
     const created = await core.fulfillment.consumeMarketOrder(
       fundedOrder(core, "order-s2", authorization.authorization_id),
@@ -141,7 +142,7 @@ describe("settlement state binds money to execution", () => {
   });
 
   it("releases the hold on cancellation and on MOVE rejection", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const cancelHold = await fundedHold(core, "cancel");
     const rejectHold = await fundedHold(core, "reject");
 
@@ -181,7 +182,7 @@ describe("settlement state binds money to execution", () => {
   });
 
   it("publishes the settlement state on the closure contract", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const { authorization } = await fundedHold(core, "contract");
     const created = await core.fulfillment.consumeMarketOrder(
       fundedOrder(core, "order-s5", authorization.authorization_id),
@@ -197,7 +198,7 @@ describe("settlement state binds money to execution", () => {
 
 describe("a hold that cannot guard the execution is refused at intake", () => {
   it("refuses an order whose declared hold does not exist and never asks MOVE to work", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const refused = await core.fulfillment.consumeMarketOrder(
       fundedOrder(core, "order-s6", "11111111-1111-4111-8111-111111111111"),
     );
@@ -219,7 +220,7 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
 
   it("refuses an order whose hold has already expired and releases it", async () => {
     const clock = new FixedClock();
-    const core = createCoreApp({ clock });
+    const core = await coreWithTenants(clock, [testId("org-1"), testId("org-other")]);
     const { wallet } = await fundedHold(core, "expiry");
     // The first hold consumes the funded balance; top up so a second, expiring
     // hold can be authorized.
@@ -252,7 +253,7 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
   });
 
   it("refuses an order whose hold was already voided", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const { authorization } = await fundedHold(core, "voided");
     await core.money.voidAuthorization({
       authorization_id: authorization.authorization_id,
@@ -271,7 +272,7 @@ describe("a hold that cannot guard the execution is refused at intake", () => {
   });
 
   it("still coordinates an unfunded order", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-1"), testId("org-other")]);
     const created = await core.fulfillment.consumeMarketOrder(fundedOrder(core, "order-s9", null));
     expect(created).toMatchObject({ status: "coordinating", settlement_state: "none" });
     expect(

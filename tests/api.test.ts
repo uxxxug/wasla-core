@@ -1,10 +1,10 @@
 import { testId } from "./support/ids.js";
 import { describe, expect, it } from "vitest";
-import { createCoreApp } from "../src/app.js";
+import { coreWithTenants } from "./support/app.js";
 import { FixedClock } from "../src/platform/clock.js";
 
 async function bootstrapAdmin() {
-  const core = createCoreApp({ clock: new FixedClock() });
+  const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
   const registered = await core.identity.registerIdentity({
     channel_type: "web",
     external_id: "root-admin",
@@ -26,7 +26,7 @@ async function bootstrapAdmin() {
 
 describe("HTTP surface", () => {
   it("exposes health and readiness", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
     expect((await core.router.handle({ method: "GET", url: "/health" })).status).toBe(200);
     const ready = await core.router.handle({ method: "GET", url: "/ready" });
     expect(ready.status).toBe(200);
@@ -34,7 +34,7 @@ describe("HTTP surface", () => {
   });
 
   it("registers an identity over HTTP and is idempotent", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
     const first = await core.router.handle({
       method: "POST",
       url: "/v1/identities",
@@ -54,7 +54,7 @@ describe("HTTP surface", () => {
   });
 
   it("returns the canonical error shape with a correlation id", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
     const res = await core.router.handle({
       method: "POST",
       url: "/v1/identities",
@@ -98,7 +98,7 @@ describe("HTTP surface", () => {
   });
 
   it("enforces tenant isolation on organization reads", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
     const owner = await core.identity.registerIdentity({
       channel_type: "web",
       external_id: "owner",
@@ -142,7 +142,7 @@ describe("HTTP surface", () => {
   });
 
   it("returns 404 in the canonical error shape for unknown routes", async () => {
-    const core = createCoreApp({ clock: new FixedClock() });
+    const core = await coreWithTenants(new FixedClock(), [testId("org-root"), testId("org-a")]);
     const res = await core.router.handle({ method: "GET", url: "/v1/nope" });
     expect(res.status).toBe(404);
     expect(res.body).toMatchObject({ code: "not_found" });

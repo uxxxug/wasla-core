@@ -36,6 +36,7 @@ import { PgReputationRepository } from "../../modules/reputation/pg-repository.j
 import type { OrganizationRepository } from "../../modules/organization/service.js";
 import { PgOrganizationRepository } from "../../modules/organization/pg-repository.js";
 import type { Queryable } from "./postgres.js";
+import { ReferenceKeys } from "./reference-keys.js";
 import {
   InProcessReplayLock,
   PgAdvisoryReplayLock,
@@ -92,6 +93,17 @@ export interface Persistence {
   fulfillment: FulfillmentRepository;
   subscription: SubscriptionRepository;
   reputation: ReputationRepository;
+  /**
+   * The reference backend's foreign-key registry, present only on that backend.
+   *
+   * Exposed rather than kept private because it is the one part of the
+   * referential check that can be silently incomplete: a parent table no store
+   * attached is a key that cannot be evaluated, and the parity suite asserts
+   * `referenceKeys.unresolvedParents()` is empty for this bundle. Postgres
+   * enforces its own keys and leaves this undefined, which is also what tells
+   * the suite which half it is probing.
+   */
+  referenceKeys?: ReferenceKeys;
 }
 
 /** Reference backend. Keeps the tests and local runs dependency-free. */
@@ -101,26 +113,38 @@ export function memoryPersistence(clock: Clock): Persistence {
   // settled period against the hold that settled it; without this wiring the
   // memory backend could not express that check, and a backend that enforces
   // less than production is a backend that certifies bugs (B-12).
-  const money = new InMemoryMoneyRepository();
+  // One registry per bundle, for the same reason the bundle exists at all: the
+  // schema's 30 foreign keys cross store boundaries, so each store hands its
+  // maps to this registry and `putRow` refuses a child row whose parent is not
+  // in it. Per bundle and not per process, so two `memoryPersistence()` bundles
+  // in one test file stay two independent databases — a shared registry would
+  // let a row written in one satisfy a key in the other, which no Postgres run
+  // would do.
+  const keys = new ReferenceKeys();
+  const money = new InMemoryMoneyRepository(keys);
   return {
     kind: "memory",
     audit: new InMemoryAuditLog(clock),
-    outbox: new InMemoryOutbox(clock),
+    outbox: new InMemoryOutbox(clock, keys),
     inbox: new InMemoryInbox(),
     inbound: new InMemoryInboundEventStore(clock),
-    delivery: new InMemoryDeliveryStore(clock),
-    notification: new InMemoryNotificationStore(),
+    delivery: new InMemoryDeliveryStore(clock, keys),
+    notification: new InMemoryNotificationStore(keys),
     boundary: new InMemoryTransactionBoundary(),
     replayLock: new InProcessReplayLock(),
     revivalLock: new InProcessReplayLock(),
     rateLimit: new InMemoryRateLimitWindowStore(),
-    identity: new InMemoryIdentityRepository(),
-    organization: new InMemoryOrganizationRepository(),
+    identity: new InMemoryIdentityRepository(keys),
+    organization: new InMemoryOrganizationRepository(keys),
     money,
-    geography: new InMemoryGeographyRepository(),
-    fulfillment: new InMemoryFulfillmentRepository(),
-    subscription: new InMemorySubscriptionRepository((id) => money.authorizationSnapshot(id)),
-    reputation: new InMemoryReputationRepository(),
+    geography: new InMemoryGeographyRepository(keys),
+    fulfillment: new InMemoryFulfillmentRepository(keys),
+    subscription: new InMemorySubscriptionRepository(
+      (id) => money.authorizationSnapshot(id),
+      keys,
+    ),
+    reputation: new InMemoryReputationRepository(keys),
+    referenceKeys: keys,
   };
 }
 

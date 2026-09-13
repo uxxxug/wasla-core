@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   journalOf,
@@ -36,6 +37,12 @@ export class InMemoryMoneyRepository implements MoneyRepository {
   private wallets = new Map<string, Wallet>();
   private authorizations = new Map<string, PaymentAuthorization>();
   private ledger = new Map<string, LedgerTransaction>();
+
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("wallet", this.wallets);
+    keys?.attach("payment_authorization", this.authorizations);
+    keys?.attach("ledger_transaction", this.ledger);
+  }
 
   /**
    * The uniqueness checks below are deliberately synchronous.

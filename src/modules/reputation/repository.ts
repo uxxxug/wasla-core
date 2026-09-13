@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   type TransactionScope,
@@ -103,6 +104,10 @@ export interface ReputationRepository {
  */
 export class InMemoryReputationRepository implements ReputationRepository {
   private readonly rows = new Map<string, ReputationSignal>();
+
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("reputation_signal", this.rows);
+  }
 
   async insertIfAbsent(
     signal: ReputationSignal,

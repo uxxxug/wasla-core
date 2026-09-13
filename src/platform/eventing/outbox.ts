@@ -1,4 +1,5 @@
 import type { Clock } from "../clock.js";
+import type { ReferenceKeys } from "../persistence/reference-keys.js";
 import { journalMapWrite, NO_SCOPE, type TransactionScope } from "../persistence/transaction.js";
 import type { EventEnvelope } from "./envelope.js";
 import { isFenced, newClaimToken, type Fence } from "./fencing.js";
@@ -146,7 +147,19 @@ export interface OutboxStore {
 
 export class InMemoryOutbox implements OutboxStore {
   private records = new Map<string, OutboxRecord>();
-  constructor(private readonly clock: Clock) {}
+  /**
+   * `keys` is how `outbox` becomes a parent table the other reference stores can
+   * see: `event_delivery.event_id` and `notification.event_id` both reference
+   * it, and without the registry neither could be checked in memory. Optional
+   * because a unit test may build this store alone, which is the fail-open case
+   * named in `reference-keys.ts`.
+   */
+  constructor(
+    private readonly clock: Clock,
+    keys?: ReferenceKeys,
+  ) {
+    keys?.attach("outbox", this.records);
+  }
 
   async append(event: EventEnvelope, scope?: TransactionScope): Promise<void> {
     if (this.records.has(event.event_id)) return;

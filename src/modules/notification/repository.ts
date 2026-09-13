@@ -1,3 +1,4 @@
+import type { ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   NO_SCOPE,
@@ -123,6 +124,16 @@ export class InMemoryNotificationStore implements NotificationStore {
   private recipients = new Map<string, NotificationRecipient>();
   private notifications = new Map<string, Notification>();
   private tokens = 0;
+
+  /**
+   * `notification_recipient` is a parent of `notification`, and `notification`
+   * is a child of `outbox` and `organization` as well, so this store both
+   * supplies and consumes the registry.
+   */
+  constructor(keys?: ReferenceKeys) {
+    keys?.attach("notification_recipient", this.recipients);
+    keys?.attach("notification", this.notifications);
+  }
 
   async insertRecipient(
     recipient: NotificationRecipient,

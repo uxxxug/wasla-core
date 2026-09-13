@@ -1,3 +1,4 @@
+import { foreignKeyRefusal, type ReferenceKeys } from "../../platform/persistence/reference-keys.js";
 import {
   journalMapWrite,
   journalOf,
@@ -80,7 +81,15 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     private readonly capturedAmount?: (
       authorizationId: string,
     ) => { captured_minor: number; currency: string } | undefined,
-  ) {}
+    keys?: ReferenceKeys,
+  ) {
+    // Field initializers run before this body, so the maps below already exist.
+    keys?.attach("plan", this.plans);
+    keys?.attach("plan_grant", this.grants);
+    keys?.attach("subscription", this.subscriptions);
+    keys?.attach("subscription_period", this.periods);
+    keys?.attach("usage_record", this.usage);
+  }
 
   private plans = new Map<string, Plan>();
   private grants = new Map<string, PlanGrant>();
@@ -181,18 +190,17 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
         `plan ${grant.plan_id} is ${plan.status}; its grants cannot change because usage has already been measured against them - publish a new plan instead`,
       );
     }
-    if (grant.feature_key.trim().length === 0) {
-      throw new Error('new row violates check constraint "plan_grant_feature_key_present"');
-    }
-    if (grant.limit_value !== null && (grant.limit_value < 0 || !Number.isInteger(grant.limit_value))) {
-      throw new Error('new row violates check constraint "plan_grant_limit_non_negative"');
-    }
     const key = this.grantKey(grant.plan_id, grant.feature_key);
     if (this.grants.has(key)) {
       throw new Error('duplicate key value violates unique constraint "plan_grant_pkey"');
     }
     journalMapWrite(scope, this.grants, key);
-    this.grants.set(key, grant);
+    // `plan_grant_feature_key_present`, `plan_grant_limit_non_negative` and
+    // `plan_grant_plan_id_fkey`, all from the rules tables rather than restated
+    // here: until this cycle this row was written with a bare `map.set`, so its
+    // two CHECKs were a second copy of the schema and its foreign key had no
+    // copy at all.
+    putRow("plan_grant", this.grants, key, grant);
   }
 
   async listGrants(planId: string): Promise<readonly PlanGrant[]> {
@@ -425,20 +433,14 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
    * expressed, so no backend has to refuse it.
    */
   async insertUsage(usage: UsageRecord, scope?: TransactionScope): Promise<void> {
-    if (usage.feature_key.trim().length === 0) {
-      throw new Error('new row violates check constraint "usage_record_feature_key_present"');
-    }
-    if (!Number.isInteger(usage.quantity) || usage.quantity <= 0) {
-      throw new Error('new row violates check constraint "usage_record_quantity_positive"');
-    }
-    if (usage.usage_reference.trim().length === 0) {
-      throw new Error('new row violates check constraint "usage_record_reference_present"');
-    }
     const period = this.periods.get(usage.period_id);
     if (!period) {
-      throw new Error(
-        'insert on table "usage_record" violates foreign key constraint "usage_record_period_id_fkey"',
-      );
+      // `putRow` below enforces this key from the declaration, and it is also
+      // checked here because everything between the two reads the period: a
+      // usage record is compared against the window it falls in, and an absent
+      // period leaves nothing to compare against. The wording comes from the
+      // declaration so there is still one copy of it.
+      throw new Error(foreignKeyRefusal("usage_record", "usage_record_period_id_fkey"));
     }
     if (period.status === "voided") {
       throw new Error(`period ${usage.period_id} was voided and cannot accrue usage`);
@@ -467,7 +469,8 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       }
     }
     journalMapWrite(scope, this.usage, usage.usage_id);
-    this.usage.set(usage.usage_id, usage);
+    // The three `usage_record` CHECKs and the period key, from the rules tables.
+    putRow("usage_record", this.usage, usage.usage_id, usage);
   }
 
   async findUsageByReference(

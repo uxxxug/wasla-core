@@ -81,9 +81,9 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-Nothing is reserved. The check-constraint parity cycle below closed the second
-and larger half of B-12; the next item is chosen from "Remaining, in dependency
-order".
+Nothing is reserved. The referential-integrity cycle that held this slot is
+finished and recorded below; the next actionable item is milestone 16,
+trigger-invariant parity, which nothing is holding.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -117,6 +117,8 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 13 | Uniqueness parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The gate in milestone 12 made the database assertions run; this row is about what they assert. The schema declares 24 uniqueness rules (21 `UNIQUE`, one `EXCLUDE USING gist`, three partial unique indexes — the last kind invisible to any inventory reading `pg_constraint` alone), and 11 of them were accepted in memory where Postgres refuses: both `principal` rules, `session_token_hash_key`, the membership pair, `region_country_code_code_key`, `fulfillment_move_job_reference_key`, both `legacy_id` partial indexes, and — the one that mattered most — `notification_idempotency_key_key`, where the reference store returned `false` for a genuine key collision that the adapter raises on, so two different messages claiming one identity would vanish silently in tests and fail in production. Two more refused without naming the rule, which is not evidence: "identity link already exists" does not say which constraint fired and survives a rename. Now every refusal quotes the rule Postgres quotes, every check is synchronous check-then-set over a journalled write, and `tests/uniqueness-parity.test.ts` reads `pg_constraint` and `pg_indexes` at run time and fails if the schema declares a rule with no case. 49 assertions; `docs/uniqueness-parity.md` records the inventory, the one legitimate asymmetry, and why `false` is the right refusal for a replayed relay pair and an exception is the right refusal for a key collision. Reading alone had also mis-reported the `subscription_period` rules as missing; measurement showed all three enforced and named — recorded because the correction came from running the probe, not from re-reading |
 | 14 | Check-constraint parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The uniqueness cycle closed 24 rules of one kind; this row closes the other 100. `src/platform/persistence/row-rules.ts` restates every schema `CHECK` once — 67 rules over 25 tables, built from 23 shared closed vocabularies — and `putRow` is now the only way a reference store writes a row, so a transition added later cannot forget the check. `tests/check-parity.test.ts` probes 88 of the 100 on both backends (**178 assertions**), asserts each refusal names the schema constraint, records the other 12 as unprobeable with a stated reason each, and reads `pg_constraint` at run time so a new `CHECK` cannot ship without parity. The measurement inverted the expected result: the reference store was already stricter than the database in three places, all in Postgres' favour to fix — `membership_roles_check` enforced **nothing** since 0001 (`array_length('{}',1)` is NULL, and a NULL `CHECK` passes), so a membership granting no roles was always accepted; `PgEventDeliveryStore.queue` dropped `claimed_at`, `reclaims` and `claim_token` from its insert list; `PgFulfillmentRepository` dropped both B-29 markers on `insert`, `insertIfAbsent`, `update` and `updateIfStatusIn`. Two reference-store gaps were fixed in the rules table (`fulfillment_settlement_alignment_check` was never restated in memory). Migration 0019 replaces the ineffective constraint under the same name; `docs/check-constraint-parity.md` records the inventory, the five families, the three defects and all twelve exemptions |
 | 12 | Automatic enforcement of what the suite actually claims | **Complete** | Numbered 12 because 10 (reputation) and 11 (ADR 0010) landed just before it; this row is independent of both. It exists because every milestone above it was measured by a gate that skipped every database assertion: CI had one job and set no `DATABASE_URL`, so ~290 of 657 assertions — every Postgres adapter, every trigger, every check constraint, every live-schema check — were never enforced automatically, and each cycle's "verified against Postgres" meant verified on one machine. Now two jobs: the dependency-free one, kept deliberately because it is the only proof a fresh clone can run `npm test`, and a `postgres:16` service job that applies every migration, runs the whole suite, and rolls the newest migration back and forward against a real schema — `check-migrations.mjs` only ever proved a `.down.sql` existed. Two prerequisites were fixed in the same cycle rather than worked around: worker-private databases (`tests/support/worker-database.ts`), after a genuine cross-file truncation failure was reproduced, and the migration-lifecycle files moved to their own pass, after `create`/`drop database` was timed at 0.3s idle against 51s under suite load |
+| 15 | Referential-integrity parity between the reference backend and Postgres | **Complete, and self-enforcing from here** | The third and last large family of B-12. The schema declares **30 foreign keys** across 20 child tables and exactly **one** — `usage_record_period_id_fkey` — was restated anywhere in `src/`, so the reference backend accepted a fulfillment in no tenant, a membership for no principal, a session for a principal nobody created, a notification addressed to a recipient row that was never inserted, and a webhook delivery of an envelope the outbox never recorded. `src/platform/persistence/reference-keys.ts` declares one rule per referencing column (name, child column, parent table, nullability, because `MATCH SIMPLE` makes a null reference satisfy the key) and `putRow` now calls `assertReferences` on every reference write, refusing with Postgres' own wording. Parents are found through a bundle-scoped registry that reads the stores' **live** maps, so no row is copied and no second source of truth exists. `tests/fk-parity.test.ts` probes 29 of the 30 on both backends (**63 assertions**), records the thirtieth as exempt with its reason, and holds four gates: coverage against `pg_constraint` at run time, a declaration gate comparing every rule's child column, parent table and nullability with the catalog, an assertion that the bundle resolved every parent the rules read — the design's single fail-open path, measured rather than trusted — and a reason for every exemption. Enforcement immediately falsified six passing suites: **29 failures**, all `fulfillment_organization_id_fkey` or `membership_organization_id_fkey`, because those fixtures had never created the tenant they wrote into. Fixed in the fixtures (`seedTenant`, `coreWithTenants`), not by relaxing the rule. A second finding: `session`, `plan_grant` and `usage_record` were still writing with a bare `map.set`, so the previous cycle's claim that `putRow` is the only reference write path held for 25 of 28 tables and their five `CHECK`s were duplicated inline; all three now go through `putRow` and their rules are declared in `ROW_RULES`. `docs/foreign-key-parity.md` records the inventory, the six nullable columns and what null means in each, the one weakening, the exemption, and a stale fixture comment claiming `organization` has a country foreign key when the catalog shows none |
+| 16 | Trigger-invariant parity between the reference backend and Postgres | **Not started; the next actionable item** | What is left of B-12 after uniqueness (24 rules), checks (100) and foreign keys (30): the schema installs **12 triggers**, and unlike the three declarative families a trigger can refuse a *transition* rather than a row, which is why it is last and separate. Several are already mirrored in the reference stores by hand — append-only audit, usage-record append-only, the deferred ledger-balance and period-money agreements — but nothing measures the set, and no gate reads `pg_trigger` at run time, so a migration adding a trigger ships with no parity today. The cycle is the same shape as the three before it: an inventory measured from the catalog, one declaration, enforcement on the single write path where the invariant is row-shaped and on the transition where it is not, a probe per trigger on both backends, and a coverage gate |
 
 ### What was claimed complete and actually is
 
@@ -211,8 +213,15 @@ Nothing.
 
 ## Tests that pass at this commit
 
-**488 of 488 across 31 files** with `DATABASE_URL` set (both backends), 273
-passed / 41 skipped without. Counted by running the suite at this commit, twice.
+**976 of 976 across 41 files** with `DATABASE_URL` set (both backends), plus the
+migration-lifecycle pass (1), and **529 passed / 52 skipped** without. Counted by
+running the suite at this commit, twice.
+
+The earlier figure on this line — 488 across 31 files, 273 / 41 without — was
+true when it was written and was not updated by the cycles in between, so it had
+become a stale claim about "this commit". It is replaced rather than deleted:
+the previous number is recorded here so the history of the count stays
+auditable.
 
 The per-area list below was written when the suite stood at 71 tests across 11
 files and describes those cases only; it was never extended as later cycles
@@ -4343,3 +4352,177 @@ The CI totals match the local ones exactly (913 + 1), which is what makes the
 parity file worth having: the 88 constraints it now restates in the reference
 backend are enforced by a run nobody's machine configured, on a database created
 from the migrations rather than from a developer's schema.
+
+## Cycle 2026-09-13 (third) — referential-integrity parity between the two backends
+
+### Why this was next
+
+B-12 has three large declarative families and two were closed: 24 uniqueness
+rules, then 100 check constraints. Foreign keys were the third, and the largest
+gap of the three in proportion — the schema declares **30** and `src/` restated
+**one**. Nothing above it in the dependency order was actionable: B-35/ADR 0010
+has no ADR text in the repository, B-14…B-20 and B-30…B-34 are policy decisions
+that are not CORE's to make, and B-36 is a plan limitation. So the choice was
+between this and trigger parity, and this one comes first: a trigger that
+refuses a transition is only meaningful once the rows it fires on are known to
+exist.
+
+### Measured first
+
+The live schema declares **30 `FOREIGN KEY` constraints** across 20 child
+tables. Exactly **one** name — `usage_record_period_id_fkey` — appeared anywhere
+in `src/`, and only because the period-window trigger has to read the parent row
+anyway. The other 29 were Postgres-only.
+
+What that allowed, concretely, in every memory-only test in the suite: a
+fulfillment whose `organization_id` belongs to no organization (work in no
+tenant, billable to nobody, invisible to every tenant-scoped read); a
+`membership.principal_id` with no principal (an access grant to nobody, which no
+revocation can reach); a session for a principal nobody created (a bearer token
+that authenticates as nothing); a notification naming a recipient row that was
+never inserted; an `event_delivery` naming an outbox row that does not exist — a
+signed POST of an envelope CORE never recorded, which no replay can reproduce.
+
+### A second finding, from re-reading rather than from the inventory
+
+The check-constraint cycle recorded that `putRow` is the only way a reference
+store writes a row. It was true of 25 of 28 tables. `session`, `plan_grant` and
+`usage_record` still wrote with a bare `map.set`, and their five `CHECK` rules
+were restated inline in the stores instead of declared in `ROW_RULES` — the
+duplicated truth that cycle existed to remove. Three of the 30 foreign keys
+belong to those three tables, so they could not be enforced at all until the
+writes went through one place. All three now do, their rules are declared in
+`ROW_RULES` (with a new `present()` predicate, trimmed-non-empty, kept distinct
+from `notEmpty` which is `<> ''`), and the earlier claim is corrected here by
+addition rather than by editing the earlier record.
+
+### The shape chosen, and why
+
+A rule must be able to ask whether a parent row exists, and the parents live in
+nine separate stores. Four designs were legitimate and the rejected three are
+recorded in the header of `reference-keys.ts`: per-store reader closures (a
+different wiring per store, so a missed one fails open silently), a single
+shared row table behind all stores (a rewrite of every store, and a second
+owner for rows the stores already own), and copying keys into the registry on
+write (a second source of truth that goes stale exactly when a delete happens).
+
+What shipped is one `ReferenceKeys` registry per persistence bundle, to which
+each store hands the live `Map` it already owns. The registry reads that map, so
+an existence check cannot be answered from a stale shadow. Enforcement is a
+single `assertReferences` call inside `putRow` — no call site changed — and the
+refusal quotes Postgres exactly:
+
+```
+insert or update on table "membership" violates foreign key constraint "membership_organization_id_fkey"
+```
+
+Nullability is part of each rule because `MATCH SIMPLE`, which every key here
+uses, treats a null reference as satisfying the key. Six columns are nullable
+and each means something specific by it; `docs/foreign-key-parity.md` states
+what.
+
+**The one weakening, named rather than hidden.** If no registry is attached, or
+a parent has no registered source, the rule is not evaluable and the write is
+**accepted**. It exists so a store constructed alone, outside a bundle, still
+works for tests that are not about references. Fail-open paths are how
+enforcement disappears quietly, so this one is measured: a coverage test asserts
+the bundle the application actually builds has `unresolvedParents() === []`. A
+new store that forgets to `attach` fails that test instead of merely stopping to
+refuse orphans.
+
+### What the measurement found
+
+The first full run after enforcement went live produced **29 failures** across
+six memory-only suites — `identity`, `api`, `vertical-slice`, `fulfillment`,
+`fulfillment-dispatch`, `fulfillment-settlement` — and every one of them was
+`fulfillment_organization_id_fkey` or `membership_organization_id_fkey`. Those
+fixtures had never created the tenant they were writing into. They had been
+passing for many cycles against a store that did not care, asserting behaviour
+on rows production would have refused: B-12 demonstrated rather than argued.
+
+The fix was in the fixtures, not in the rule — a `seedTenant` helper and a
+`coreWithTenants` app builder in `tests/support/`. No key was relaxed, no probe
+was skipped, no refusal was downgraded, and no gate was disabled to get back to
+green.
+
+### Proven, not assumed
+
+`tests/fk-parity.test.ts` writes, for each key, a row that is valid in every
+other respect and names a parent that does not exist, then asserts on **both**
+backends that the write is refused **and** that the refusal names the
+constraint. Naming matters: a store that refuses for an unrelated reason would
+otherwise pass, and a rename would survive the suite.
+
+Four gates keep the file from becoming a second opinion:
+
+| Gate | What it catches |
+|---|---|
+| coverage against `pg_constraint` | a migration adding a foreign key with neither a case nor a recorded reason; and a case or exemption naming a key the schema no longer has |
+| declaration vs. catalog | a rule whose child column, parent table or **nullability** disagrees with the live column, and a live key `FOREIGN_KEYS` does not declare at all |
+| `unresolvedParents() === []` | the design's single fail-open path: a store that never handed its map to the registry |
+| a reason per exemption | an exemption used as a silent excuse |
+
+The gates were falsified before being trusted. Deleting the `session` rule was
+caught twice — by the behavioural probe (memory accepted the orphan) and by the
+declaration gate (the schema declares a key `FOREIGN_KEYS` does not).
+
+### Measured after
+
+| Check | Result |
+|---|---|
+| `tests/fk-parity.test.ts` with `DATABASE_URL` | **63 passed** — 29 keys × 2 backends + 3 coverage gates + 2 live-schema gates |
+| `npm test` with `DATABASE_URL` | **976 passed in 41 files**, then migration-lifecycle **1 passed** |
+| `npm test` without a database | **529 passed, 52 skipped** |
+| `npm run typecheck` | clean |
+| governance / contracts / migrations gates | passed — 26 event schemas, 17 emitted types, 19 forward migrations, all with rollbacks |
+
+The 976 is the previous 913 plus this cycle's 63, with no test removed,
+weakened, skipped or renamed. The 32 added to the no-database run are this
+file's memory half plus its three database-free gates.
+
+### Correction to an earlier document, not an erasure
+
+`seedOrganization` in `tests/support/rows.ts` is commented "an organization with
+a country behind it, which its foreign key requires". The catalog lists **no**
+foreign key from `organization` to `country`. The fixture's extra seeding is
+harmless and the comment is wrong; it is recorded in
+`docs/foreign-key-parity.md` rather than silently deleted, because many suites
+use that fixture and the comment records what its author believed.
+
+### What this cycle did not do
+
+- **`ON DELETE` behaviour is not probed.** Only `plan_grant_plan_id_fkey` has a
+  non-default action (`CASCADE`), and the reference backend does not model
+  cascades at all. Delete-behaviour parity is separate work, not claimed here.
+- **Deferred reference checks are not handled.** Every key in the schema today
+  is immediate, which is why the probes can assert refusal at the write. A
+  future `DEFERRABLE` key breaks that assumption, and the note is in
+  `docs/foreign-key-parity.md` so the next author meets it.
+- **One key is exempt**, with its reason in `UNPROBEABLE`:
+  `ledger_entry_transaction_id_fkey`. Entries are not a row table of their own
+  in the reference backend — `insertTransaction` takes the header with its
+  entries nested — so there is no map to declare a rule against and no entry a
+  caller could point elsewhere. Postgres keeps enforcing it, and the direction a
+  caller *can* express (a transaction naming a hold that does not exist) is
+  case 13.
+- **The 12 triggers are untouched**, and are now milestone 16.
+- Branch protection is still unconfigurable on this plan, so CI remains
+  informative rather than required: **B-36**, unchanged.
+
+### CI verdict for this cycle — read from the run, not assumed
+
+Head `d495063` on `foreign-key-parity`, run `34737379147` (pull request) and
+`34737363114` (push), [PR #6](https://github.com/uxxxug/wasla-core/pull/6):
+
+| Job | Verdict | Evidence in the log |
+|---|---|---|
+| `Verify without a database` | **success**, 38s | **529 passed, 52 skipped** in 39 of 41 files, then the migration-lifecycle file **1 skipped** — the dependency-free pass still stands on its own, and typecheck, governance, contracts, migrations, roadmap freshness and the secret scan all ran |
+| `Verify against PostgreSQL` | **success**, 2m14s | **976 passed in 41 files** with `DATABASE_URL` against `postgres:16`, then the migration-lifecycle pass **1 passed** — the newest migration rolled back and re-applied against a schema built from the migrations |
+
+The CI totals match the local ones exactly (976 + 1, and 529 / 52), which is
+what makes this cycle's claim worth anything: the 29 foreign keys the reference
+backend now restates are enforced by a run nobody's machine configured, on a
+database created from the migrations rather than from a developer's schema. The
+declaration gate and the coverage gate ran there too, against that database's
+own `pg_constraint`, so the inventory in `docs/foreign-key-parity.md` is checked
+against the schema CI builds and not only the one on this machine.
