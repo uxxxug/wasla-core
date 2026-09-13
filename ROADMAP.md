@@ -81,32 +81,17 @@ orders, marketplace search, store pricing, or any product-specific UI.
 
 ## In progress
 
-**Reserved: milestone 22 — selection parity for the module read paths.** Branch
-`module-selection-parity`. Held by this reservation until the cycle closes or
-the reservation is released here.
-
-Milestone 21 gated the predicates of the three eventing queues and stopped
-there deliberately. The same argument applies to every other listing in the
-repository: the notification dispatcher (a fourth lease queue, with the same
-`order by next_attempt_at` under a limit that was not a total order in the
-first three), the money reads, the subscription plan/period/usage reads, the
-identity and membership lookups, and the organization, fulfillment and
-geography listings are each written twice — once in SQL, once in TypeScript —
-and no gate compares which rows they pick or in what order.
-
-Scope of the reservation: `tests/module-selection-parity.test.ts`, and whatever
-divergence the measurement shows in the read and claim paths of the module
-repositories on both backends. Anything outside that scope is recorded as a
-blocker rather than fixed here.
+Nothing is reserved. Milestone 22 closed with the cycle recorded below; the next
+actionable item is milestone 23 in the table.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
 
 Persistence is no longer the open question: every port has a Postgres adapter,
 the composition root can be wired to either backend, and the whole suite runs
-against both. Migrations 0001–0019 are applied and verified on real engines
+against both. Migrations 0001-0019 are applied and verified on real engines
 (PostgreSQL 18.6 locally in the latest cycle, 18.4 and 17.6 managed earlier),
-rollbacks included — 0009 and 0011 verified as *refusing* to roll back while
+rollbacks included - 0009 and 0011 verified as *refusing* to roll back while
 money history would be falsified by doing so.
 
 ## Remaining, in dependency order
@@ -138,7 +123,8 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 19 | Parity for the runtime tables no gate reached | **Complete** | The cycle that closed milestone 18 wrote that the four tables outside `ROW_RULES` are migration bookkeeping written by the runner. Re-measuring before starting the next item found that **wrong**, and the correction is additive — the sentence stands where it was written and this row records what measurement found instead. Only `schema_migrations` is not written by a store, and it is not written by the runner either: each forward migration records its own version in the same transaction as its DDL, which is stronger, and is now asserted for all 19. `inbox` is written on every consumer claim and `rate_limit_counter` on every request — the two hottest write paths in CORE — and both sat outside every gate five parity cycles built: no rules, no column shapes, and for `rate_limit_counter` **three unenforced `CHECK` constraints** that `tests/check-parity.test.ts` had recorded as unprobeable *because the reference limiter held no row*. Measured against a real Postgres before any code changed: `inbox.claim(consumer, "not-a-uuid")` was accepted in memory and refused by the database with `invalid input syntax for type uuid`; a bad `subject_kind`, a bad `rate_class` and a negative `hits` were all refused by the database and unmodelled in memory. Both reference stores are row stores now — `InMemoryInbox` writes `{consumer, event_id, received_at}` and `InMemoryRateLimitWindowStore` writes the counter's six columns, both through `putRow`, so they inherit every gate at once. Two of the three exemptions became real dual-backend probes; the third was **narrowed** to the half that is still true (no caller can express a negative count) and promoted to `declared: true` so the rule runs on the store's own writes. A third divergence surfaced on the way: `PgRateLimitWindowStore` wrote `updated_at` from the database's `now()`, the one store in CORE that told time by itself, so under a fixed clock the two backends disagreed about when a window was touched. The clock is injected now, and a database probe with a fixed clock is what keeps it that way. `tests/runtime-table-parity.test.ts` holds **12 assertions**, 4 needing a database, including a gate that parses `CREATE TABLE` out of every migration and fails when a table is neither gated nor excused, a source scan proving each exemption's reason still true, and the two rate-limit vocabularies read out of `pg_constraint` and compared with the arrays the reference limiter actually enforces. Six falsifications, six caught. `idempotency_key` — a table nothing writes — is recorded as **B-37** rather than dropped, because removing it needs a destructive migration and `scripts/check-migrations.mjs` refuses those in a forward migration on purpose |
 | 20 | Read-path parity: what a store returns, not only what it accepts | **Complete** | Six cycles gated writes; nothing gated reads, and the three divergences the previous three cycles found — `outbox.created_at`, `inbound_event.processed_at`, `rate_limit_counter.updated_at` — were each found *sideways*, by a gate built for another purpose, because a column one backend writes and no read returns is a difference nothing in the suite can observe. Two were closed by adding a name to a `SELECT_COLUMNS` string and nothing kept those strings complete. `tests/read-path-parity.test.ts` closes it in two halves that do not subsume each other. **Static:** every `select` and every `insert`/`update`/`delete … returning` in `src/` is parsed with the adapters' column-list constants expanded to a fixed point, and compared with `COLUMN_SHAPES` in both directions — an unreachable column must be declared by name with a reason, a read naming a column the schema lacks fails, and a declaration that has stopped being true fails, so the excuse list cannot rot. Of 263 columns, all but six are surfaced by some read and there are no ghosts. The six are the two runtime tables whose stores return no record at all, and the bar is that narrow deliberately: "no caller needs it yet" is how `created_at` stayed invisible for seventeen migrations. **Behavioural:** outbox, inbound, audit and `event_delivery` are written and read back through *both* backends and compared — every key path at every depth, then every value, under one fixed clock and one set of ids. The inbound probe claims and processes the row before reading it, because a probe that reads a row whose interesting column is null cannot tell a backend that surfaces the column from one that does not; with the first draft, dropping `processed_at` from the select list was caught by the static half alone. Six falsifications, six caught, including both historical divergences restored on purpose. Measured: 589/71 without a database, 1075 with one |
 | 21 | Selection parity: what a store selects *by* | **Complete** | The seventh parity cycle. Milestones 18–20 gated what a row *contains* and what a read *returns*; none of them can see a **predicate** — which rows a query picks out of many, and in which order. Every queue operation in CORE is written twice, as SQL and as TypeScript, and `claimDue` and `reclaimExpired` are where B-22, B-24 and B-25 all came from, so this is the family with the worst history here. `tests/selection-parity.test.ts` builds the same 18-row population twice — through the stores' own APIs, never by inserting behind the store's back — drives it into real states with `claimDue`/`markPublished`/`markFailed`/`markDead`, and compares the **ordered id list** of ~40 selections across both backends. Each case declares how many rows it expects and that expectation is asserted on the reference backend without a database, so a case that silently stops selecting anything fails instead of passing vacuously; every case gets a freshly built population, so the mutating selections cannot leak into each other; and a premise test proves the two backends start alike. **What it found:** `InMemoryOutbox.claimDue` did not sort at all — it walked a `Map`'s insertion order while Postgres ordered by `(next_attempt_at, created_at)`, so with one row failed and re-scheduled the two backends claimed *different rows for the same call*. All three `reclaimExpired` implementations had the same gap, and the Postgres ones ordered by `next_attempt_at` alone, which is not a total order under a limit. Fixed at the root: one shared comparator, `src/platform/eventing/queue-order.ts`, used by all three reference stores in both operations, and the same two keys spelled in the three Postgres recovery statements. A batch claim stamps one lease expiry on every row it takes, so the ordinary cases could not see recovery order at all — a staggered-lease scenario was added where the middle row is failed and re-claimed later, making due order and insertion order disagree. Seven falsifications, seven caught; F2 needed a new case first, because at every instant the existing cases claimed at, the held row's lease had not yet run out and the `claimed_at` half of the predicate was doing nothing observable. Measured: 595/114 without a database, 1125 with one |
-| 22 | Selection parity for the money, tenancy and subscription read paths | **Next actionable item** | Milestone 21 gated the predicates of the three eventing queues — the family with the worst history — and deliberately stopped there. The same argument applies to every other listing in the repository: the ledger and wallet reads, the tenancy and membership lookups, the subscription period and entitlement queries and the notification recipient fan-out are each written twice, once in SQL and once in TypeScript, and no gate compares which rows they pick or in what order. The mechanism already exists and is reusable: one population built through the stores' own APIs on both backends, an ordered id comparison per case, a per-case expected count asserted on the reference backend without a database, and a premise test. What has to be decided in that cycle: whether the money reads can be driven into their interesting states through public APIs alone, as the queues were, or whether the population needs a scenario per aggregate. Scope note from this cycle: ordering keys that are not total (an `order by` on a column with duplicates, under a limit) are a defect class in their own right, not only a parity question — three were found here, and the money reads have not been examined for them |
+| 22 | Selection parity for the module read paths | **Complete** | The eighth parity cycle, and the second to gate a predicate. `tests/module-selection-parity.test.ts` builds one population twice, through the repositories' own APIs, with **every batch inserted in the reverse of the order its listing must return** - newest-first for anything sorted by a timestamp, descending code for plans and regions, descending name for cities and areas, with deliberate ties on timestamps and names. That inversion is the measurement: a store returning insertion order now returns exactly the reverse of the right answer, and a non-total sort key now has a tie to get wrong. 37 tests: a declared row count per case asserted on the reference backend without a database, a declared order per ordered case computed from the fixture definitions rather than read back out of a store (so "both backends agree" cannot mean "both are wrong in the same way"), a cross-backend ordered-id comparison per case, a premise test, a staggered-lease recovery scenario for the notification dispatcher, and the claimed-batch order gate below. **What it found:** nineteen reference listings returned `Map` insertion order while their SQL sorted (notification x7, money x3, subscription x5, identity x3, organization, fulfillment, and all four geography listings); seven Postgres orders were not total (the five notification reads, and the subscription owner/status and usage reads), which under `notification.list`'s `limit` left the page to the plan; and - the discovery no static reading would have produced - **all four lease queues returned their claimed batch in storage order**, because `update ... returning` hands rows back in the order it updated them, not the order the `select` chose. The selection was right and the batch a worker then processed was in heap order, agreeing with due order only while rows were inserted in the order they came due, which is what every earlier fixture did; milestone 21's own gate passed for that reason. Fixed at the root: `src/platform/persistence/list-order.ts` states the doctrine once (a reference listing sorts by the same keys as its SQL, and the key list must be total, ending with the primary key), `queue-order.ts` gained the row id as a third key, and all four claims now carry the due rank out of the selection in a CTE and sort the returned batch by it - the update overwrites `next_attempt_at` with the lease expiry, so the due order cannot be recovered afterwards. Five falsifications, five caught. Full account in `docs/module-selection-parity.md`. Measured: 599/147 without a database, 1162 with one |
+| 23 | Selection parity for the HTTP read surface | **Next actionable item** | Milestones 18-22 gated the persistence layer: what a row contains, what a read returns, which rows a store selects and in what order. None of them reach the layer above. A route that pages, filters or sorts does that work in `http.ts` - `list` handlers translate query parameters into repository calls, cap limits, and in places re-sort or re-filter what they get back - and nothing compares the rows a **route** returns against the rows its store selected. The mechanism is reusable but the population is not: the inverted-insertion fixture in `tests/module-selection-parity.test.ts` proves a store's order, while a route's order also depends on parameter parsing, default limits, and tenant scoping, so the cycle has to decide whether to drive the population through the HTTP surface itself (slower, but gates the parsing too) or seed through the stores and read through the routes. Scope note from milestone 22: the defect class that cycle found - a correct selection whose *result order* is discarded by the next step - is exactly what an HTTP handler can reintroduce, by collecting a store's ordered rows into a map or a set before serialising them |
 
 ### What was claimed complete and actually is
 
@@ -5218,3 +5204,83 @@ cluster file skipped. *Verify against PostgreSQL* (`postgres:16` built from the
 `tests/migration-0011-lifecycle.test.ts` passed in CI in the same combined run
 where it is reported FAIL locally, which keeps that oddity a local-environment
 observation rather than a defect in the file.
+
+## Cycle 2026-09-13 (tenth) — selection parity for the module read paths
+
+The eighth parity cycle. Full account in `docs/module-selection-parity.md`.
+
+**Why it exists.** Milestone 21 gated the predicates of the three eventing
+queues — the family with the worst history — and deliberately stopped there.
+Every other listing in the repository is written twice in exactly the same way:
+`order by created_at, notification_id` in SQL, and
+`[...this.notifications.values()].filter(...)` in TypeScript. Those two agree
+whenever rows are inserted in the order the SQL sorts them into, which is what a
+fixture does when it seeds a population in a loop — so every existing test
+passed on both backends while the two implementations disagreed about the order
+a caller receives, and under a `limit` about which rows a caller sees at all.
+
+**What makes the population discriminate.** Every batch is inserted in the
+reverse of the order its listing must return — newest-first for timestamps,
+descending code for plans and regions, descending name for cities and service
+areas — with deliberate ties so the tiebreak is exercised rather than assumed.
+A store that returns insertion order now returns precisely the reverse of the
+right answer. Each case declares its row count, asserted on the reference
+backend without a database, and each ordered case declares the order it must
+return, computed from the fixture definitions rather than read back out of a
+store: "both backends agree" is not allowed to mean "both are wrong in the same
+way".
+
+**The divergences.** Nineteen reference listings returned `Map` insertion order
+while their SQL sorted — notification (`forEvent`, `byStatus`, `list`,
+`claimDue`, `reclaimExpired`, `recipientsFor`, `listRecipients`), money
+(`listAuthorizations`, `allAuthorizations`, `transactions`), subscription
+(`listPlans`, `listGrants`, `listSubscriptionsForOwner`,
+`listSubscriptionsByStatus`, `listUsage`), identity (`listIdentities`,
+`listLinksForIdentity`, `listMemberships`), `organization.list`,
+`fulfillment.all` and all four geography listings. Seven Postgres orders were
+not total: the five notification reads and the subscription owner/status and
+usage reads ordered by a timestamp alone, and `notification.list` takes a
+`limit`, so the tie decided the page and the plan decided the tie.
+
+**The discovery.** All four lease queues returned their claimed batch in storage
+order. The claim is `update … where id in (select … order by … limit … for
+update skip locked) returning …`: the `select` is ordered, but
+`update … returning` hands rows back in the order it updated them, which is a
+heap scan. The selection was right and the batch a worker then processed was in
+heap order — agreeing with due order only while rows were inserted in the order
+they came due, which is what every earlier fixture did. Milestone 21's own gate
+passed for that reason, and this cycle's inverted population is what made it
+visible: `notification.claimDue` returned its three rows in insertion order on
+Postgres and in due order on the reference backend.
+
+**The fixes are at the root, not per call site.**
+`src/platform/persistence/list-order.ts` states the doctrine once — a reference
+listing sorts by the same keys as its SQL, and the key list must be total,
+ending with the primary key — and `orderedBy`/`descending` are what the
+repositories use. `queue-order.ts` gained the row's own id as a third key for
+the same totality reason. All four claims now compute the due rank in a CTE,
+carry it through `returning`, and sort the returned batch by it; the rank has to
+be carried because the update overwrites `next_attempt_at` with the lease
+expiry, so afterwards the due order is gone. The window function sits in a
+second CTE because `for update` and a window function cannot share a query
+level.
+
+**Falsification.** Five breaks, five caught: the `notification.byStatus`
+reference listing back to `Map` order; the Postgres outbox claim back to plain
+`update … returning`; `notification.list`'s SQL order flipped from `desc` to
+`asc`; the `limit` dropped from the reference `notification.list`; and
+`geography.listCities` back to `Map` order. Each was restored from a backup as
+soon as the failure was observed and the suite re-measured. Not falsifiable by
+construction: a tie in the queue comparator's third key, because forcing two
+queue rows to share both `next_attempt_at` and their arrival timestamp through
+the stores' own APIs is not something the fixed clock arranges here.
+
+**Local measurement.** 599 passed / 147 skipped without a database; 1161 passed
+in the main file set and 1 in the cluster file with `DATABASE_URL` set, plus
+governance, contract and migration checks. The known
+`tests/migration-0011-lifecycle.test.ts` oddity reappeared unchanged: the file is
+reported FAIL in the combined run while its single test is reported passed, and
+it passes standalone. It is recorded rather than hidden, and CI is the judgment.
+
+**CI verdict: pending.** Recorded below once the run on this branch has
+finished.

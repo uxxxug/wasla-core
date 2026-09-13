@@ -6,6 +6,7 @@ import {
 import type { ChannelType, Identity, IdentityLink, Membership, Principal, Session } from "./domain.js";
 import type { IdentityRepository } from "./ports.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 /**
  * Reference implementation of the identity repository.
@@ -81,7 +82,7 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     putRow("identity", this.identities, identity.identity_id, identity);
   }
   async listIdentities(): Promise<Identity[]> {
-    return [...this.identities.values()];
+    return orderedBy(this.identities.values(), (i) => i.created_at, (i) => i.identity_id);
   }
 
   async insertLink(link: IdentityLink, _scope?: TransactionScope): Promise<void> {
@@ -96,7 +97,11 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     return this.links.get(this.linkKey(channelType, externalId));
   }
   async listLinksForIdentity(identityId: string): Promise<IdentityLink[]> {
-    return [...this.links.values()].filter((l) => l.identity_id === identityId);
+    return orderedBy(
+      [...this.links.values()].filter((l) => l.identity_id === identityId),
+      (l) => l.created_at,
+      (l) => l.identity_link_id,
+    );
   }
 
   async insertPrincipal(principal: Principal, _scope?: TransactionScope): Promise<void> {
@@ -164,7 +169,11 @@ export class InMemoryIdentityRepository implements IdentityRepository {
     putRow("membership", this.memberships, membership.membership_id, membership);
   }
   async listMemberships(principalId: string): Promise<Membership[]> {
-    return [...this.memberships.values()].filter((m) => m.principal_id === principalId);
+    return orderedBy(
+      [...this.memberships.values()].filter((m) => m.principal_id === principalId),
+      (m) => m.created_at,
+      (m) => m.membership_id,
+    );
   }
   async findMembership(principalId: string, organizationId: string): Promise<Membership | undefined> {
     return [...this.memberships.values()].find(

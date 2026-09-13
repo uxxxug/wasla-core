@@ -23,10 +23,13 @@
  *   - **`next_attempt_at` first**, because it is the only column that says when
  *     a row was supposed to be served. Serving the longest-overdue row first is
  *     what stops a busy queue from starving a row for ever.
- *   - **then the row's own arrival**, `created_at` or `received_at`, which is
- *     total in practice and makes the whole order deterministic. Ties in
+ *   - **then the row's own arrival**, `created_at` or `received_at`. Ties in
  *     `next_attempt_at` are not hypothetical: a batch appended in one
  *     transaction shares a timestamp to the millisecond.
+ *   - **then the row's own id**, added in milestone 22, because the first two
+ *     keys are not total either: a batch written in one transaction shares both
+ *     timestamps, and a `limit` over a non-total order leaves the tail of the
+ *     batch to the `Map` on one side and to the query plan on the other.
  *
  * The Postgres side spells the same two keys in its `order by`. Neither side is
  * allowed to rely on a natural order — a `Map`'s insertion sequence or a heap
@@ -48,10 +51,12 @@ interface DueRow {
 export function inDueOrder<T extends DueRow>(
   rows: Iterable<T>,
   arrivalOf: (row: T) => string,
+  idOf: (row: T) => string,
 ): T[] {
   return [...rows].sort(
     (left, right) =>
       left.next_attempt_at.localeCompare(right.next_attempt_at) ||
-      arrivalOf(left).localeCompare(arrivalOf(right)),
+      arrivalOf(left).localeCompare(arrivalOf(right)) ||
+      idOf(left).localeCompare(idOf(right)),
   );
 }

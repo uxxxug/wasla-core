@@ -141,17 +141,37 @@ export class PgOutbox implements OutboxStore {
    */
   async claimDue(now: Date, limit: number, leaseMs = 30_000): Promise<OutboxRecord[]> {
     const result = await this.pool.query<OutboxRow>(
-      `update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
-                         claimed_at = $1,
-                         claim_token = $4
-       where event_id in (
+      // The batch is returned in the order it was claimed.
+      //
+      // Milestone 22: the selection below has always been ordered, but
+      // `update ... returning` hands rows back in whatever order it updated
+      // them — a heap scan — so the worker processed the batch in storage
+      // order while the reference backend processed it in due order. The two
+      // agreed only while rows were inserted in the order they came due. The
+      // rank is carried out of the selection because the update overwrites
+      // `next_attempt_at` with the lease expiry, so the due order cannot be
+      // recovered afterwards.
+      `with due as (
          select event_id from outbox
          where status = 'pending' and claimed_at is null and next_attempt_at <= $1
-         order by next_attempt_at, created_at
+         order by next_attempt_at, created_at, event_id
          limit $2
          for update skip locked
+       ),
+       ranked as (
+         select d.event_id as due_id,
+                row_number() over (order by o.next_attempt_at, o.created_at, o.event_id) as due_rank
+         from due d join outbox o on o.event_id = d.event_id
+       ),
+       claimed as (
+         update outbox set next_attempt_at = $1::timestamptz + ($3::bigint * interval '1 millisecond'),
+                           claimed_at = $1,
+                           claim_token = $4
+         from ranked r
+         where outbox.event_id = r.due_id
+         returning r.due_rank as due_rank, ${SELECT_COLUMNS}
        )
-       returning ${SELECT_COLUMNS}`,
+       select ${SELECT_COLUMNS} from claimed order by due_rank`,
       // One token for this whole statement rather than per row. Two workers
       // still cannot share a claim — `for update skip locked` and `claimed_at is
       // null` see to that — and the fence only ever compares a row against the
@@ -200,7 +220,7 @@ export class PgOutbox implements OutboxStore {
          -- not a total order over rows that became due in the same millisecond,
          -- so which rows a recovery run picked was left to the plan (milestone
          -- 21). The reference backend spells the same two keys.
-         order by next_attempt_at, created_at
+         order by next_attempt_at, created_at, event_id
          limit $2
          for update skip locked
        )

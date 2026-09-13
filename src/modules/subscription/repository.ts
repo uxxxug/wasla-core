@@ -15,6 +15,7 @@ import type {
   UsageRecord,
 } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 export interface SubscriptionRepository {
   insertPlan(plan: Plan, scope: TransactionScope): Promise<void>;
@@ -164,7 +165,8 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
   }
   async listPlans(status?: PlanStatus): Promise<readonly Plan[]> {
     const all = [...this.plans.values()];
-    return status ? all.filter((plan) => plan.status === status) : all;
+    // By code, as the SQL does (milestone 22). `code` is unique, so it is total.
+    return orderedBy(status ? all.filter((plan) => plan.status === status) : all, (plan) => plan.code);
   }
 
   /**
@@ -188,7 +190,10 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
   }
 
   async listGrants(planId: string): Promise<readonly PlanGrant[]> {
-    return [...this.grants.values()].filter((grant) => grant.plan_id === planId);
+    return orderedBy(
+      [...this.grants.values()].filter((grant) => grant.plan_id === planId),
+      (grant) => grant.feature_key,
+    );
   }
   async findGrant(planId: string, featureKey: string): Promise<PlanGrant | undefined> {
     return this.grants.get(this.grantKey(planId, featureKey));
@@ -230,14 +235,22 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     ownerType: SubscriptionOwnerType,
     ownerId: string,
   ): Promise<readonly Subscription[]> {
-    return [...this.subscriptions.values()].filter(
-      (item) => item.owner_type === ownerType && item.owner_id === ownerId,
+    return orderedBy(
+      [...this.subscriptions.values()].filter(
+        (item) => item.owner_type === ownerType && item.owner_id === ownerId,
+      ),
+      (item) => item.created_at,
+      (item) => item.subscription_id,
     );
   }
   async listSubscriptionsByStatus(
     statuses: readonly SubscriptionStatus[],
   ): Promise<readonly Subscription[]> {
-    return [...this.subscriptions.values()].filter((item) => statuses.includes(item.status));
+    return orderedBy(
+      [...this.subscriptions.values()].filter((item) => statuses.includes(item.status)),
+      (item) => item.created_at,
+      (item) => item.subscription_id,
+    );
   }
 
   /**
@@ -475,6 +488,10 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
     return total;
   }
   async listUsage(periodId: string): Promise<readonly UsageRecord[]> {
-    return [...this.usage.values()].filter((item) => item.period_id === periodId);
+    return orderedBy(
+      [...this.usage.values()].filter((item) => item.period_id === periodId),
+      (item) => item.recorded_at,
+      (item) => item.usage_id,
+    );
   }
 }

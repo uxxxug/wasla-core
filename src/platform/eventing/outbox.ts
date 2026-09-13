@@ -237,7 +237,7 @@ export class InMemoryOutbox implements OutboxStore {
     // was appended first and Postgres claimed the row that was due first; under
     // a limit the two backends handed a worker different work for the same
     // call, and nothing in the suite could see it.
-    for (const record of inDueOrder(this.records.values(), (row) => row.created_at)) {
+    for (const record of inDueOrder(this.records.values(), (row) => row.created_at, (row) => row.event.event_id)) {
       if (record.status !== "pending") continue;
       if (record.claimed_at !== null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
@@ -267,7 +267,7 @@ export class InMemoryOutbox implements OutboxStore {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     // Due order, for the same reason as `claimDue`: `limit` makes the order a
     // selection, so an unordered scan recovers a different subset than Postgres.
-    for (const record of inDueOrder(this.records.values(), (row) => row.created_at)) {
+    for (const record of inDueOrder(this.records.values(), (row) => row.created_at, (row) => row.event.event_id)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;

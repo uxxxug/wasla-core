@@ -11,6 +11,7 @@ import { invalid, notFound } from "../../platform/errors.js";
 import { newId } from "../../platform/ids.js";
 import type { Organization } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 export interface OrganizationRepository {
   insert(organization: Organization, scope: TransactionScope): Promise<void>;
@@ -55,7 +56,7 @@ export class InMemoryOrganizationRepository implements OrganizationRepository {
     return this.rows.get(organizationId);
   }
   async list(): Promise<Organization[]> {
-    return [...this.rows.values()];
+    return orderedBy(this.rows.values(), (row) => row.created_at, (row) => row.organization_id);
   }
 }
 

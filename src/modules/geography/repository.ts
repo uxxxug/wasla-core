@@ -5,6 +5,7 @@ import {
 } from "../../platform/persistence/transaction.js";
 import type { City, Country, Region, ServiceArea } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 export interface GeographyRepository {
   upsertCountry(country: Country, scope: TransactionScope): Promise<void>;
@@ -47,8 +48,9 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   async getCountry(countryCode: string): Promise<Country | undefined> {
     return this.countries.get(countryCode);
   }
+  /** By code, which is what `select ... order by country_code` returns. */
   async listCountries(): Promise<readonly Country[]> {
-    return [...this.countries.values()];
+    return orderedBy(this.countries.values(), (row) => row.country_code);
   }
   /**
    * `region_country_code_code_key`: a region code is unique inside its country,
@@ -72,8 +74,12 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   async findRegion(countryCode: string, code: string): Promise<Region | undefined> {
     return [...this.regions.values()].find((row) => row.country_code === countryCode && row.code === code);
   }
+  /** By code: unique inside the country, so the order is total. */
   async listRegions(countryCode: string): Promise<readonly Region[]> {
-    return [...this.regions.values()].filter((row) => row.country_code === countryCode);
+    return orderedBy(
+      [...this.regions.values()].filter((row) => row.country_code === countryCode),
+      (row) => row.code,
+    );
   }
   async insertCity(city: City, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.cities, city.city_id);
@@ -82,8 +88,13 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   async getCity(cityId: string): Promise<City | undefined> {
     return this.cities.get(cityId);
   }
+  /** By name, then id: two cities may share a name, and the SQL says so too. */
   async listCities(regionId: string): Promise<readonly City[]> {
-    return [...this.cities.values()].filter((row) => row.region_id === regionId);
+    return orderedBy(
+      [...this.cities.values()].filter((row) => row.region_id === regionId),
+      (row) => row.name,
+      (row) => row.city_id,
+    );
   }
   async insertServiceArea(area: ServiceArea, _scope?: TransactionScope): Promise<void> {
     journalMapWrite(_scope, this.areas, area.service_area_id);
@@ -92,8 +103,13 @@ export class InMemoryGeographyRepository implements GeographyRepository {
   async getServiceArea(serviceAreaId: string): Promise<ServiceArea | undefined> {
     return this.areas.get(serviceAreaId);
   }
+  /** By name, then id, with or without the country filter. */
   async listServiceAreas(countryCode?: string): Promise<readonly ServiceArea[]> {
     const rows = [...this.areas.values()];
-    return countryCode ? rows.filter((row) => row.country_code === countryCode) : rows;
+    return orderedBy(
+      countryCode ? rows.filter((row) => row.country_code === countryCode) : rows,
+      (row) => row.name,
+      (row) => row.service_area_id,
+    );
   }
 }

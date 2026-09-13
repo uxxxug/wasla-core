@@ -37,6 +37,7 @@ import {
   requiresFinancialDecision,
 } from "./domain.js";
 import { putRow } from "../../platform/persistence/row-rules.js";
+import { orderedBy } from "../../platform/persistence/list-order.js";
 
 const PRODUCER = "wasla-core";
 
@@ -238,7 +239,7 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
     return this.byOrderReference(orderReference);
   }
   async all(): Promise<readonly Fulfillment[]> {
-    return [...this.rows.values()];
+    return orderedBy(this.rows.values(), (row) => row.created_at, (row) => row.fulfillment_id);
   }
 }
 

@@ -268,7 +268,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
     );
     // Due order with an explicit tiebreak, shared with Postgres (milestone 21).
     // Sorting by next_attempt_at alone left ties to the Map's insertion order.
-    const due = inDueOrder(candidates, (row) => row.received_at).slice(0, limit);
+    const due = inDueOrder(candidates, (row) => row.received_at, (row) => row.event.event_id).slice(0, limit);
     // The claimed records, not the pre-claim ones: Postgres returns the updated
     // rows and the two backends must not disagree about what a claim returns
     // (B-12).
@@ -293,7 +293,7 @@ export class InMemoryInboundEventStore implements InboundEventStore {
   async reclaimExpired(now: Date, maxReclaims: number, limit = 100): Promise<ReclaimOutcome> {
     const outcome: ReclaimOutcome = { reclaimed: 0, dead: 0 };
     // Due order (milestone 21): `limit` makes the order a selection.
-    for (const record of inDueOrder(this.records.values(), (row) => row.received_at)) {
+    for (const record of inDueOrder(this.records.values(), (row) => row.received_at, (row) => row.event.event_id)) {
       if (outcome.reclaimed + outcome.dead >= limit) break;
       if (record.status !== "pending" || record.claimed_at === null) continue;
       if (new Date(record.next_attempt_at).getTime() > now.getTime()) continue;
