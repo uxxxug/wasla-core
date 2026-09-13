@@ -2,6 +2,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError } from "../errors.js";
 import { newId } from "../ids.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
+import { NO_BODY, parseBody, type Body, type BodySpec } from "./body.js";
 import { parseSelection, type ParamSpec, type Selection } from "./query.js";
 import {
   rateClassFor,
@@ -25,7 +26,17 @@ export interface RequestContext {
    * open, where an unread parameter was ignored in silence.
    */
   selection: Selection;
-  body: unknown;
+  /**
+   * The body properties this route declared, already parsed.
+   *
+   * There is deliberately no raw `body` here, for the reason there is no
+   * `URLSearchParams`: milestone 25 measured a capture that took 5000 because
+   * `amount_minor` was misspelled `amountMinor` and the route read the body by
+   * hand, so an unread property was ignored in silence. A handler can only read
+   * what its registration declared; the one route entitled to the body as sent
+   * asks for it with `ctx.input.raw()` and declares `opaqueBody(reason)`.
+   */
+  input: Body;
   headers: Record<string, string | string[] | undefined>;
   correlation_id: string;
   request_id: string;
@@ -56,6 +67,11 @@ interface Route {
    * forgotten declaration must fail closed.
    */
   accepts: readonly ParamSpec[];
+  /**
+   * What this route accepts as a body. `NO_BODY` — the default — refuses every
+   * property, because a forgotten declaration must fail closed here too.
+   */
+  body: BodySpec;
 }
 
 /**
@@ -97,13 +113,20 @@ export class Router {
 
   constructor(private readonly options: RouterOptions = {}) {}
 
-  add(method: string, path: string, handler: Handler, accepts: readonly ParamSpec[] = []): void {
+  add(
+    method: string,
+    path: string,
+    handler: Handler,
+    accepts: readonly ParamSpec[] = [],
+    body: BodySpec = NO_BODY,
+  ): void {
     this.routes.push({
       method,
       template: path,
       segments: path.split("/").filter(Boolean),
       handler,
       accepts,
+      body,
     });
   }
 
@@ -134,15 +157,24 @@ export class Router {
     readonly method: string;
     readonly template: string;
     readonly accepts: readonly ParamSpec[];
+    readonly body: BodySpec;
   }[] {
     return this.routes.map((route) => ({
       method: route.method,
       template: route.template,
       accepts: route.accepts,
+      body: route.body,
     }));
   }
-  post(path: string, handler: Handler) {
-    this.add("POST", path, handler);
+  /**
+   * A write route, with what it accepts stated first.
+   *
+   * `body` is positional and not optional for the reason `accepts` is: the body
+   * is the whole of what a write route reads from its caller, and a route that
+   * reads none of it writes `NO_BODY` and says so.
+   */
+  post(path: string, body: BodySpec, handler: Handler) {
+    this.add("POST", path, handler, [], body);
   }
 
   private match(method: string, path: string): { route: Route; params: Record<string, string> } | null {
@@ -277,6 +309,7 @@ export class Router {
     }
 
     let selection: Selection;
+    let parsedBody: Body;
     try {
       // Parsed here, before the handler and after the rate limit, for the same
       // reason the limit is checked here: a request CORE cannot understand must
@@ -284,6 +317,10 @@ export class Router {
       // 400. It is inside the try/catch below in spirit — the refusal is a
       // `CoreError`, so it is rendered by exactly the same path as any other.
       selection = parseSelection(url.searchParams, matched.route.accepts);
+      // The query string first, then the body: a request with a misspelled
+      // parameter *and* a misspelled property is told about the parameter, which
+      // is what its caller reads first when constructing the request.
+      parsedBody = parseBody(input.body, matched.route.body);
     } catch (err) {
       const coreError = err instanceof CoreError ? err : new CoreError("internal", "unexpected error");
       const duration = Date.now() - started;
@@ -313,7 +350,7 @@ export class Router {
       path: url.pathname,
       params: matched.params,
       selection,
-      body: input.body ?? null,
+      input: parsedBody,
       headers,
       correlation_id: correlationId,
       request_id: requestId,

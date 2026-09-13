@@ -1,4 +1,5 @@
-import { invalid, unauthenticated } from "../../platform/errors.js";
+import { unauthenticated } from "../../platform/errors.js";
+import { objectBody } from "../../platform/http/body.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
 import { CHANNEL_TYPES } from "./domain.js";
 import type { ChannelType, Permission, Role } from "./domain.js";
@@ -13,22 +14,6 @@ const ROLES: readonly Role[] = [
   "service",
 ];
 
-function body(ctx: RequestContext): Record<string, unknown> {
-  if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
-  return ctx.body as Record<string, unknown>;
-}
-
-function str(source: Record<string, unknown>, key: string): string {
-  const value = source[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-}
-
-function channel(source: Record<string, unknown>): ChannelType {
-  const value = str(source, "channel_type");
-  if (!CHANNELS.includes(value as ChannelType)) throw invalid("unsupported channel_type", { value });
-  return value as ChannelType;
-}
 
 export function bearer(ctx: RequestContext): string {
   const header = ctx.headers["authorization"];
@@ -50,15 +35,24 @@ export async function requirePrincipal(
 
 export function registerIdentityRoutes(router: Router, identity: IdentityService): void {
   // Resolve-or-create an identity from a channel account. Idempotent by design.
-  router.post("/v1/identities", async (ctx) => {
-    const input = body(ctx);
+  router.post(
+    "/v1/identities",
+    objectBody(
+      { name: "channel_type", kind: "enum", values: CHANNELS, required: true },
+      { name: "external_id", kind: "text", required: true },
+      { name: "display_name", kind: "nullable_text" },
+      { name: "source_system", kind: "text" },
+      { name: "legacy_id", kind: "nullable_text" },
+    ),
+    async (ctx) => {
+    const sourceSystem = ctx.input.text("source_system");
     const result = await identity.registerIdentity({
-      channel_type: channel(input),
-      external_id: str(input, "external_id"),
-      display_name: typeof input["display_name"] === "string" ? input["display_name"] : null,
+      channel_type: ctx.input.requiredText("channel_type") as ChannelType,
+      external_id: ctx.input.requiredText("external_id"),
+      display_name: ctx.input.text("display_name") ?? null,
       correlation_id: ctx.correlation_id,
-      source_system: typeof input["source_system"] === "string" ? input["source_system"] : undefined,
-      legacy_id: typeof input["legacy_id"] === "string" ? input["legacy_id"] : null,
+      ...(typeof sourceSystem === "string" ? { source_system: sourceSystem } : {}),
+      legacy_id: ctx.input.text("legacy_id") ?? null,
     });
     return {
       status: result.created ? 201 : 200,
@@ -72,11 +66,16 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
   });
 
   // Issue a session for an existing principal.
-  router.post("/v1/sessions", async (ctx) => {
-    const input = body(ctx);
+  router.post(
+    "/v1/sessions",
+    objectBody(
+      { name: "principal_id", kind: "text", required: true },
+      { name: "channel_type", kind: "enum", values: CHANNELS, required: true },
+    ),
+    async (ctx) => {
     const { session, token } = await identity.issueSession({
-      principal_id: str(input, "principal_id"),
-      channel_type: channel(input),
+      principal_id: ctx.input.requiredText("principal_id"),
+      channel_type: ctx.input.requiredText("channel_type") as ChannelType,
       correlation_id: ctx.correlation_id,
     });
     return {
@@ -96,19 +95,25 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
     return { status: 200, body: actor };
   });
 
-  router.post("/v1/sessions/revoke", async (ctx) => {
-    const input = body(ctx);
-    identity.revokeSession(str(input, "session_id"), ctx.correlation_id);
+  router.post(
+    "/v1/sessions/revoke",
+    objectBody({ name: "session_id", kind: "text", required: true }),
+    async (ctx) => {
+    identity.revokeSession(ctx.input.requiredText("session_id"), ctx.correlation_id);
     return { status: 204, body: null };
   });
 
   // Service-to-service authorization probe used by MOVE and MARKET.
-  router.post("/v1/access/check", async (ctx) => {
-    const input = body(ctx);
+  router.post(
+    "/v1/access/check",
+    objectBody(
+      { name: "permission", kind: "text", required: true },
+      { name: "organization_id", kind: "text" },
+    ),
+    async (ctx) => {
     const actor = await identity.authenticate(bearer(ctx));
-    const permission = str(input, "permission") as Permission;
-    const organizationId =
-      typeof input["organization_id"] === "string" ? input["organization_id"] : undefined;
+    const permission = ctx.input.requiredText("permission") as Permission;
+    const organizationId = ctx.input.text("organization_id") ?? undefined;
     try {
       await identity.authorize(actor, permission, organizationId);
       return { status: 200, body: { allowed: true, principal_id: actor.principal_id } };
@@ -117,19 +122,18 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
     }
   });
 
-  router.post("/v1/memberships", async (ctx) => {
-    const input = body(ctx);
-    const rawRoles = input["roles"];
-    if (!Array.isArray(rawRoles) || rawRoles.length === 0) throw invalid("roles is required");
-    const roles = rawRoles.map((role) => {
-      if (typeof role !== "string" || !ROLES.includes(role as Role)) {
-        throw invalid("unsupported role", { role });
-      }
-      return role as Role;
-    });
+  router.post(
+    "/v1/memberships",
+    objectBody(
+      { name: "principal_id", kind: "text", required: true },
+      { name: "organization_id", kind: "text", required: true },
+      { name: "roles", kind: "enum_list", values: ROLES, required: true, minItems: 1 },
+    ),
+    async (ctx) => {
+    const roles = [...ctx.input.strings("roles")] as Role[];
     const membership = await identity.grantMembership({
-      principal_id: str(input, "principal_id"),
-      organization_id: str(input, "organization_id"),
+      principal_id: ctx.input.requiredText("principal_id"),
+      organization_id: ctx.input.requiredText("organization_id"),
       roles,
       correlation_id: ctx.correlation_id,
     });

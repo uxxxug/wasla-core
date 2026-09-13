@@ -155,6 +155,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 22 | Selection parity for the module read paths | **Complete** | The eighth parity cycle, and the second to gate a predicate. `tests/module-selection-parity.test.ts` builds one population twice, through the repositories' own APIs, with **every batch inserted in the reverse of the order its listing must return** - newest-first for anything sorted by a timestamp, descending code for plans and regions, descending name for cities and areas, with deliberate ties on timestamps and names. That inversion is the measurement: a store returning insertion order now returns exactly the reverse of the right answer, and a non-total sort key now has a tie to get wrong. 37 tests: a declared row count per case asserted on the reference backend without a database, a declared order per ordered case computed from the fixture definitions rather than read back out of a store (so "both backends agree" cannot mean "both are wrong in the same way"), a cross-backend ordered-id comparison per case, a premise test, a staggered-lease recovery scenario for the notification dispatcher, and the claimed-batch order gate below. **What it found:** nineteen reference listings returned `Map` insertion order while their SQL sorted (notification x7, money x3, subscription x5, identity x3, organization, fulfillment, and all four geography listings); seven Postgres orders were not total (the five notification reads, and the subscription owner/status and usage reads), which under `notification.list`'s `limit` left the page to the plan; and - the discovery no static reading would have produced - **all four lease queues returned their claimed batch in storage order**, because `update ... returning` hands rows back in the order it updated them, not the order the `select` chose. The selection was right and the batch a worker then processed was in heap order, agreeing with due order only while rows were inserted in the order they came due, which is what every earlier fixture did; milestone 21's own gate passed for that reason. Fixed at the root: `src/platform/persistence/list-order.ts` states the doctrine once (a reference listing sorts by the same keys as its SQL, and the key list must be total, ending with the primary key), `queue-order.ts` gained the row id as a third key, and all four claims now carry the due rank out of the selection in a CTE and sort the returned batch by it - the update overwrites `next_attempt_at` with the lease expiry, so the due order cannot be recovered afterwards. Five falsifications, five caught. Full account in `docs/module-selection-parity.md`. Measured: 599/147 without a database, 1162 with one |
 | 23 | Selection parity for the HTTP read surface | **Complete, and self-enforcing from here** | The ninth parity cycle and the third to gate a predicate: milestones 21 and 22 proved a **store** selects the same rows in the same order on both backends, and neither reads the layer a caller talks to. `tests/http-selection-parity.test.ts` seeds one population through the stores - several of these rows have no route that writes them - and reads it back through `core.router.handle`, the real router with real authorisation and real serialisation. **49 tests**: 19 listing cases each declaring a row count *and* an order computed from the fixture definitions rather than read out of a store, 22 refusal cases asserted on both backends, a coverage gate over the router's own `registrations()` so a `GET` added later is either measured or excused by name, and a premise test that asserts the run is comparing the halves it claims to (`["memory", "postgres"]` when `DATABASE_URL` is set), so a run that lost its Postgres half cannot report the same green count. **Five defect classes, all fixed at the root.** (1) The three platform stores returned `Map` insertion order while their SQL sorted - 7 of 11 probed listings disagreed across the backends before the fix, which is the correction to milestone 22's overclaim. (2) `SubscriptionRegistry.undelivered()` concatenated two ordered queries, so every pending delivery preceded every dead one regardless of age and **both backends were wrong in the same way** - invisible to a cross-backend comparison alone; it is one `status = any($1::text[]) order by created_at, delivery_id` query now. (3) Eight non-total SQL orders completed with a primary-key tiebreak. (4) Route parsing accepted what it then ignored: a repeated parameter kept the first value and dropped the rest, `?organization_id=` filtered on the empty string and returned a count of 0 indistinguishable from an empty tenant, and `Number()` accepted `0x10`, `1e3`, `" 5"`, `+5` and `5.0`. `src/platform/http/query.ts` is the single strict reader now and both local ad-hoc parsers are gone. (5) The discovery: **`localeCompare` matches no Postgres collation.** The local engine's databases are `C` and CI's `postgres:16` is `en_US.utf8`, so with `localeCompare` on the reference side the text order CORE produced depended on where it was deployed. `compareValues` compares code units, matching `C`, and every text order it is compared against is pinned with `collate "C"`. Ten falsifications, ten caught - two only after the **gate** was strengthened: dropping a `delivery_id` tiebreak passed until two rows shared an instant and were inserted in the opposite order to their ids, and removing a vocabulary guard passed until an *unknown* value was probed, because an unknown status had been answered with an empty page. What the cycle does not claim is recorded in `docs/http-selection-parity.md`, including the finding it declined to half-build: see milestone 24. Measured: 648/148 without a database, 1211 with one |
 | 24 | Read routes refuse only what they read | **Complete, and self-enforcing from here** | The tenth cycle in this family and the first that is not a parity cycle: nothing in it compares two backends. Milestone 23 closed the *values* a route accepts for the parameters it reads and left the *set* of parameters open, with two measurements: `GET /v1/notification-recipients?limit=abc` answered **200 with every row** because that route has no `limit`, and `?organisation_id=…` — the British spelling, or any typo — was ignored, so one tenant's question was answered with every tenant's rows. Both are the milestone 23 defect from the other end: CORE answered a question the caller did not ask and reported success. **The fix is structural, not per route**, because 23 hand-maintained lists in 23 handlers is the shape that produced the defect and a drifted list fails open. `router.get(path, accepts, handler)` takes the accepted parameters as a **required positional** argument, `add(...)` defaults to accepting nothing (fail-closed), the router parses before the handler and after the rate-limit check, refusals go through the same `CoreError` envelope as every other refusal, and — the change that makes the gate possible — **`RequestContext` carries no `URLSearchParams` at all**: `ctx.query` is gone and `ctx.selection` is the parsed result, so a handler *cannot* read an undeclared parameter. `Selection` throws rather than returning `undefined` for an undeclared name, because `undefined` would rebuild the original defect one level down. `tests/http-parameter-declaration.test.ts` — **10 tests, no database, so both CI jobs run it** — is driven off `router.registrations()` rather than a list in the test: every route of every method refuses `?__unexpected_parameter=1` by name; the 29 routes that declared nothing refuse any query string; every declared parameter is proved live by a repeat probe that fills the route's *other* parameters with valid values first; declarations are well formed (unique snake_case, non-empty vocabularies, `0 < min <= default <= max`); a source scan proves `query.ts` and `router.ts` are the only modules that touch a query string; and a **file-scoped cross-check** proves every declared name is read and every read name declared, which is the direction a liveness probe cannot see. **What it found beyond the two known cases:** comparing the declarations with `contracts/openapi/core-v1.yaml` — added to delete a second source of truth — showed `country_code` on `GET /v1/geography/service-areas/resolve` has been implemented since the geography module shipped and **appeared in no contract**, so no consumer could know a country filter existed; documented in the same commit. Nine falsifications, and F2 (a declared parameter no handler reads) **passed the first version of the gate**, which proved only that declarations are parsed — the cross-check was written in response, making this the second cycle running where a falsification passed until the gate itself was strengthened. Unknown-parameter refusal precedes authentication: deliberate, since the accepted set is published in the contract, and it keeps a request CORE cannot understand away from any store read. What it does not claim, recorded in `docs/http-parameter-declaration.md`: request **bodies** still tolerate unknown properties (strict rejection there is a breaking change for clients, unlike the query case), the cross-check is file- not handler-scoped, and `kind: "text"` carries no format so UUID-shaped parameters are still validated by the handler that knows them. Measured: 658/148 without a database, 1221 with one |
+| 25 | Write routes accept only the body they declare | **Complete** — declared bodies enforced by the router on all 29 write routes, `ctx.body` removed, 16 gate tests, nine falsifications, four undocumented request bodies found and documented; CI verdict recorded in the cycle record below | The symmetric half of milestone 24, reserved **before** any file was edited this time. Milestone 24 closed the query string and its record named the request body as a separate question; measuring the body before reserving turned that into a money defect rather than a symmetry argument. **`POST /v1/payment-authorizations/:id/capture` with `{"amountMinor": 500}` — one camelCase typo — captured 5000, the entire remaining hold, and answered 200.** The route reads `amount_minor` and treats its absence as "capture everything", which is the correct meaning of an absent amount and a catastrophic meaning for a misspelled one; `refund` has the same shape. `POST /v1/wallets` accepts `nonsense` and `CURRENCY` alongside `currency` and reports 201. Every write route hand-parses `ctx.body as Record<string, unknown>` with per-module `objectBody`/`requiredString`/`optionalString` helpers duplicated across three files, and no route refuses a property it does not read. Scope: one declared body reader owned by the platform, a per-route declaration in the registration as with `accepts`, router-enforced refusal of unknown properties, `ctx.body` removed from `RequestContext` in favour of a parsed value that throws on an undeclared read, a gate driven off `registrations()`, and a cross-check against the `requestBody` schemas in `contracts/openapi/core-v1.yaml`. **The breaking-change objection, answered rather than ignored:** milestone 24's record argued strict body rejection breaks any client sending an extra field. It does — and milestone 5 records that no external system has adopted these contracts yet, so there is no such client today and this is the cheapest moment this change will ever have. A capture that silently takes ten times what was asked is not a compatibility feature |
 
 ### What was claimed complete and actually is
 
@@ -5533,3 +5534,102 @@ measurement on an embedded PostgreSQL 18.4 in `C` exactly, in both jobs and in b
 directions. The new gate runs in *both* jobs, which is the point of it needing no
 database: the guarantee that a route refuses what it does not read is checked on
 every push, not only on the pushes that reach a database.
+
+## Cycle 2026-09-13 (thirteenth) — write routes accept only the body they declare
+
+Milestone 25, branch `http-body-declaration` cut from `main` at `ff0c49f`. Full
+account in `docs/http-body-declaration.md`. The symmetric half of milestone 24, and
+the first cycle in this family whose row was **reserved before any implementation
+file was edited** — the twelfth cycle's record promised that and this one kept it
+(reservation `6e00159`, implementation `35844bb`).
+
+**The defect.** Milestone 24 closed the query string and named the body as a
+separate open question. Measuring it first turned a symmetry argument into a money
+defect: `POST /v1/payment-authorizations/<id>/capture` with
+`{"amountMinor": 500, "capture_reference": "cap-1"}` against a 5000-minor hold
+answered **200 and captured 5000** — the whole hold, ten times what the caller
+asked for. The route reads `amount_minor` and treats its absence as "capture the
+whole remaining hold", which is the right meaning for absence, so a camelCase typo
+was indistinguishable from a request to take everything. `refund` has the same
+shape. `POST /v1/wallets` accepted `nonsense` and `CURRENCY` beside `currency` and
+answered 201; a `featureKey` typo inside a plan `grants` item was ignored, silently
+changing what a plan sells. All four are one cause: each of the 29 write routes
+hand-parsed `ctx.body as Record<string, unknown>` with helpers duplicated across
+seven files, and none refused a property it did not read.
+
+**The fix.** `src/platform/http/body.ts` owns every body reader.
+`router.post(path, body, handler)` takes the declaration positionally,
+`add()` defaults to `NO_BODY` so a forgotten declaration fails closed, the router
+parses the body before the handler runs and refuses unknown properties first with
+the accepted names in the message, and `RequestContext` carries **no raw body** —
+`ctx.input` is a `Body` that throws on an undeclared read, because `undefined` is
+exactly how a capture of 5000 looked like a capture of 500. Nested `grants` items
+are declared. Five routes declare `NO_BODY` and refuse every property while still
+accepting an absent body and `{}`. One opaque body exists, `POST /v1/events`, whose
+envelope is validated against `contracts/events/*` by `normalize.ts`; it carries a
+written reason and the gate asserts the opaque list is exactly that one route.
+Seven per-module body helpers were deleted.
+
+**The gate.** `tests/http-body-declaration.test.ts`, 16 tests, no database, driven
+off `router.registrations()`: unknown-property refusal on every write route,
+refusal before authentication, `NO_BODY` routes refusing everything and accepting
+nothing-shaped bodies, liveness and required-absence probes by field name (80+
+probes), nested refusal, the omitted-versus-null grant limit, the three measured
+defects refused while an absent capture amount is still accepted, a declared-versus-read
+cross-check in the source, well-formedness, the opaque list, a source scan proving
+no handler reads a body another way, a direct probe that `Body` throws, and a
+cross-check against every `requestBody` in `contracts/openapi/core-v1.yaml`.
+
+**What the contract cross-check found.** Four write routes —
+`POST /v1/geography/countries`, `/regions`, `/cities`, `/service-areas` — were
+documented with **no request body at all** while CORE has always required three or
+four properties each, so no integrator could have constructed those calls from the
+contract. Documented additively, matching the declarations. Same class of finding
+as milestone 24's undocumented `country_code`, from the same kind of check.
+
+**Falsification.** Nine deliberate breaks, all caught: unknown properties ignored
+(4 tests fail), a declared-but-unread field (2), a handler reading `ctx.body` again
+(1, plus `tsc`), a second opaque body (1), a declared property the contract does
+not document (2), a `NO_BODY` route accepting properties (2), an undeclared read
+returning `undefined` (1), a non-object body accepted (1), an empty enum vocabulary
+(3). F3 and F7 are each caught by a single test and that is recorded rather than
+smoothed over.
+
+**A milestone 24 gate was sharpened, not weakened.** This cycle's own source broke
+two of milestone 24's checks without containing a defect: `body.ts` explains in
+prose why there is no `URLSearchParams` and a substring scan counted the word, and
+body field specs share the `{ name, kind }` literal shape with parameter specs so a
+file-wide regex read them as unread query parameters. The scanners moved to
+`tests/support/source.ts`, are comment-blind and attribute a literal to the
+`router.get`/`router.post` call it was written in. Both gates still catch their own
+falsifications — including milestone 24's F2, re-run on the sharpened version — so
+what they assert is unchanged and only where they look is more precise.
+
+**Process note, recorded rather than tidied.** In the first falsification round a
+script reverted patches with `git checkout --` while `body.ts` and the new test
+files were untracked; the revert silently failed for the untracked file and
+silently reverted three already-migrated route modules, so three readings were
+taken against a tree missing the work. Those readings are discarded, not reported.
+The modules were re-migrated, typecheck and the full suite were re-run, and the
+implementation was committed **before** falsification was attempted again; every
+reading in the table in `docs/http-body-declaration.md` was taken with a clean tree
+and verified clean afterwards.
+
+**Local measurement.** Without `DATABASE_URL`: 674 passed / 147 skipped, plus 1
+skipped cluster test (baseline 658 / 147). With `DATABASE_URL` on an embedded
+PostgreSQL 18.4 in `C`: 1236 + 1 = **1237** passed, none skipped (baseline 1221).
+`npm run typecheck`, `check-governance.mjs`, `check-contracts.mjs`,
+`check-migrations.mjs` all pass. No existing test needed changing to accommodate
+the new strictness, which is itself a measurement: every request the suite makes
+was already made of declared properties, so these routes were strict in intent and
+loose only in enforcement.
+
+**CI verdict (the judgment, not the local run).** PR #16, run 34775704136 on
+commit `c22989e`. *Verify without a database*: **674 passed / 147 skipped** across
+49 of 51 files, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations, `en_US.utf8`): **1236 passed across 51
+files and 1 passed in the cluster file — 1237 in total**, none skipped. Both
+numbers match the local measurement on an embedded PostgreSQL 18.4 in `C` exactly,
+and both exceed the baseline by the 16 tests this cycle added. Every gate in
+`tests/http-body-declaration.test.ts` therefore passed in the environment that
+gates the merge, not only locally.

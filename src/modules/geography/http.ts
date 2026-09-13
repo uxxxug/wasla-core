@@ -1,23 +1,8 @@
-import { invalid } from "../../platform/errors.js";
-import type { RequestContext, Router } from "../../platform/http/router.js";
+import { objectBody } from "../../platform/http/body.js";
+import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { GeographyService } from "./service.js";
-
-function objectBody(ctx: RequestContext): Record<string, unknown> {
-  if (typeof ctx.body !== "object" || ctx.body === null) throw invalid("JSON object body required");
-  return ctx.body as Record<string, unknown>;
-}
-function requiredString(input: Record<string, unknown>, key: string): string {
-  const value = input[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-}
-function requiredNumber(input: Record<string, unknown>, key: string): number {
-  const value = input[key];
-  if (typeof value !== "number") throw invalid(`${key} is required`);
-  return value;
-}
 
 export function registerGeographyRoutes(
   router: Router,
@@ -61,60 +46,87 @@ export function registerGeographyRoutes(
   });
 
   // Reference writes are administrative.
-  router.post("/v1/geography/countries", async (ctx) => {
+  router.post(
+    "/v1/geography/countries",
+    objectBody(
+      { name: "country_code", kind: "text", required: true },
+      { name: "name", kind: "text", required: true },
+      { name: "default_currency", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = objectBody(ctx);
     return {
       status: 201,
       body: await geography.registerCountry({
-        country_code: requiredString(input, "country_code"),
-        name: requiredString(input, "name"),
-        default_currency: requiredString(input, "default_currency"),
+        country_code: ctx.input.requiredText("country_code"),
+        name: ctx.input.requiredText("name"),
+        default_currency: ctx.input.requiredText("default_currency"),
         correlation_id: ctx.correlation_id,
       }),
     };
   });
 
-  router.post("/v1/geography/regions", async (ctx) => {
+  router.post(
+    "/v1/geography/regions",
+    objectBody(
+      { name: "country_code", kind: "text", required: true },
+      { name: "code", kind: "text", required: true },
+      { name: "name", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = objectBody(ctx);
     return {
       status: 201,
       body: await geography.addRegion({
-        country_code: requiredString(input, "country_code"),
-        code: requiredString(input, "code"),
-        name: requiredString(input, "name"),
+        country_code: ctx.input.requiredText("country_code"),
+        code: ctx.input.requiredText("code"),
+        name: ctx.input.requiredText("name"),
         correlation_id: ctx.correlation_id,
       }),
     };
   });
 
-  router.post("/v1/geography/cities", async (ctx) => {
+  router.post(
+    "/v1/geography/cities",
+    objectBody(
+      { name: "region_id", kind: "text", required: true },
+      { name: "name", kind: "text", required: true },
+      { name: "latitude", kind: "number", required: true },
+      { name: "longitude", kind: "number", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = objectBody(ctx);
     return {
       status: 201,
       body: await geography.addCity({
-        region_id: requiredString(input, "region_id"),
-        name: requiredString(input, "name"),
-        latitude: requiredNumber(input, "latitude"),
-        longitude: requiredNumber(input, "longitude"),
+        region_id: ctx.input.requiredText("region_id"),
+        name: ctx.input.requiredText("name"),
+        latitude: ctx.input.requiredNumber("latitude"),
+        longitude: ctx.input.requiredNumber("longitude"),
         correlation_id: ctx.correlation_id,
       }),
     };
   });
 
-  router.post("/v1/geography/service-areas", async (ctx) => {
+  router.post(
+    "/v1/geography/service-areas",
+    objectBody(
+      { name: "city_id", kind: "text", required: true },
+      { name: "name", kind: "text", required: true },
+      { name: "radius_metres", kind: "number", required: true },
+      { name: "centre_latitude", kind: "number" },
+      { name: "centre_longitude", kind: "number" },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = objectBody(ctx);
-    const latitude = input["centre_latitude"];
-    const longitude = input["centre_longitude"];
+    const latitude = ctx.input.number("centre_latitude");
+    const longitude = ctx.input.number("centre_longitude");
     return {
       status: 201,
       body: await geography.defineServiceArea({
-        city_id: requiredString(input, "city_id"),
-        name: requiredString(input, "name"),
-        radius_metres: requiredNumber(input, "radius_metres"),
+        city_id: ctx.input.requiredText("city_id"),
+        name: ctx.input.requiredText("name"),
+        radius_metres: ctx.input.requiredNumber("radius_metres"),
         ...(typeof latitude === "number" ? { centre_latitude: latitude } : {}),
         ...(typeof longitude === "number" ? { centre_longitude: longitude } : {}),
         correlation_id: ctx.correlation_id,

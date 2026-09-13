@@ -1,15 +1,9 @@
-import { invalid } from "../../platform/errors.js";
+import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { NotificationStatus } from "./domain.js";
 import type { NotificationReadService, NotificationRecipientRegistry } from "./service.js";
-
-const str = (input: Record<string, unknown>, key: string): string => {
-  const value = input[key];
-  if (typeof value !== "string" || !value.trim()) throw invalid(`${key} is required`);
-  return value;
-};
 
 const STATUSES: readonly NotificationStatus[] = [
   "pending",
@@ -41,20 +35,26 @@ export function registerNotificationRoutes(
 ): void {
   // Operator-only. Deciding that a person is messaged about a tenant's events is
   // an infrastructure decision with a privacy consequence, not a tenant setting.
-  router.post("/v1/notification-recipients", async (ctx) => {
+  router.post(
+    "/v1/notification-recipients",
+    objectBody(
+      // Absent and explicit `null` both mean platform-wide, which is why this is
+      // `nullable_text` rather than optional text: `null` is a value a caller
+      // sends on purpose, and refusing it would refuse the platform-wide case.
+      { name: "organization_id", kind: "nullable_text" },
+      { name: "event_type", kind: "text", required: true },
+      { name: "identity_id", kind: "text", required: true },
+      { name: "channel", kind: "text", required: true },
+      { name: "correlation_id", kind: "text", required: true },
+    ),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = (ctx.body ?? {}) as Record<string, unknown>;
-    const organizationId = input["organization_id"];
-    if (organizationId !== null && organizationId !== undefined && typeof organizationId !== "string") {
-      throw invalid("organization_id must be a string or null");
-    }
     const created = await recipients.register({
-      // Absent and explicit null mean the same thing: platform-wide.
-      organization_id: typeof organizationId === "string" ? organizationId : null,
-      event_type: str(input, "event_type"),
-      identity_id: str(input, "identity_id"),
-      channel: str(input, "channel"),
-      correlation_id: str(input, "correlation_id"),
+      organization_id: ctx.input.text("organization_id") ?? null,
+      event_type: ctx.input.requiredText("event_type"),
+      identity_id: ctx.input.requiredText("identity_id"),
+      channel: ctx.input.requiredText("channel"),
+      correlation_id: ctx.input.requiredText("correlation_id"),
     });
     return { status: 201, body: created };
   });
@@ -72,13 +72,15 @@ export function registerNotificationRoutes(
   // Stops future events queueing for this recipient. Notifications already
   // queued stay queued: they describe something that already happened, and
   // dropping them silently is worse than sending them late.
-  router.post("/v1/notification-recipients/:recipient_id/deactivate", async (ctx) => {
+  router.post(
+    "/v1/notification-recipients/:recipient_id/deactivate",
+    objectBody({ name: "correlation_id", kind: "text", required: true }),
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
-    const input = (ctx.body ?? {}) as Record<string, unknown>;
     const updated = await recipients.setActive(
       ctx.params["recipient_id"] ?? "",
       false,
-      str(input, "correlation_id"),
+      ctx.input.requiredText("correlation_id"),
     );
     return { status: 200, body: updated };
   });
