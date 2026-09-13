@@ -2,6 +2,7 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError } from "../errors.js";
 import { newId } from "../ids.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
+import { parseSelection, type ParamSpec, type Selection } from "./query.js";
 import {
   rateClassFor,
   rateLimited,
@@ -14,7 +15,16 @@ export interface RequestContext {
   method: string;
   path: string;
   params: Record<string, string>;
-  query: URLSearchParams;
+  /**
+   * The query parameters this route declared, already parsed.
+   *
+   * There is deliberately no `URLSearchParams` here. Milestone 24 made the
+   * declaration at the registration the only description of what a route
+   * accepts, and a handler holding the raw query string could read a parameter
+   * the route never declared — which is the state milestone 23 measured and left
+   * open, where an unread parameter was ignored in silence.
+   */
+  selection: Selection;
   body: unknown;
   headers: Record<string, string | string[] | undefined>;
   correlation_id: string;
@@ -40,6 +50,12 @@ interface Route {
   template: string;
   segments: string[];
   handler: Handler;
+  /**
+   * Every query parameter this route accepts. An empty list means the route
+   * accepts none and any query string is refused — the default, because a
+   * forgotten declaration must fail closed.
+   */
+  accepts: readonly ParamSpec[];
 }
 
 /**
@@ -81,12 +97,26 @@ export class Router {
 
   constructor(private readonly options: RouterOptions = {}) {}
 
-  add(method: string, path: string, handler: Handler): void {
-    this.routes.push({ method, template: path, segments: path.split("/").filter(Boolean), handler });
+  add(method: string, path: string, handler: Handler, accepts: readonly ParamSpec[] = []): void {
+    this.routes.push({
+      method,
+      template: path,
+      segments: path.split("/").filter(Boolean),
+      handler,
+      accepts,
+    });
   }
 
-  get(path: string, handler: Handler) {
-    this.add("GET", path, handler);
+  /**
+   * A read route, with what it accepts stated first.
+   *
+   * `accepts` is positional and not optional on purpose: a `GET` is where a
+   * caller's selection is expressed, and the declaration is the route's contract
+   * with them. A route that reads nothing from the query string writes `[]`, and
+   * says so.
+   */
+  get(path: string, accepts: readonly ParamSpec[], handler: Handler) {
+    this.add("GET", path, handler, accepts);
   }
 
   /**
@@ -100,8 +130,16 @@ export class Router {
    * router turns "a new read route was added and nobody gated it" into a failing
    * test instead of a gap.
    */
-  registrations(): readonly { readonly method: string; readonly template: string }[] {
-    return this.routes.map((route) => ({ method: route.method, template: route.template }));
+  registrations(): readonly {
+    readonly method: string;
+    readonly template: string;
+    readonly accepts: readonly ParamSpec[];
+  }[] {
+    return this.routes.map((route) => ({
+      method: route.method,
+      template: route.template,
+      accepts: route.accepts,
+    }));
   }
   post(path: string, handler: Handler) {
     this.add("POST", path, handler);
@@ -238,11 +276,43 @@ export class Router {
       return result;
     }
 
+    let selection: Selection;
+    try {
+      // Parsed here, before the handler and after the rate limit, for the same
+      // reason the limit is checked here: a request CORE cannot understand must
+      // not have touched a store, an outbox or an audit entry on its way to a
+      // 400. It is inside the try/catch below in spirit — the refusal is a
+      // `CoreError`, so it is rendered by exactly the same path as any other.
+      selection = parseSelection(url.searchParams, matched.route.accepts);
+    } catch (err) {
+      const coreError = err instanceof CoreError ? err : new CoreError("internal", "unexpected error");
+      const duration = Date.now() - started;
+      this.record(
+        {
+          level: "error",
+          request_id: requestId,
+          correlation_id: correlationId,
+          method: input.method,
+          path: url.pathname,
+          status: coreError.status,
+          duration_ms: duration,
+          error_code: coreError.code,
+        },
+        routeLabel,
+        duration,
+      );
+      return {
+        status: coreError.status,
+        body: coreError.toBody(correlationId),
+        headers: { ...rateHeaders, "x-correlation-id": correlationId },
+      };
+    }
+
     const ctx: RequestContext = {
       method: input.method,
       path: url.pathname,
       params: matched.params,
-      query: url.searchParams,
+      selection,
       body: input.body ?? null,
       headers,
       correlation_id: correlationId,

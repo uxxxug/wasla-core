@@ -1,6 +1,5 @@
 import { invalid } from "../../platform/errors.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
-import { enumParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { BillingInterval, SubscriptionOwnerType } from "./domain.js";
@@ -98,13 +97,13 @@ export function registerSubscriptionRoutes(
     return { status: 201, body: { ...result.plan, grants: result.grants } };
   });
 
-  router.get("/v1/plans", async (ctx) => {
+  router.get("/v1/plans", [{ name: "status", kind: "enum", values: PLAN_STATUSES }], async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
-    const status = enumParam(ctx.query, "status", PLAN_STATUSES);
+    const status = ctx.selection.text("status") as (typeof PLAN_STATUSES)[number] | undefined;
     return { status: 200, body: { plans: await billing.listPlans(status) } };
   });
 
-  router.get("/v1/plans/:plan_id", async (ctx) => {
+  router.get("/v1/plans/:plan_id", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
     const result = await billing.getPlan(ctx.params["plan_id"] ?? "");
     return { status: 200, body: { ...result.plan, grants: result.grants } };
@@ -157,7 +156,7 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.get("/v1/subscriptions/:subscription_id", async (ctx) => {
+  router.get("/v1/subscriptions/:subscription_id", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
     const result = await billing.getSubscription(ctx.params["subscription_id"] ?? "");
     return { status: 200, body: { ...result.subscription, periods: result.periods } };

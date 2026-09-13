@@ -1,6 +1,5 @@
 import { invalid } from "../../platform/errors.js";
 import type { Router } from "../../platform/http/router.js";
-import { enumParam, limitParam, optionalParam } from "../../platform/http/query.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { IdentityService } from "../identity-access/service.js";
 import type { NotificationStatus } from "./domain.js";
@@ -60,9 +59,12 @@ export function registerNotificationRoutes(
     return { status: 201, body: created };
   });
 
-  router.get("/v1/notification-recipients", async (ctx) => {
+  router.get(
+    "/v1/notification-recipients",
+    [{ name: "organization_id", kind: "text" }],
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const organizationId = optionalParam(ctx.query, "organization_id");
+    const organizationId = ctx.selection.text("organization_id");
     const items = await recipients.list(organizationId);
     return { status: 200, body: { count: items.length, items } };
   });
@@ -87,11 +89,18 @@ export function registerNotificationRoutes(
    * `summary` carries the counts including the derived `retrying`, so the common
    * question ("is anything piling up") is one request and not five.
    */
-  router.get("/v1/notifications", async (ctx) => {
+  router.get(
+    "/v1/notifications",
+    [
+      { name: "status", kind: "enum", values: STATUSES },
+      { name: "organization_id", kind: "text" },
+      { name: "limit", kind: "limit", default: 100, min: 1, max: 500 },
+    ],
+    async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
-    const status = enumParam(ctx.query, "status", STATUSES);
-    const organizationId = optionalParam(ctx.query, "organization_id");
-    const limit = limitParam(ctx.query, "limit", { default: 100, min: 1, max: 500 });
+    const status = ctx.selection.text("status") as (typeof STATUSES)[number] | undefined;
+    const organizationId = ctx.selection.text("organization_id");
+    const limit = ctx.selection.number("limit");
     const items = await reads.list({
       ...(organizationId === undefined ? {} : { organization_id: organizationId }),
       ...(status === undefined ? {} : { status }),

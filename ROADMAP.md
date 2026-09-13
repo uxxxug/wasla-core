@@ -97,10 +97,21 @@ eight of the Postgres orders they are compared against were not total. That was
 the same defect family milestone 22 closed, in the layer milestone 22 did not
 read. Milestone 23 closed it.
 
-**Milestone 24 is open and unreserved**, and it exists because milestone 23
+**Milestone 24 is complete**, delivered on branch `http-parameter-whitelist`
+and merged into `main`; the account is in `docs/http-parameter-declaration.md`
+and the cycle record is at the end of this file. It existed because milestone 23
 measured it rather than because anybody predicted it: a query parameter no
-handler reads is still ignored silently, so `?limit=abc` on a route with no
-`limit` returns 200 and every row.
+handler read was ignored silently, so `?limit=abc` on a route with no `limit`
+returned 200 and every row.
+
+**Reservation note, recorded additively rather than tidied away.** The scope of
+milestone 24 was fixed by milestone 23's own record, and the branch was cut from
+`main` before any file was touched — but this reservation paragraph was written
+**after the implementation was drafted**, not before it, which is the order this
+file asks for. Nothing about the scope changed in between and no second agent was
+working the row, so the risk it guards against did not materialise; the sequence
+is stated here because a reservation discipline that is silently applied
+out of order is not a discipline. The next cycle reserves first.
 
 `uxxxug/wasla-core` is the working remote, pushes are fast-forward, and CI runs
 and passes there.
@@ -143,7 +154,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 21 | Selection parity: what a store selects *by* | **Complete** | The seventh parity cycle. Milestones 18–20 gated what a row *contains* and what a read *returns*; none of them can see a **predicate** — which rows a query picks out of many, and in which order. Every queue operation in CORE is written twice, as SQL and as TypeScript, and `claimDue` and `reclaimExpired` are where B-22, B-24 and B-25 all came from, so this is the family with the worst history here. `tests/selection-parity.test.ts` builds the same 18-row population twice — through the stores' own APIs, never by inserting behind the store's back — drives it into real states with `claimDue`/`markPublished`/`markFailed`/`markDead`, and compares the **ordered id list** of ~40 selections across both backends. Each case declares how many rows it expects and that expectation is asserted on the reference backend without a database, so a case that silently stops selecting anything fails instead of passing vacuously; every case gets a freshly built population, so the mutating selections cannot leak into each other; and a premise test proves the two backends start alike. **What it found:** `InMemoryOutbox.claimDue` did not sort at all — it walked a `Map`'s insertion order while Postgres ordered by `(next_attempt_at, created_at)`, so with one row failed and re-scheduled the two backends claimed *different rows for the same call*. All three `reclaimExpired` implementations had the same gap, and the Postgres ones ordered by `next_attempt_at` alone, which is not a total order under a limit. Fixed at the root: one shared comparator, `src/platform/eventing/queue-order.ts`, used by all three reference stores in both operations, and the same two keys spelled in the three Postgres recovery statements. A batch claim stamps one lease expiry on every row it takes, so the ordinary cases could not see recovery order at all — a staggered-lease scenario was added where the middle row is failed and re-claimed later, making due order and insertion order disagree. Seven falsifications, seven caught; F2 needed a new case first, because at every instant the existing cases claimed at, the held row's lease had not yet run out and the `claimed_at` half of the predicate was doing nothing observable. Measured: 595/114 without a database, 1125 with one |
 | 22 | Selection parity for the module read paths | **Complete** | The eighth parity cycle, and the second to gate a predicate. `tests/module-selection-parity.test.ts` builds one population twice, through the repositories' own APIs, with **every batch inserted in the reverse of the order its listing must return** - newest-first for anything sorted by a timestamp, descending code for plans and regions, descending name for cities and areas, with deliberate ties on timestamps and names. That inversion is the measurement: a store returning insertion order now returns exactly the reverse of the right answer, and a non-total sort key now has a tie to get wrong. 37 tests: a declared row count per case asserted on the reference backend without a database, a declared order per ordered case computed from the fixture definitions rather than read back out of a store (so "both backends agree" cannot mean "both are wrong in the same way"), a cross-backend ordered-id comparison per case, a premise test, a staggered-lease recovery scenario for the notification dispatcher, and the claimed-batch order gate below. **What it found:** nineteen reference listings returned `Map` insertion order while their SQL sorted (notification x7, money x3, subscription x5, identity x3, organization, fulfillment, and all four geography listings); seven Postgres orders were not total (the five notification reads, and the subscription owner/status and usage reads), which under `notification.list`'s `limit` left the page to the plan; and - the discovery no static reading would have produced - **all four lease queues returned their claimed batch in storage order**, because `update ... returning` hands rows back in the order it updated them, not the order the `select` chose. The selection was right and the batch a worker then processed was in heap order, agreeing with due order only while rows were inserted in the order they came due, which is what every earlier fixture did; milestone 21's own gate passed for that reason. Fixed at the root: `src/platform/persistence/list-order.ts` states the doctrine once (a reference listing sorts by the same keys as its SQL, and the key list must be total, ending with the primary key), `queue-order.ts` gained the row id as a third key, and all four claims now carry the due rank out of the selection in a CTE and sort the returned batch by it - the update overwrites `next_attempt_at` with the lease expiry, so the due order cannot be recovered afterwards. Five falsifications, five caught. Full account in `docs/module-selection-parity.md`. Measured: 599/147 without a database, 1162 with one |
 | 23 | Selection parity for the HTTP read surface | **Complete, and self-enforcing from here** | The ninth parity cycle and the third to gate a predicate: milestones 21 and 22 proved a **store** selects the same rows in the same order on both backends, and neither reads the layer a caller talks to. `tests/http-selection-parity.test.ts` seeds one population through the stores - several of these rows have no route that writes them - and reads it back through `core.router.handle`, the real router with real authorisation and real serialisation. **49 tests**: 19 listing cases each declaring a row count *and* an order computed from the fixture definitions rather than read out of a store, 22 refusal cases asserted on both backends, a coverage gate over the router's own `registrations()` so a `GET` added later is either measured or excused by name, and a premise test that asserts the run is comparing the halves it claims to (`["memory", "postgres"]` when `DATABASE_URL` is set), so a run that lost its Postgres half cannot report the same green count. **Five defect classes, all fixed at the root.** (1) The three platform stores returned `Map` insertion order while their SQL sorted - 7 of 11 probed listings disagreed across the backends before the fix, which is the correction to milestone 22's overclaim. (2) `SubscriptionRegistry.undelivered()` concatenated two ordered queries, so every pending delivery preceded every dead one regardless of age and **both backends were wrong in the same way** - invisible to a cross-backend comparison alone; it is one `status = any($1::text[]) order by created_at, delivery_id` query now. (3) Eight non-total SQL orders completed with a primary-key tiebreak. (4) Route parsing accepted what it then ignored: a repeated parameter kept the first value and dropped the rest, `?organization_id=` filtered on the empty string and returned a count of 0 indistinguishable from an empty tenant, and `Number()` accepted `0x10`, `1e3`, `" 5"`, `+5` and `5.0`. `src/platform/http/query.ts` is the single strict reader now and both local ad-hoc parsers are gone. (5) The discovery: **`localeCompare` matches no Postgres collation.** The local engine's databases are `C` and CI's `postgres:16` is `en_US.utf8`, so with `localeCompare` on the reference side the text order CORE produced depended on where it was deployed. `compareValues` compares code units, matching `C`, and every text order it is compared against is pinned with `collate "C"`. Ten falsifications, ten caught - two only after the **gate** was strengthened: dropping a `delivery_id` tiebreak passed until two rows shared an instant and were inserted in the opposite order to their ids, and removing a vocabulary guard passed until an *unknown* value was probed, because an unknown status had been answered with an empty page. What the cycle does not claim is recorded in `docs/http-selection-parity.md`, including the finding it declined to half-build: see milestone 24. Measured: 648/148 without a database, 1211 with one |
-| 24 | Read routes refuse only what they read | **Open, measured but not started** | Milestone 23 found this while strengthening its own refusal list, and left it deliberately: a query parameter no handler reads is ignored silently. `GET /v1/notification-recipients?limit=abc` returns 200 and every row, because that route has no `limit` and nothing rejects a parameter nobody read - a caller who believes they bounded the response gets everything, and a caller who misspells `organization_id` gets another tenant's scope-free answer rather than a 400. Milestone 23 closed the *values* a route accepts for the parameters it does read; this closes the *set* of parameters. It is a change to what every read route is permitted to accept, which is why it was not folded into a cycle scoped to selection: it needs a per-route declaration of allowed parameters, a strict reader that refuses anything outside it, and a coverage gate asserting every registered `GET` has such a declaration - the same shape as milestone 23's `registrations()` gate, one level down. The prerequisite is already in place: every read route now reads its parameters through `src/platform/http/query.ts`, so there is exactly one place the check belongs |
+| 24 | Read routes refuse only what they read | **Complete, and self-enforcing from here** | The tenth cycle in this family and the first that is not a parity cycle: nothing in it compares two backends. Milestone 23 closed the *values* a route accepts for the parameters it reads and left the *set* of parameters open, with two measurements: `GET /v1/notification-recipients?limit=abc` answered **200 with every row** because that route has no `limit`, and `?organisation_id=…` — the British spelling, or any typo — was ignored, so one tenant's question was answered with every tenant's rows. Both are the milestone 23 defect from the other end: CORE answered a question the caller did not ask and reported success. **The fix is structural, not per route**, because 23 hand-maintained lists in 23 handlers is the shape that produced the defect and a drifted list fails open. `router.get(path, accepts, handler)` takes the accepted parameters as a **required positional** argument, `add(...)` defaults to accepting nothing (fail-closed), the router parses before the handler and after the rate-limit check, refusals go through the same `CoreError` envelope as every other refusal, and — the change that makes the gate possible — **`RequestContext` carries no `URLSearchParams` at all**: `ctx.query` is gone and `ctx.selection` is the parsed result, so a handler *cannot* read an undeclared parameter. `Selection` throws rather than returning `undefined` for an undeclared name, because `undefined` would rebuild the original defect one level down. `tests/http-parameter-declaration.test.ts` — **10 tests, no database, so both CI jobs run it** — is driven off `router.registrations()` rather than a list in the test: every route of every method refuses `?__unexpected_parameter=1` by name; the 29 routes that declared nothing refuse any query string; every declared parameter is proved live by a repeat probe that fills the route's *other* parameters with valid values first; declarations are well formed (unique snake_case, non-empty vocabularies, `0 < min <= default <= max`); a source scan proves `query.ts` and `router.ts` are the only modules that touch a query string; and a **file-scoped cross-check** proves every declared name is read and every read name declared, which is the direction a liveness probe cannot see. **What it found beyond the two known cases:** comparing the declarations with `contracts/openapi/core-v1.yaml` — added to delete a second source of truth — showed `country_code` on `GET /v1/geography/service-areas/resolve` has been implemented since the geography module shipped and **appeared in no contract**, so no consumer could know a country filter existed; documented in the same commit. Nine falsifications, and F2 (a declared parameter no handler reads) **passed the first version of the gate**, which proved only that declarations are parsed — the cross-check was written in response, making this the second cycle running where a falsification passed until the gate itself was strengthened. Unknown-parameter refusal precedes authentication: deliberate, since the accepted set is published in the contract, and it keeps a request CORE cannot understand away from any store read. What it does not claim, recorded in `docs/http-parameter-declaration.md`: request **bodies** still tolerate unknown properties (strict rejection there is a breaking change for clients, unlike the query case), the cross-check is file- not handler-scoped, and `kind: "text"` carries no format so UUID-shaped parameters are still validated by the handler that knows them. Measured: 658/148 without a database, 1221 with one |
 
 ### What was claimed complete and actually is
 
@@ -5410,3 +5421,105 @@ itself the check on defect class 5: before this cycle the two environments'
 collations differed and the reference comparator matched neither, so equal counts
 across them is the first run where text order was not a property of the machine.
 `tests/migration-0011-lifecycle.test.ts` passed in CI, as it always has.
+
+## Cycle 2026-09-13 (twelfth) — read routes refuse only what they read
+
+Milestone 24, branch `http-parameter-whitelist` cut from `main` at `958b508`. Full
+account in `docs/http-parameter-declaration.md`. The tenth cycle in the parity
+family and the first that is **not** a parity cycle: nothing in it compares two
+backends, because the defect is above the persistence layer entirely.
+
+**Order of work, stated plainly.** The branch was cut from `main` before any file
+changed, and the scope was fixed by milestone 23's own record rather than chosen
+here — but the reservation paragraph near the top of this file was written *after*
+the implementation was drafted, which is not the order this file asks for. Nothing
+about the scope moved in between and nothing else was working the row, so the risk
+did not materialise. It is recorded rather than tidied, and the next cycle reserves
+before it edits.
+
+**The defect.** A query parameter no handler reads was ignored in silence.
+`GET /v1/notification-recipients?limit=abc` answered 200 with every row — that
+route has no `limit`, so a caller who believed they had bounded the response got
+the whole table with a success status. `?organisation_id=…`, the British spelling
+or any typo, was ignored and the unscoped answer came back as though it had been
+asked for. Milestone 23 spent a cycle on CORE answering a question with the wrong
+*value*; this is CORE answering a question the caller **did not ask** and calling
+it success.
+
+**Why it is one structural change and not 23 small ones.** A per-handler list of
+unwanted parameters is the shape that produced the defect: it must be edited
+whenever a parameter changes, nothing checks it, and when it drifts it fails
+**open** — the parameter is accepted and ignored, exactly as before. So the
+declaration moved into the registration and the enforcement into the router.
+`router.get(path, accepts, handler)` takes the accepted set as a required
+positional argument; `add(method, path, handler, accepts = [])` defaults to
+accepting nothing, so the fail-closed direction is the default one; the parse runs
+after the rate-limit check and before the handler; and refusals render through the
+same `CoreError` path as every other refusal in CORE.
+
+The load-bearing part is a deletion: **`RequestContext` no longer carries a
+`URLSearchParams`.** `ctx.query` is gone and `ctx.selection` is the parsed result,
+so a handler cannot read an undeclared parameter because there is nothing left to
+read it from — and there is no second way in for the gate to have to police.
+`Selection` throws on an undeclared name rather than returning `undefined`, since
+`undefined` would rebuild the original defect one level down: a handler reading
+`limit` from a route that never declared one would see "not sent" for ever.
+
+**Ordering of the refusal.** Unknown-parameter refusal precedes authentication.
+Deliberate: the accepted set is published in `contracts/openapi/core-v1.yaml`, so
+the message discloses nothing a reader of the contract lacks, and in exchange a
+request CORE cannot understand never reaches a store — authentication is a store
+read. The refusal body is pinned to exactly `code`, `message`, `details`,
+`retryable`, `correlation_id`: the parameter names and the trace id, nothing drawn
+from data.
+
+**The gate.** `tests/http-parameter-declaration.test.ts`, 10 tests, **no
+database**, so both CI jobs run it. Driven off `router.registrations()`, never off
+a list maintained in the test. A premise test first (≥ 52 routes, ≥ 23 `GET`s, at
+least one route with parameters and one without), then: unknown-parameter refusal
+on every route of every method, naming the parameter; the 29 no-parameter routes
+refusing any query string at all; a liveness probe per declared parameter that
+fills the route's *other* parameters with valid values first, because a route with
+two required parameters would otherwise refuse the missing one and prove nothing
+about this one; well-formedness (unique snake_case, non-empty duplicate-free
+vocabularies, `0 < min <= default <= max`); a source scan proving `query.ts` and
+`router.ts` are the only modules that touch a query string; a file-scoped
+cross-check that every declared name is read and every read name declared; the
+contract comparison; and a direct probe of `Selection`.
+
+**What it found beyond the two known cases.** Comparing the declarations with the
+published contract — added to delete a second source of truth with an external
+audience — found that **`country_code` on `GET /v1/geography/service-areas/resolve`
+has been implemented since the geography module shipped and appeared in no
+contract**. No consumer reading `core-v1.yaml` could know a country filter existed.
+Documented in the same commit, with the parameter description recording what found
+it. Every other route agreed exactly, and every registered `GET` is in the
+contract.
+
+**Falsification: nine defects, and one that got through.** F2 — a route declaring
+a parameter no handler reads — **passed the first version of the gate**, because
+that version proved only that a declared parameter is *parsed*, which decoration
+satisfies perfectly. The declared-vs-read cross-check was written in response, and
+F2 and F7 (a handler reading an undeclared name) were then both caught. This is
+the second cycle running in which a falsification survived until the gate itself
+was strengthened; the pattern is that a gate written from the implementation
+asserts what the implementation happens to do. F9 falsified the contract parser
+itself — its path regex made to match nothing — and the premise assertion caught
+it, which is the reason that assertion is there.
+
+**Local measurement.** 658 passed / 147 skipped without a database (plus 1 skipped
+in the cluster file, so 148); 1220 passed across 50 files and 1 in the cluster file
+with `DATABASE_URL` set — **1221 in total**, against a baseline of 1211, and the 10
+new tests account for the difference exactly, so nothing regressed. No existing
+test changed behaviour despite `ctx.query` being removed from every route in the
+repository. Typecheck, governance, contract and migration checks all clean.
+
+**What this cycle does not claim.** No parity claim of any kind. Request **bodies**
+still tolerate unknown properties, and that is a different question rather than a
+smaller one: strict body rejection breaks any client sending an extra field,
+whereas nothing legitimate was ever sending an undeclared query parameter. The
+declared-vs-read cross-check is file-scoped, not handler-scoped, because
+`reputation/http.ts` reads `organization_id` in a helper shared by two routes.
+`kind: "text"` carries no format, so a parameter that must be a UUID is still
+validated by the handler that knows it — pushing formats into the declaration would
+grow a second schema language next to the contract.

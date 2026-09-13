@@ -107,3 +107,129 @@ export function decimalParam(query: URLSearchParams, key: string): number {
   if (!Number.isFinite(value)) throw invalid(`${key} must be a decimal number`);
   return value;
 }
+
+/**
+ * What a route accepts, declared where the route is registered.
+ *
+ * Milestone 23 closed the *values* a route accepts for the parameters it reads.
+ * It measured, and deliberately left, the other half: a parameter no handler
+ * reads was ignored in silence. `GET /v1/notification-recipients?limit=abc`
+ * answered 200 with every row, because that route has no `limit` — so a caller
+ * who believed they had bounded the response got everything, and a caller who
+ * misspelled `organization_id` got an unscoped answer instead of a 400. Ignoring
+ * a parameter is the same substitution as ignoring a repeated value: CORE
+ * answers a question the caller did not ask and reports success.
+ *
+ * A `ParamSpec` is the whole truth about one parameter — its name, how it is
+ * read, and its bounds or its vocabulary. The router parses the specs before the
+ * handler runs and hands the handler a `Selection`; a parameter the route did not
+ * declare is refused, and a parameter the route declared is the only thing a
+ * handler can read. There is no second place to keep in step, because there is no
+ * other way in: `RequestContext` carries no `URLSearchParams` at all.
+ */
+export type ParamSpec =
+  | { readonly name: string; readonly kind: "text"; readonly required?: boolean }
+  | {
+      readonly name: string;
+      readonly kind: "enum";
+      readonly values: readonly string[];
+      readonly required?: boolean;
+    }
+  | {
+      readonly name: string;
+      readonly kind: "limit";
+      readonly default: number;
+      readonly min: number;
+      readonly max: number;
+    }
+  | { readonly name: string; readonly kind: "decimal"; readonly required?: boolean };
+
+/**
+ * The parsed parameters of one request.
+ *
+ * Reading a name the route did not declare is a programming error, not a caller
+ * error, so it throws rather than returning `undefined`: a handler that reads
+ * `limit` from a route which never declared one would otherwise silently see
+ * "not sent" forever, which is the defect this class exists to remove.
+ */
+export class Selection {
+  constructor(private readonly values: ReadonlyMap<string, string | number | undefined>) {}
+
+  private read(name: string): string | number | undefined {
+    if (!this.values.has(name)) {
+      throw new Error(`route did not declare the query parameter ${name}`);
+    }
+    return this.values.get(name);
+  }
+
+  /** A declared optional text parameter. */
+  text(name: string): string | undefined {
+    const value = this.read(name);
+    return value === undefined ? undefined : String(value);
+  }
+
+  /** A declared required parameter; the router has already refused its absence. */
+  requiredText(name: string): string {
+    const value = this.text(name);
+    if (value === undefined) throw invalid(`${name} is required`);
+    return value;
+  }
+
+  /** A declared numeric parameter (`limit` or `decimal`). */
+  number(name: string): number {
+    const value = this.read(name);
+    if (typeof value !== "number") throw invalid(`${name} is required`);
+    return value;
+  }
+
+  /** The declared names, for the gate. */
+  names(): readonly string[] {
+    return [...this.values.keys()];
+  }
+}
+
+/**
+ * Parse a request's query string against what the route declared.
+ *
+ * Unknown parameters are refused first and named, before any declared parameter
+ * is parsed, so a request with both a typo and a bad limit is told about the typo
+ * — the more likely cause of the other complaint.
+ */
+export function parseSelection(query: URLSearchParams, specs: readonly ParamSpec[]): Selection {
+  const declared = new Set(specs.map((spec) => spec.name));
+  const unknown = [...new Set(query.keys())].filter((key) => !declared.has(key)).sort();
+  if (unknown.length > 0) {
+    throw invalid(
+      `unknown query parameter${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}` +
+        (declared.size > 0
+          ? ` (this route accepts ${[...declared].sort().join(", ")})`
+          : " (this route accepts none)"),
+    );
+  }
+  const values = new Map<string, string | number | undefined>();
+  for (const spec of specs) {
+    switch (spec.kind) {
+      case "text":
+        values.set(spec.name, spec.required ? requiredParam(query, spec.name) : optionalParam(query, spec.name));
+        break;
+      case "enum": {
+        const value = enumParam(query, spec.name, spec.values);
+        if (spec.required && value === undefined) throw invalid(`${spec.name} is required`);
+        values.set(spec.name, value);
+        break;
+      }
+      case "limit":
+        values.set(spec.name, limitParam(query, spec.name, spec));
+        break;
+      case "decimal": {
+        if (spec.required === false && optionalParam(query, spec.name) === undefined) {
+          values.set(spec.name, undefined);
+          break;
+        }
+        values.set(spec.name, decimalParam(query, spec.name));
+        break;
+      }
+    }
+  }
+  return new Selection(values);
+}

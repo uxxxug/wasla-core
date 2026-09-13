@@ -341,8 +341,8 @@ export function createCoreApp(
           options.rateLimitPolicy ?? DEFAULT_RATE_LIMIT_POLICY,
         );
   const router = new Router({ metrics, rateLimiter });
-  router.get("/health", () => ({ status: 200, body: { status: "ok" } }));
-  router.get("/ready", async () => ({
+  router.get("/health", [], () => ({ status: 200, body: { status: "ok" } }));
+  router.get("/ready", [], async () => ({
     status: 200,
     body: {
       status: "ready",

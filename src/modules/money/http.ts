@@ -52,7 +52,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
     return { status: result.created ? 201 : 200, body: result.wallet };
   });
 
-  router.get("/v1/wallets/:wallet_id/balance", async (ctx) => {
+  router.get("/v1/wallets/:wallet_id/balance", [], async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     return { status: 200, body: await money.balance(ctx.params["wallet_id"] ?? "") };
   });

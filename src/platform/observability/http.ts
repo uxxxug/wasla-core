@@ -31,7 +31,7 @@ import type { MetricsRegistry } from "./metrics.js";
  * and CORE's deployment topology is still an external dependency (B-5).
  */
 export function registerMetricsRoutes(router: Router, registry: MetricsRegistry): void {
-  router.get("/metrics", async () => ({
+  router.get("/metrics", [], async () => ({
     status: 200,
     // A string body: the router's Node adapter writes strings verbatim with the
     // Prometheus content type instead of JSON-encoding them.
