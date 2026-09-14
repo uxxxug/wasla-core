@@ -299,7 +299,34 @@ paths:
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       summary: Create an organization (tenant)
+      description: >
+        An organization is identified by the id CORE mints and by nothing
+        else: two organizations may share a name and a country, so a repeat of
+        this call creates a second tenant that no later read can tell from the
+        first. Measured on main at bd92b69, it did exactly that.
+
+
+        Retry safety, milestone 32. This route has no natural key that would
+        make a repeat harmless, so it requires an `Idempotency-Key` header: a
+        caller-chosen identifier, letters, digits and `. _ : -`, at most 128
+        characters. **This is a breaking change** — a request without the
+        header is refused with 400 `invalid_request`, and before milestone 32
+        the header was ignored.
+
+
+        CORE records this route's answer under the key together with a
+        fingerprint of the request (its method, its route template and its
+        parsed body). Sending the same key again with the same body returns the
+        recorded status and body unchanged, with `idempotent-replay: true`, and
+        creates nothing. Sending the same key with a different body is refused
+        with 409 `conflict`, because the caller would otherwise be told a
+        request it never made had succeeded. A refusal is never recorded, so a
+        request rejected as invalid may be corrected and sent again under the
+        same key. A record is replayed for 24 hours; after that the key is free
+        again. The key is scoped to this route, so the same string used on a
+        different route is a different record.
       requestBody:
         required: true
         content:
@@ -319,11 +346,13 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+            idempotent-replay: { $ref: "#/components/headers/IdempotentReplay" }
           description: Created
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Organization" }
         "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/KeyReused" }
   /v1/organizations/{organization_id}:
     get:
       summary: Read an organization the caller belongs to
@@ -757,6 +786,7 @@ paths:
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       summary: Subscribe an owner to an active plan and open its first period
       description: >
         The subscription and its first period are committed first, and the
@@ -767,6 +797,35 @@ paths:
         returns 201, with collected false and the subscription past_due. The
         wallet must exist, must belong to the same owner, and must hold the
         plan's currency - CORE does not convert.
+
+
+        A subscription is the most expensive duplicate CORE can make: a repeat
+        of this call creates a second subscription on the same plan and the
+        same wallet, and therefore a second recurring charge. Measured on main
+        at bd92b69 a byte-identical repeat added a second subscription, a
+        second period, a second payment authorization and a second ledger
+        transaction.
+
+
+        Retry safety, milestone 32. This route has no natural key that would
+        make a repeat harmless, so it requires an `Idempotency-Key` header: a
+        caller-chosen identifier, letters, digits and `. _ : -`, at most 128
+        characters. **This is a breaking change** — a request without the
+        header is refused with 400 `invalid_request`, and before milestone 32
+        the header was ignored.
+
+
+        CORE records this route's answer under the key together with a
+        fingerprint of the request (its method, its route template and its
+        parsed body). Sending the same key again with the same body returns the
+        recorded status and body unchanged, with `idempotent-replay: true`, and
+        creates nothing. Sending the same key with a different body is refused
+        with 409 `conflict`, because the caller would otherwise be told a
+        request it never made had succeeded. A refusal is never recorded, so a
+        request rejected as invalid may be corrected and sent again under the
+        same key. A record is replayed for 24 hours; after that the key is free
+        again. The key is scoped to this route, so the same string used on a
+        different route is a different record.
       requestBody:
         required: true
         content:
@@ -789,6 +848,7 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+            idempotent-replay: { $ref: "#/components/headers/IdempotentReplay" }
           description: Subscription created with its first period. collected reports whether the first charge was collected; false leaves the subscription past_due and the period retryable.
           content:
             application/json:
@@ -803,7 +863,7 @@ paths:
                       uncollectible_reason: { type: string, nullable: true }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/KeyReused" }
 
   /v1/subscriptions/{subscription_id}:
     get:
@@ -1001,12 +1061,43 @@ paths:
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       summary: Register a reference country
       description: >
         The request body was undocumented until milestone 25, which declared what
         every write route accepts and cross-checked the declarations against this
         file. CORE has always required these three properties; only the contract
         was silent.
+
+
+        A country is keyed by the code the caller sends, and the repository
+        upserts it: measured on main at bd92b69 a repeat wrote no second row —
+        it overwrote the existing one. That is the failure this key prevents,
+        from the other side: without it the second call to arrive silently
+        decides the country's name and default currency, and a caller retrying
+        a call whose answer it never saw cannot tell that from having been
+        first.
+
+
+        Retry safety, milestone 32. This route has no natural key that would
+        make a repeat harmless, so it requires an `Idempotency-Key` header: a
+        caller-chosen identifier, letters, digits and `. _ : -`, at most 128
+        characters. **This is a breaking change** — a request without the
+        header is refused with 400 `invalid_request`, and before milestone 32
+        the header was ignored.
+
+
+        CORE records this route's answer under the key together with a
+        fingerprint of the request (its method, its route template and its
+        parsed body). Sending the same key again with the same body returns the
+        recorded status and body unchanged, with `idempotent-replay: true`, and
+        creates nothing. Sending the same key with a different body is refused
+        with 409 `conflict`, because the caller would otherwise be told a
+        request it never made had succeeded. A refusal is never recorded, so a
+        request rejected as invalid may be corrected and sent again under the
+        same key. A record is replayed for 24 hours; after that the key is free
+        again. The key is scoped to this route, so the same string used on a
+        different route is a different record.
       requestBody:
         required: true
         content:
@@ -1027,11 +1118,12 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+            idempotent-replay: { $ref: "#/components/headers/IdempotentReplay" }
           description: Country registered
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Country" }
-        "409": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/KeyReused" }
   /v1/geography/countries/{country_code}/regions:
     get:
       summary: List regions of a country
@@ -1121,7 +1213,34 @@ paths:
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       summary: Register a reference city
+      description: >
+        A city has no natural key at all — two cities may share a name inside
+        one region — so a repeat of this call creates a second row that nothing
+        can tell from the first. Measured on main at bd92b69, it did exactly
+        that, while the region route beside it deduplicated.
+
+
+        Retry safety, milestone 32. This route has no natural key that would
+        make a repeat harmless, so it requires an `Idempotency-Key` header: a
+        caller-chosen identifier, letters, digits and `. _ : -`, at most 128
+        characters. **This is a breaking change** — a request without the
+        header is refused with 400 `invalid_request`, and before milestone 32
+        the header was ignored.
+
+
+        CORE records this route's answer under the key together with a
+        fingerprint of the request (its method, its route template and its
+        parsed body). Sending the same key again with the same body returns the
+        recorded status and body unchanged, with `idempotent-replay: true`, and
+        creates nothing. Sending the same key with a different body is refused
+        with 409 `conflict`, because the caller would otherwise be told a
+        request it never made had succeeded. A refusal is never recorded, so a
+        request rejected as invalid may be corrected and sent again under the
+        same key. A record is replayed for 24 hours; after that the key is free
+        again. The key is scoped to this route, so the same string used on a
+        different route is a different record.
       requestBody:
         required: true
         content:
@@ -1143,18 +1262,48 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+            idempotent-replay: { $ref: "#/components/headers/IdempotentReplay" }
           description: City registered
           content:
             application/json:
               schema: { $ref: "#/components/schemas/City" }
+        "409": { $ref: "#/components/responses/KeyReused" }
   /v1/geography/service-areas:
     post:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       summary: Register a service area with a coverage radius
       description: >
         centre_latitude and centre_longitude are optional: omitting both centres
         the area on its city, which is what this route has always done.
+
+
+        A service area is identified only by the id CORE mints, so a repeat of
+        this call is a second area over the same ground, and every
+        serviceability read would then match both. Measured on main at bd92b69,
+        it did exactly that.
+
+
+        Retry safety, milestone 32. This route has no natural key that would
+        make a repeat harmless, so it requires an `Idempotency-Key` header: a
+        caller-chosen identifier, letters, digits and `. _ : -`, at most 128
+        characters. **This is a breaking change** — a request without the
+        header is refused with 400 `invalid_request`, and before milestone 32
+        the header was ignored.
+
+
+        CORE records this route's answer under the key together with a
+        fingerprint of the request (its method, its route template and its
+        parsed body). Sending the same key again with the same body returns the
+        recorded status and body unchanged, with `idempotent-replay: true`, and
+        creates nothing. Sending the same key with a different body is refused
+        with 409 `conflict`, because the caller would otherwise be told a
+        request it never made had succeeded. A refusal is never recorded, so a
+        request rejected as invalid may be corrected and sent again under the
+        same key. A record is replayed for 24 hours; after that the key is free
+        again. The key is scoped to this route, so the same string used on a
+        different route is a different record.
       requestBody:
         required: true
         content:
@@ -1177,10 +1326,12 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+            idempotent-replay: { $ref: "#/components/headers/IdempotentReplay" }
           description: Service area registered
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ServiceArea" }
+        "409": { $ref: "#/components/responses/KeyReused" }
   /v1/geography/service-areas/resolve:
     get:
       summary: Resolve a coordinate to covering service areas
@@ -1993,6 +2144,29 @@ components:
         type: string
         maxLength: 128
         pattern: "^[A-Za-z0-9._:-]+$"
+    IdempotencyKey:
+      name: idempotency-key
+      in: header
+      required: true
+      description: >
+        The caller's retry key, required by every operation that references
+        this parameter and read by no other. Those operations create something
+        that has no natural key, so without a key from the caller CORE cannot
+        tell a retry from a second request: milestone 32 measured a repeat of
+        each of them creating a second organization, city, service area or
+        subscription. Accepted as an identifier — letters, digits and
+        `. _ : -`, at most 128 characters, sent at most once — because it
+        becomes the key of a stored record; anything else is refused with 400
+        `invalid_request`. Any value a caller can generate once and resend with
+        the retry works: a UUID, a ULID, or its own order id.
+
+
+        CORE stores the answer under the key together with a fingerprint of the
+        request, and replays that answer, unchanged and marked
+        `idempotent-replay: true`, for 24 hours. The key is scoped to one
+        route, so the same string on two routes is two records. Reusing it with
+        a different body is 409; a refused request is not recorded, so
+        correcting the body and resending under the same key runs normally.
   headers:
     CorrelationId:
       description: >
@@ -2019,6 +2193,14 @@ components:
     RateLimitReset:
       description: Unix time in seconds at which the current window ends.
       schema: { type: integer }
+    IdempotentReplay:
+      description: >
+        Present, with the value `true`, only when CORE answered from the record
+        of an earlier identical request rather than by doing the work again:
+        the status and body are the ones the first call received, and this call
+        created nothing. Absent on a first call — never sent as `false`, so a
+        caller tests for the header rather than for its value.
+      schema: { type: string, enum: ["true"] }
     RetryAfter:
       description: >
         Whole seconds until this exact request may be resent unchanged, minimum 1
@@ -2054,6 +2236,24 @@ components:
         A request refused here has changed nothing and read nothing about the
         entity it named. A request carrying no `authorization` header at all is
         refused without a single database read.
+      headers:
+        x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+        x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+        x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+        x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    KeyReused:
+      description: >
+        The request conflicts with state CORE already holds, and the canonical
+        error body says which. On a route that requires an `Idempotency-Key`
+        this is also the answer when the key was already used with a
+        *different* request: CORE refuses rather than replaying the earlier
+        answer, because telling a caller that a request it never made had
+        succeeded is worse than refusing the one it did make. The stored answer
+        is left exactly as it was, so a retry of the original request still
+        replays it.
       headers:
         x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
         x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }

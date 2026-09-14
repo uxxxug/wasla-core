@@ -221,6 +221,30 @@ const CASES: readonly CheckCase[] = [
     },
   },
 
+  // ---- retry records -----------------------------------------------------
+  // Milestone 32. The rule the router relies on is "a refusal is never
+  // recorded", and the router is where it is implemented; this case is what
+  // makes it a property of the schema instead. Probed through the port a
+  // caller's request actually reaches, because that is the path a future
+  // change would break: the store is asked to record a `400`, which is what
+  // recording a refusal looks like from here.
+  {
+    constraint: "idempotency_key_response_status_ck",
+    what: "a recorded refusal, which would answer a caller's corrected request with the old rejection",
+    async probe(store) {
+      return refuse(() =>
+        store.retry.record({
+          key: "check-parity-refusal",
+          method: "POST",
+          scope: "/v1/organizations",
+          request_fingerprint: "f".repeat(64),
+          response_status: 400,
+          response_body: { error: { code: "invalid_request" } },
+        }),
+      );
+    },
+  },
+
   // ---- geography ---------------------------------------------------------
   {
     constraint: "country_country_code_check",

@@ -14,6 +14,12 @@
  *    set of labels here equals the set of operations in the contract, so a route
  *    added later cannot quietly go unchecked, and a route removed from here
  *    cannot quietly stop being measured.
+ *  - **Every call is kept as the request that produced it**, not only as the
+ *    answer it got: milestone 32's retry gate re-issues each write route's own
+ *    request a second time, byte-identically, and asks whether anything was
+ *    created twice. A gate that re-built those requests from a list of its own
+ *    would be measuring a list, and would go stale the moment a route changed
+ *    what it accepts.
  *  - **State comes from CORE's own routes wherever a route can make it.** Rows
  *    are seeded through the stores only where no HTTP route creates them at all:
  *    a fulfillment is created by ingesting a market order, a reputation signal by
@@ -27,8 +33,19 @@ import { memoryPersistence, type Persistence } from "../../src/platform/persiste
 import { makeEvent } from "../../src/platform/eventing/envelope.js";
 import { seedCountry } from "./rows.js";
 
+/** Exactly what was sent, so it can be sent again unchanged. */
+export interface Request {
+  readonly method: string;
+  /** The router's template, `:name` style; `contractPath` converts it. */
+  readonly template: string;
+  readonly url: string;
+  readonly body?: unknown;
+  readonly headers: Record<string, string>;
+}
+
 export interface Answer {
   readonly label: string;
+  readonly request: Request;
   readonly status: number;
   readonly body: unknown;
   readonly headers?: Record<string, string>;
@@ -86,6 +103,19 @@ export async function runScenario(): Promise<Scenario> {
   });
   const token = session.token;
 
+  // Milestone 32: a `keyed` write route refuses a request that carries no
+  // `Idempotency-Key`, so every non-GET call in this scenario sends one, and a
+  // distinct one. Sent on all of them rather than only on the five keyed routes
+  // for two reasons: this file would otherwise hold a second copy of which
+  // routes are keyed, which is the duplicate source of truth the declaration
+  // exists to remove; and sending a key to a route that does not read one is
+  // exactly what a real client does, so the scenario measures that too. A
+  // counter rather than a random string, because the gate re-sends these
+  // requests and a random key would make the second run a different request.
+  let keysIssued = 0;
+  const retryKey = (method: string): Record<string, string> =>
+    method === "GET" ? {} : { "idempotency-key": `retry-gate-${++keysIssued}` };
+
   const call = async (
     method: string,
     template: string,
@@ -93,14 +123,19 @@ export async function runScenario(): Promise<Scenario> {
     body?: unknown,
     anonymous = false,
   ): Promise<Answer> => {
+    const headers = {
+      ...(anonymous ? {} : { authorization: `Bearer ${token}` }),
+      ...retryKey(method),
+    };
     const response = await core.router.handle({
       method,
       url,
-      headers: anonymous ? {} : { authorization: `Bearer ${token}` },
+      headers,
       ...(body === undefined ? {} : { body }),
     });
     const answer: Answer = {
       label: `${method} ${contractPath(template)}`,
+      request: { method, template, url, ...(body === undefined ? {} : { body }), headers },
       status: response.status,
       body: response.body,
       headers: response.headers as Record<string, string> | undefined,
@@ -327,14 +362,16 @@ export async function runScenario(): Promise<Scenario> {
   });
 
   const post = async (template: string, url: string, body: unknown, bearer: string) => {
+    const headers = { authorization: `Bearer ${bearer}`, ...retryKey("POST") };
     const response = await core.router.handle({
       method: "POST",
       url,
-      headers: { authorization: `Bearer ${bearer}` },
+      headers,
       body,
     });
     const answer: Answer = {
       label: `POST ${contractPath(template)}`,
+      request: { method: "POST", template, url, body, headers },
       status: response.status,
       body: response.body,
       headers: response.headers as Record<string, string> | undefined,

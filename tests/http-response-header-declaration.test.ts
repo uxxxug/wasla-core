@@ -58,7 +58,7 @@ import {
 } from "../src/platform/http/response-headers.js";
 import { UNLIMITED_ROUTES, rateClassFor } from "../src/platform/http/rate-limit.js";
 import { loadContract } from "./support/openapi.js";
-import { runScenario } from "./support/http-scenario.js";
+import { contractPath, runScenario } from "./support/http-scenario.js";
 
 const RATE_LIMIT_HEADERS = ["x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset"];
 
@@ -87,6 +87,11 @@ describe("declared response headers", () => {
       "x-ratelimit-reset",
       "retry-after",
       "content-type",
+      // Milestone 32. The list was closed at the six above until a keyed route
+      // needed a way to say "this is the answer you already had": added here
+      // deliberately, with its reason and its shape, rather than sent from the
+      // router and discovered as a 500.
+      "idempotent-replay",
     ]);
   });
 
@@ -159,6 +164,23 @@ describe("declared response headers", () => {
       // rather than listed here, so an exemption added later moves both at once.
       const limitedRoute = rateClassFor(operation.method, operation.path) !== null;
       if (limitedRoute) for (const name of RATE_LIMIT_HEADERS) real.add(name);
+      // Milestone 32: a `keyed` route answers a *retried* request with
+      // `idempotent-replay: true` and the status it is answering with here, so
+      // the header belongs in this operation's documentation even though the
+      // scenario sends each request once and never observes it. Derived from
+      // the registration rather than listed here, for the reason the rate-limit
+      // trio is derived from the limiter: a route that becomes keyed later must
+      // move the contract with it, and a list in a test moves only when
+      // somebody remembers.
+      const keyed = scenario.core.router
+        .registrations()
+        .some(
+          (registration) =>
+            registration.method === operation.method &&
+            contractPath(registration.template) === operation.path &&
+            registration.retry.mechanism === "keyed",
+        );
+      if (keyed) real.add("idempotent-replay");
       const declared = new Set([...documented!.headers.keys()]);
       const missing = [...real].filter((name) => !declared.has(name)).sort();
       const extra = [...declared].filter((name) => !real.has(name)).sort();

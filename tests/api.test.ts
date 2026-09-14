@@ -92,7 +92,12 @@ describe("HTTP surface", () => {
       method: "POST",
       url: "/v1/organizations",
       body: { name: "Acme", country_code: "SA" },
-      headers: { authorization: `Bearer ${token}` },
+      // Milestone 32 made this route `keyed`: creating an organization now
+      // requires the caller's retry key, so the credentialed call carries one.
+      // The two refusals above deliberately do not, and still answer 401 rather
+      // than 400 — which is the ordering this milestone kept: who the caller is
+      // is decided before what it sent.
+      headers: { authorization: `Bearer ${token}`, "idempotency-key": "api-test-org-1" },
     });
     expect(allowed.status).toBe(201);
   });

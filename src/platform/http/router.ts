@@ -19,6 +19,16 @@ import {
   subjectFor,
   type RateLimiter,
 } from "./rate-limit.js";
+import {
+  KEYED_BY_DEFAULT,
+  REPLAYED_HEADERS,
+  SAFE,
+  fingerprintRequest,
+  idempotencyKeyReused,
+  missingIdempotencyKey,
+  type RetryRecordStore,
+  type RetrySafetySpec,
+} from "./retry.js";
 
 export interface RequestContext<A = unknown> {
   method: string;
@@ -116,6 +126,14 @@ interface Route<A> {
    * closed here as it does for `accepts` and `body`.
    */
   authentication: AuthenticationSpec;
+  /**
+   * What a second, identical call to this route does. `KEYED_BY_DEFAULT` — the
+   * default — makes the router collapse the repeat against the caller's
+   * `Idempotency-Key`, because a forgotten declaration must fail closed here
+   * as it does for `accepts`, `body` and `authentication`, and the closed
+   * answer for a write is "do it once".
+   */
+  retry: RetrySafetySpec;
 }
 
 /**
@@ -132,6 +150,15 @@ export interface RouterOptions<A> {
   metrics?: MetricsRegistry;
   rateLimiter?: RateLimiter;
   authenticator: Authenticator<A>;
+  /**
+   * Where answers to keyed requests are recorded. Required, for the reason
+   * `authenticator` is: a router without one could only serve a `keyed` route
+   * by letting every retry through, and "the deployment forgot to wire the
+   * retry record" would be a duplicate subscription rather than a startup
+   * error. Optional dependencies are the ones a deployment can be wrong about
+   * in silence.
+   */
+  retry: RetryRecordStore;
 }
 
 export interface LogRecord {
@@ -178,6 +205,7 @@ export class Router<A = unknown> {
     accepts: readonly ParamSpec[] = [],
     body: BodySpec = NO_BODY,
     authentication: AuthenticationSpec = AUTHENTICATED,
+    retry: RetrySafetySpec = KEYED_BY_DEFAULT,
   ): void {
     this.routes.push({
       method,
@@ -187,6 +215,7 @@ export class Router<A = unknown> {
       accepts,
       body,
       authentication,
+      retry,
     });
   }
 
@@ -204,7 +233,10 @@ export class Router<A = unknown> {
     authentication: AuthenticationSpec,
     handler: Handler<A>,
   ) {
-    this.add("GET", path, handler, accepts, NO_BODY, authentication);
+    // A read is safe to repeat by construction, so the declaration is made here
+    // rather than at every `get` call site: asking 41 read routes to each write
+    // "a read creates nothing" would be 41 chances to write something else.
+    this.add("GET", path, handler, accepts, NO_BODY, authentication, SAFE);
   }
 
   /**
@@ -224,6 +256,7 @@ export class Router<A = unknown> {
     readonly accepts: readonly ParamSpec[];
     readonly body: BodySpec;
     readonly authentication: AuthenticationSpec;
+    readonly retry: RetrySafetySpec;
   }[] {
     return this.routes.map((route) => ({
       method: route.method,
@@ -231,6 +264,7 @@ export class Router<A = unknown> {
       accepts: route.accepts,
       body: route.body,
       authentication: route.authentication,
+      retry: route.retry,
     }));
   }
   /**
@@ -238,15 +272,20 @@ export class Router<A = unknown> {
    *
    * `body` is positional and not optional for the reason `accepts` is: the body
    * is the whole of what a write route reads from its caller, and a route that
-   * reads none of it writes `NO_BODY` and says so.
+   * reads none of it writes `NO_BODY` and says so. `retry` is positional and
+   * not optional for the same reason again, and for one more: a write is the
+   * only kind of route where being called twice can cost the caller money, so
+   * "what happens if this is sent again" is part of registering it rather than
+   * something to be discovered afterwards.
    */
   post(
     path: string,
     body: BodySpec,
     authentication: AuthenticationSpec,
+    retry: RetrySafetySpec,
     handler: Handler<A>,
   ) {
-    this.add("POST", path, handler, [], body, authentication);
+    this.add("POST", path, handler, [], body, authentication, retry);
   }
 
   private match(
@@ -471,6 +510,99 @@ export class Router<A = unknown> {
       };
     }
 
+    // Retry safety, after authentication and after the body is parsed, and
+    // before the handler. After authentication, because who the caller is
+    // decides whether it may reach this route at all and a 401 must not be
+    // answerable from a record; after the body, because the fingerprint is a
+    // fingerprint of the request CORE understood, and a body CORE cannot parse
+    // is not a request it can record an answer for. Before the handler,
+    // because collapsing a repeat after the work has been done collapses
+    // nothing. Nothing above this point moved.
+    const keyed = matched.route.retry.mechanism === "keyed";
+    let retryKey: string | undefined;
+    let fingerprint = "";
+    if (keyed) {
+      retryKey = headers.value("idempotency-key");
+      let recorded: Awaited<ReturnType<RetryRecordStore["find"]>> = null;
+      let failure: CoreError | null = null;
+      if (retryKey === undefined) {
+        // `parseHeaders` drops a zero-length value, so an empty header arrives
+        // here as an absent one and is refused by this branch; a blank value
+        // like `"  "` was already refused as a malformed identifier, before
+        // the route was even matched.
+        failure = missingIdempotencyKey(input.method, matched.route.template);
+      } else {
+        fingerprint = fingerprintRequest(input.method, matched.route.template, parsedBody);
+        try {
+          recorded = await this.options.retry.find({
+            key: retryKey,
+            method: input.method,
+            scope: matched.route.template,
+          });
+        } catch {
+          // A lookup that failed is not "no record". Running the handler anyway
+          // would be doing the work this route declared it must not do twice,
+          // with the protection silently absent — so the request is refused,
+          // and nothing has been written at this point for the refusal to
+          // undo. The cause is not passed to the caller, for the reason every
+          // internal error is not.
+          failure = new CoreError("internal", "unexpected error");
+        }
+        if (recorded !== null && recorded.request_fingerprint !== fingerprint) {
+          failure = idempotencyKeyReused();
+        }
+      }
+      if (failure !== null) {
+        const duration = Date.now() - started;
+        this.record(
+          {
+            level: "error",
+            request_id: requestId,
+            correlation_id: correlationId,
+            method: input.method,
+            path: url.pathname,
+            status: failure.status,
+            duration_ms: duration,
+            error_code: failure.code,
+          },
+          routeLabel,
+          duration,
+        );
+        return {
+          status: failure.status,
+          body: failure.toBody(correlationId),
+          headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
+        };
+      }
+      if (recorded !== null) {
+        // The answer CORE already gave, unchanged: the same status and the same
+        // body, because a retry is the caller asking what happened to its first
+        // call and not a second request. The only difference is the replay
+        // header, which is how it can tell the two apart.
+        const duration = Date.now() - started;
+        this.record(
+          {
+            level: "info",
+            request_id: requestId,
+            correlation_id: correlationId,
+            method: input.method,
+            path: url.pathname,
+            status: recorded.response_status,
+            duration_ms: duration,
+          },
+          routeLabel,
+          duration,
+        );
+        return {
+          status: recorded.response_status,
+          body: recorded.response_body,
+          headers: sealHeaders(rateHeaders, REPLAYED_HEADERS, {
+            "x-correlation-id": correlationId,
+          }),
+        };
+      }
+    }
+
     const ctx: RequestContext<A> = {
       method: input.method,
       path: url.pathname,
@@ -498,16 +630,47 @@ export class Router<A = unknown> {
           `route ${input.method} ${matched.route.template} returned a promise as its body`,
         );
       }
+      // Recorded only after the route answered, and only when it succeeded.
+      // A refusal is deliberately not recorded: a caller told its body was
+      // invalid has to be able to correct it and send it again under the same
+      // key, and a recorded 400 would answer the corrected request with the
+      // old refusal for the next 24 hours. The schema says the same thing in
+      // the one place code cannot bypass (`idempotency_key_response_status_ck`).
+      let notRecorded = false;
+      if (keyed && retryKey !== undefined && result.status >= 200 && result.status < 300) {
+        try {
+          await this.options.retry.record({
+            key: retryKey,
+            method: input.method,
+            scope: matched.route.template,
+            request_fingerprint: fingerprint,
+            response_status: result.status,
+            response_body: result.body ?? null,
+          });
+        } catch {
+          // The work is done and the caller is owed its answer, so a store that
+          // cannot record it must not turn a success into a 500 — that would
+          // be CORE hiding an organization it just created. What it costs is
+          // that the next retry runs again, which is the behaviour of every
+          // route before this milestone, so this request is logged as an error
+          // naming exactly that.
+          notRecorded = true;
+        }
+      }
       const duration = Date.now() - started;
       this.record(
         {
-          level: "info",
+          level: notRecorded ? "error" : "info",
           request_id: requestId,
           correlation_id: correlationId,
           method: input.method,
           path: url.pathname,
           status: result.status,
           duration_ms: duration,
+          // One record per request, so the failure to record rides on the
+          // request's own line rather than adding a second one nothing else
+          // in CORE produces.
+          ...(notRecorded ? { error_code: "retry_not_recorded" } : {}),
         },
         routeLabel,
         duration,

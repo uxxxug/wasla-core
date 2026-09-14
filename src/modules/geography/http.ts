@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
+import { keyed, natural } from "../../platform/http/retry.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
@@ -56,6 +57,9 @@ export function registerGeographyRoutes(
       { name: "default_currency", kind: "text", required: true },
     ),
     AUTHENTICATED,
+    keyed(
+      "measured on main at bd92b69 a repeat wrote no second country — the code is the primary key and the repo upserts it — which is the weaker half of safety rather than the whole of it: an upsert lets the second call to arrive decide the name and default currency, so the caller's key is what turns a retry into the answer CORE already gave instead of a silent overwrite",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -77,6 +81,9 @@ export function registerGeographyRoutes(
       { name: "name", kind: "text", required: true },
     ),
     AUTHENTICATED,
+    natural(
+      "addRegion looks the region up by (country_code, code) and returns the existing row unchanged, so a repeat is answered with the first region rather than a second one",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -99,6 +106,9 @@ export function registerGeographyRoutes(
       { name: "longitude", kind: "number", required: true },
     ),
     AUTHENTICATED,
+    keyed(
+      "a city has no natural key at all — two cities may share a name inside one region — so a repeat creates a second row that nothing can tell from the first",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -123,6 +133,9 @@ export function registerGeographyRoutes(
       { name: "centre_longitude", kind: "number" },
     ),
     AUTHENTICATED,
+    keyed(
+      "a service area is identified only by the id CORE mints, so a repeat is a second area over the same ground, and downstream serviceability reads would match both",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const latitude = ctx.input.number("centre_latitude");

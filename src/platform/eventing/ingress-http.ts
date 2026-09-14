@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../http/authentication.js";
 import { opaqueBody } from "../http/body.js";
+import { natural } from "../http/retry.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../../modules/identity-access/service.js";
@@ -22,6 +23,9 @@ export function registerIngressRoutes(
     // body cannot appear without the gate reporting it.
     opaqueBody("the event envelope is validated against contracts/events by normalize.ts"),
     AUTHENTICATED,
+    natural(
+      "ingress is deduplicated by the envelope's own event_id: the inbound event table refuses the second copy and the answer says it was already accepted, which is what makes MOVE and MARKET able to retry a publish at all",
+    ),
     async (ctx) => {
     const actor = await requirePrincipal(ctx, identity, "events.submit");
     // The caller comes from the credential, never from the request body.

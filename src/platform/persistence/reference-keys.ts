@@ -196,7 +196,7 @@ export function foreignKeyRefusal(table: string, constraint: string): string {
  * a second set of wiring. Every `Map` satisfies both members, so no store
  * changed to expose it.
  */
-type KeyedMap = { has(key: string): boolean; get(key: string): unknown };
+type KeyedMap = { has(key: string): boolean; get(key: string): unknown; readonly size: number };
 
 /**
  * Which reference store holds which table, for one persistence bundle.
@@ -247,6 +247,27 @@ export class ReferenceKeys {
   row(table: string, key: string): Row | undefined {
     const value = this.tables.get(table)?.get(key);
     return value === undefined ? undefined : (value as Row);
+  }
+
+  /**
+   * How many rows each attached table holds, for one bundle.
+   *
+   * Milestone 32 needs it: the retry gate's question is "did calling this write
+   * route a second time create anything", and the only honest way to ask that
+   * of 29 routes is to count every table before and after rather than to name,
+   * per route, the table a duplicate would land in — a hand-written list is a
+   * list of the duplicates somebody thought of. `size` is on the shape for the
+   * same reason `get` is: every `Map` already has it, so no store changed to
+   * expose it.
+   *
+   * What it cannot see is the tables no store attaches — `audit_log`,
+   * `inbound_event`, `rate_limit_counter` and `idempotency_key` itself — so a
+   * duplicated audit entry is invisible to a count taken here. That is stated
+   * where the gate uses it rather than papered over: the 25 attached tables are
+   * every table a duplicated *business* row could appear in.
+   */
+  census(): ReadonlyMap<string, number> {
+    return new Map([...this.tables].map(([table, map]) => [table, map.size]));
   }
 
   /**

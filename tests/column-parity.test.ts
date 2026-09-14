@@ -148,12 +148,14 @@ describe("column parity: the declaration", () => {
   });
 
   it("records a default without applying one", () => {
-    // 47 columns the database would fill. The reference backend fills none of
+    // 48 columns the database would fill. The reference backend fills none of
     // them, and this is the count that says so: if it drops, either a migration
     // dropped a default or somebody started applying them here. (45 when the
     // gate covered the 28 ruled tables; `inbox.received_at` and
-    // `rate_limit_counter.hits` joined it in milestone 19.)
-    expect(defaultedColumns().length).toBe(47);
+    // `rate_limit_counter.hits` joined it in milestone 19; 47 until milestone
+    // 32, whose `idempotency_key.created_at` defaults to `now()` like every
+    // other created_at in the schema.)
+    expect(defaultedColumns().length).toBe(48);
     expect(defaultedColumns()).toContain("outbox.created_at");
   });
 });
@@ -272,9 +274,11 @@ describe("column parity: where the reference backend is stricter, on purpose", (
 describe.skipIf(!url)("column parity against the live schema", () => {
   it("declares every column of every ruled table, with the schema's own type", async () => {
     const columns = await catalogColumns();
-    // 263 = the 254 of the 28 originally ruled tables plus the 9 of `inbox` and
-    // `rate_limit_counter`, brought under the gate in milestone 19.
-    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(263);
+    // 271 = the 254 of the 28 originally ruled tables, plus the 9 of `inbox`
+    // and `rate_limit_counter` brought under the gate in milestone 19, plus the
+    // 8 of `idempotency_key`, which milestone 32 made a table the code reads
+    // and writes rather than one nothing touched. (263 before that milestone.)
+    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(271);
     const problems: string[] = [];
     for (const column of columns) {
       const shapes = COLUMN_SHAPES[column.table] ?? [];
@@ -339,7 +343,11 @@ describe.skipIf(!url)("column parity against the live schema", () => {
     // memory: if a migration adds a nullable column this fails and the
     // declaration has to be extended before the count is updated.
     // 206 = 197 + the 9 of the two runtime tables (every one of them NOT NULL).
-    expect(live).toBe(206);
+    // 213 since milestone 32: `idempotency_key` has 8 columns and 7 of them are
+    // NOT NULL — `response_body` is deliberately nullable, because a bodyless
+    // answer is SQL NULL on both backends and would otherwise have to be stored
+    // as the JSON value `null`, which the reference backend refuses.
+    expect(live).toBe(213);
   });
 
   it("raises the same message the database raises for the same bad value", async () => {

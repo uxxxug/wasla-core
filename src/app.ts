@@ -345,7 +345,16 @@ export function createCoreApp(
   // be constructed without one: every registration that declared
   // `AUTHENTICATED` is refused before its handler exists, in one place, rather
   // than by each handler remembering to ask.
-  const router = new Router({ metrics, rateLimiter, authenticator: identity });
+  // The retry record comes from the same bundle as every other store, for the
+  // reason the limiter's does: a router whose recorded answers live in one
+  // instance's memory while the data lives in Postgres collapses a retry only
+  // when it happens to land on the instance that answered the first call.
+  const router = new Router({
+    metrics,
+    rateLimiter,
+    authenticator: identity,
+    retry: store.retry,
+  });
   router.get(
     "/health",
     [],

@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
+import { natural } from "../../platform/http/retry.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
@@ -49,6 +50,9 @@ export function registerNotificationRoutes(
       { name: "correlation_id", kind: "text", required: true },
     ),
     AUTHENTICATED,
+    natural(
+      "a recipient is unique on its (organization_id, event_type, identity_id, channel) registration: measured on main at bd92b69 a repeat added no notification_recipient row",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const created = await recipients.register({
@@ -79,6 +83,9 @@ export function registerNotificationRoutes(
     "/v1/notification-recipients/:recipient_id/deactivate",
     objectBody({ name: "correlation_id", kind: "text", required: true }),
     AUTHENTICATED,
+    natural(
+      "deactivation is a transition that is already done the second time round",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const updated = await recipients.setActive(

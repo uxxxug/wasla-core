@@ -448,6 +448,22 @@ export const ROW_RULES = {
    * five parity cycles never reached. See `tests/runtime-table-parity.test.ts`.
    */
   inbox: [],
+  /**
+   * The one rule is the one that keeps a refusal out of the table.
+   *
+   * The router records an answer only after a `2xx`, because a caller whose
+   * request was refused for being invalid has to be able to correct it and
+   * send it again under the same key. That is a rule in code, and code is
+   * where it would be lost: `idempotency_key_response_status_ck` is what makes
+   * a recorded refusal impossible on both backends instead of unlikely on one.
+   */
+  idempotency_key: [
+    numeric(
+      "response_status",
+      "idempotency_key_response_status_ck",
+      (v) => v >= 200 && v < 300,
+    ),
+  ],
   rate_limit_counter: [
     vocabulary(
       "subject_kind",
