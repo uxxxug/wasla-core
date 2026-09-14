@@ -6407,3 +6407,19 @@ Session expiry, rotation and refresh are untouched. `/metrics`, `/health` and
 `/ready` are still anonymous and **B-5** still owns where they live. `POST
 /v1/identities` stays anonymous because registration is how a principal comes to
 exist. Full account in `docs/session-entitlement.md`.
+
+**CI verdict (the judgment, not the local run): green.** PR
+[#22](https://github.com/uxxxug/wasla-core/pull/22), head `3d6173b`, runs
+`34835539650` (pull_request) and `34835517835` (push) — both `success` on both
+jobs. *Verify without a database*: **758 passed / 147 skipped across 55 files,
+2 skipped**, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 19 migrations): **1320 passed across 57 files,
+none skipped, and 1 passed in the cluster file — 1321 in total**.
+`tests/session-issuance-entitlement.test.ts` is named in both job logs as **25
+tests** passed. Both figures match the local measurement on an embedded
+PostgreSQL 18.4 exactly, and both exceed milestone 30's by the 25 cases this
+cycle added. The known CI/local skipped-count difference is restated rather
+than rounded away: **147 in CI against 148 locally**, unexplained since
+milestone 22 and still unexplained here. This is the first cycle since B-41 in
+which a verdict existed at the moment the work was finished rather than a day
+later.
