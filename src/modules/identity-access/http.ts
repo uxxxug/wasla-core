@@ -95,14 +95,32 @@ export function registerIdentityRoutes(
       { name: "principal_id", kind: "text", required: true },
       { name: "channel_type", kind: "enum", values: CHANNELS, required: true },
     ),
-    // The login surface: a caller presenting no token is exactly who asks for
-    // one. That this route will mint a token for *any* `principal_id` it is
-    // given is B-39, and it is open — an authentication requirement here would
-    // not close it and would break every caller obtaining its first session, so
-    // it stays recorded as the blocker it is rather than being half-answered
-    // here. `tests/anonymous-privilege-escalation.test.ts` holds it visible.
-    anonymous("the login surface: this is how a credential is obtained (B-39)"),
+    // **Not** the login surface, and this is the correction milestone 31 makes.
+    // Measured on `main` at `b63585d`: with no credential at all, and given the
+    // `principal_id` of a tenant's administrator — a value returned by
+    // `GET /v1/sessions/current`, by every membership answer and by audit reads,
+    // so not a secret — this route answered `201` with a working token, and that
+    // token read `GET /v1/sessions/current` as `platform_admin` with 14
+    // permissions. Issuing a session is not "asking to log in": it is deciding
+    // that a named principal's credential may now exist, and CORE has no way to
+    // check a person's channel account from here.
+    //
+    // So the decision moves to whoever can already prove *something*: a caller
+    // holding `session.issue` — `platform_admin`, or a `service` credential held
+    // by the channel adapter that did authenticate the person on its own channel.
+    // The first credential of an environment cannot come from this route by
+    // construction, and comes from `npm run bootstrap:credential`, which needs
+    // database access rather than an HTTP request.
+    AUTHENTICATED,
     async (ctx) => {
+    // Not scoped to an organization: a session is not org-scoped — it carries
+    // every membership the principal has — so there is no organization to check
+    // it against, and pretending otherwise would be a check that reads as a
+    // boundary and is not one. That `session.issue` is unscoped, so any service
+    // credential can mint a session for any principal rather than only for the
+    // people its own channel speaks for, is recorded as B-42 and is not
+    // half-answered here.
+    await requirePrincipal(ctx, identity, "session.issue");
     const { session, token } = await identity.issueSession({
       principal_id: ctx.input.requiredText("principal_id"),
       channel_type: ctx.input.requiredText("channel_type") as ChannelType,
@@ -127,14 +145,24 @@ export function registerIdentityRoutes(
   router.post(
     "/v1/sessions/revoke",
     objectBody({ name: "session_id", kind: "text", required: true }),
-    // That this route revokes any named session without a credential is B-40,
-    // and it is open. Declaring `AUTHENTICATED` here would change the refusal a
-    // caller sees without deciding whose session a principal may end — the
-    // question B-40 actually records — and would silently flip the gate that
-    // keeps the blocker visible. It stays declared, open and named.
-    anonymous("revocation takes no credential today (B-40)"),
+    // B-40, answered. Measured on `main` at `b63585d`: with no credential, this
+    // route ended a `platform_admin`'s live session — `204`, and the
+    // administrator's next request answered `401 session expired or revoked`.
+    // With a well-formed id that did not exist it answered `204` **and then
+    // terminated the process**, because the call below was made without `await`:
+    // the rejection escaped the router's error handling as an unhandled
+    // rejection, so the caller was told a revocation succeeded that never
+    // happened, and an unauthenticated request was a remote kill.
+    AUTHENTICATED,
     async (ctx) => {
-    identity.revokeSession(ctx.input.requiredText("session_id"), ctx.correlation_id);
+    // Awaited, and the entitlement rule lives in the service next to the lookup
+    // it depends on: whose session this is cannot be decided without reading it,
+    // and deciding it here would mean a second read whose answer could differ.
+    await identity.revokeSessionAs(
+      currentPrincipal(ctx),
+      ctx.input.requiredText("session_id"),
+      ctx.correlation_id,
+    );
     return { status: 204, body: null };
   });
 

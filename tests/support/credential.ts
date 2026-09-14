@@ -14,34 +14,30 @@
  * `403` this caller would otherwise receive, so the refusal under test cannot
  * be confused with a permission answer.
  *
- * It uses the two routes that are declared anonymous because they are the way a
- * credential is obtained, so no test needs to reach behind the HTTP surface to
- * construct one.
+ * **It no longer goes through `POST /v1/sessions`.** Until milestone 31 that
+ * route required no credential, so a probe could obtain one over HTTP the way
+ * anybody else could — which was B-39, the hole that cycle closed. Issuing a
+ * session now requires `session.issue`, and a helper that granted its probe that
+ * permission in order to mint a powerless token would be granting the strongest
+ * permission CORE has to produce the weakest credential. So the session is
+ * minted in process, through the same `IdentityService` the route calls, and the
+ * token it returns is indistinguishable from one the route would have issued —
+ * `authenticate` reads the same row either way.
  */
-export async function anonymousCredential(core: {
-  router: { handle(input: { method: string; url: string; body?: unknown; headers?: Record<string, string> }): Promise<{ status: number; body: unknown }> };
-}): Promise<string> {
-  const identity = await core.router.handle({
-    method: "POST",
-    url: "/v1/identities",
-    body: {
-      channel_type: "telegram",
-      external_id: `gate-probe-${Math.random().toString(36).slice(2)}`,
-      display_name: "Gate probe",
-      source_system: "market",
-    },
-    headers: {},
+import type { CoreApp } from "../../src/app.js";
+
+export async function anonymousCredential(core: Pick<CoreApp, "identity">): Promise<string> {
+  const registered = await core.identity.registerIdentity({
+    channel_type: "telegram",
+    external_id: `gate-probe-${Math.random().toString(36).slice(2)}`,
+    display_name: "Gate probe",
+    source_system: "market",
+    correlation_id: "gate-probe",
   });
-  if (identity.status !== 201 && identity.status !== 200) {
-    throw new Error(`could not register a probe identity: ${identity.status}`);
-  }
-  const principalId = (identity.body as { principal_id: string }).principal_id;
-  const session = await core.router.handle({
-    method: "POST",
-    url: "/v1/sessions",
-    body: { principal_id: principalId, channel_type: "telegram" },
-    headers: {},
+  const { token } = await core.identity.issueSession({
+    principal_id: registered.principal.principal_id,
+    channel_type: "telegram",
+    correlation_id: "gate-probe",
   });
-  if (session.status !== 201) throw new Error(`could not issue a probe session: ${session.status}`);
-  return (session.body as { access_token: string }).access_token;
+  return token;
 }

@@ -114,7 +114,24 @@ paths:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
       summary: Issue a session for a principal
-      security: []
+      description: >
+        Issues a bearer token for a named principal. This is not a login
+        endpoint: the caller decides that another principal's credential may
+        exist, so it must hold `session.issue` — `platform_admin`, or the
+        `service` credential of the channel adapter that authenticated the
+        person on its own channel. Until milestone 31 this operation required no
+        credential at all and would mint a working administrator token for any
+        `principal_id` a caller had seen (B-39).
+
+
+        `403` therefore means the caller is authenticated and may not issue
+        sessions, and `404` means it may and the principal does not exist —
+        which is only reachable by a caller already entitled to issue.
+
+
+        The first credential of an environment cannot come from here, by
+        construction. It is provisioned with `npm run bootstrap:credential`,
+        which requires database access rather than an HTTP request.
       requestBody:
         required: true
         content:
@@ -143,6 +160,8 @@ paths:
                   access_token: { type: string }
                   token_type: { type: string, enum: [Bearer] }
                   expires_at: { type: string, format: date-time }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /v1/sessions/current:
     get:
@@ -167,6 +186,19 @@ paths:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
       summary: Revoke a session
+      description: >
+        Ends a session. The caller's own session needs no permission — logging
+        out is not an administrative act. Any other principal's session needs
+        `identity.write`, and a caller without it is refused with `403` whether
+        the `session_id` names a real session or an invented one, so the refusal
+        cannot be used to discover session ids. `404` is reachable only by a
+        caller holding `identity.write`.
+
+
+        Until milestone 31 this operation took no credential: it ended any named
+        session for anybody (B-40), and for a well-formed id that did not exist
+        it answered `204` and then killed the process, because the revocation
+        was not awaited.
       requestBody:
         required: true
         content:
@@ -185,6 +217,9 @@ paths:
             x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
             x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
             x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /v1/access/check:
     post:
       parameters:
@@ -2212,6 +2247,7 @@ components:
         - subscription.read
         - subscription.write
         - reputation.read
+        - session.issue
     IdentityResolved:
       type: object
       required: [identity_id, principal_id, status, created]

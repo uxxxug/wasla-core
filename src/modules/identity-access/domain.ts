@@ -115,7 +115,19 @@ export type Permission =
   // signals arrive as events from the systems that observed them, so a
   // `reputation.write` permission would guard nothing and would advertise a
   // capability CORE does not have.
-  | "reputation.read";
+  | "reputation.read"
+  // Minting a session for a principal, which is not "acting on behalf of" that
+  // principal — it **is** that principal: the token the route returns carries
+  // every role and permission its memberships give it, and CORE cannot tell it
+  // apart from one the principal obtained itself. So this is the strongest
+  // permission in the list, and deliberately not implied by `identity.write`:
+  // editing an identity's display name and being able to become it are not the
+  // same power, and a role that needs the first must not silently get the
+  // second. Held by `platform_admin` and by `service` — a channel adapter
+  // exists to obtain sessions for the people it speaks to — and by nothing
+  // else. Before milestone 31 the route that consumes this required no
+  // credential at all (B-39).
+  | "session.issue";
 
 /**
  * Role → permission mapping is data, not branching logic scattered in handlers
@@ -137,6 +149,7 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "subscription.read",
     "subscription.write",
     "reputation.read",
+    "session.issue",
   ],
   org_admin: [
     "identity.read",
@@ -166,7 +179,19 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
     "reputation.read",
   ],
   // A service caller exists to feed CORE events; submitting them is the point.
-  service: ["fulfillment.request", "fulfillment.read", "identity.read", "events.submit"],
+  // It also holds `session.issue`, because a channel adapter is how a person who
+  // only ever speaks to Telegram or to MARKET gets a CORE credential at all: the
+  // adapter authenticates the person the way its channel already does, then asks
+  // CORE for a session on their behalf. That power is not scoped to the people a
+  // given adapter actually speaks for — see B-42 — and the scoping is a separate
+  // question from whether the route requires a credential, which is this one.
+  service: [
+    "fulfillment.request",
+    "fulfillment.read",
+    "identity.read",
+    "events.submit",
+    "session.issue",
+  ],
 };
 
 export function permissionsForRoles(roles: readonly Role[]): Set<Permission> {
