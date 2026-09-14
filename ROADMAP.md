@@ -6642,3 +6642,19 @@ unexplained, restated here rather than rounded away.
 
 Full account, decision reasoning and the falsification table in
 `docs/retry-claim.md`.
+
+**CI verdict (the judgment, not the local run).** PR
+[#24](https://github.com/uxxxug/wasla-core/pull/24), head `4000acc`, runs
+`34885927577` (pull_request) and `34885923460` (push) — both `success` on both
+jobs. *Verify without a database*: **781 passed / 147 skipped across 57 files,
+2 skipped**, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16`, built from all 21 migrations): **1361 passed across 59 files,
+none skipped, and 1 passed in the cluster file — 1362 in total**. The new gate
+is named in both job logs: `tests/retry-claim.test.ts` is **12 tests** without
+a database and **22** with, the Postgres half being skipped there rather than
+silently absent, and `tests/retry-idempotency.test.ts` is still **10** and
+**17** after its harness was extracted. Both totals match the local
+measurement on an embedded PostgreSQL 18.4 exactly, and both exceed milestone
+32's by the 12 and 22 cases this cycle added. The known CI/local skipped-count
+difference is restated rather than rounded away: **147 in CI against 148
+locally**, unexplained since milestone 22 and still unexplained here.
