@@ -6506,5 +6506,17 @@ the closing design named in the blocker rather than implied away here. A replay
 restores the status and the body, not route-set headers; none of the five keyed
 routes sets one today.
 
-**CI verdict (the judgment, not the local run)** — recorded after the push, in
-the commit that follows this one.
+**CI verdict (the judgment, not the local run).** PR
+[#23](https://github.com/uxxxug/wasla-core/pull/23), head `dc0b821`, runs
+`34863857375` (pull_request) and `34863853567` (push) — both `success` on both
+jobs. *Verify without a database*: **769 passed / 147 skipped across 56 files,
+2 skipped**, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16` built from the 20 migrations): **1339 passed across 58 files,
+none skipped, and 1 passed in the cluster file — 1340 in total**.
+`tests/retry-idempotency.test.ts` is named in both job logs as **17 tests**
+with a database and **10** without, the seven Postgres-backed cases being
+skipped there rather than silently absent. Both totals match the local
+measurement on an embedded PostgreSQL 18.4 exactly, and both exceed milestone
+31's by the 11 and 19 cases this cycle added. The known CI/local skipped-count
+difference is restated rather than rounded away: **147 in CI against 148
+locally**, unexplained since milestone 22 and still unexplained here.
