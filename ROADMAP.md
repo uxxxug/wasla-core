@@ -7168,3 +7168,13 @@ stop was normalised. And the follow-up pull request that cycles 33, 36 and 37 ea
 needed was not needed here: row 38 could not be committed claiming to be reserved
 while owning `docs/roadmap-status.md`, because the gate this cycle added refuses
 it. Full account in `docs/roadmap-status.md`.
+
+CI verdict for cycle 38, read from the runs themselves rather than inferred from a
+green local tree. At `39c6024`, runs `34904868920` and `34904832000`, both
+**success**. Verify without a database: **819 passed, 147 skipped across 62 files
+(2 skipped)**, plus the cluster pass, 1 skipped — the new file reads 7 tests in
+both jobs and needs no database, since it reads this document and the tree. Verify
+against PostgreSQL: **1402 passed across 64 files**, plus the cluster pass, 1
+passed, so **1403**. Test partition, in both jobs: 65 test files, 64 in the suite
+pass and 1 in the cluster pass, each in exactly one. The counts moved 812 → 819 and
+1396 → 1403, and README carries both.
