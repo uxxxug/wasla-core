@@ -7221,3 +7221,13 @@ This row was also set to its true state in the same commit as its implementation
 rather than in a follow-up PR as cycles 33, 36 and 37 each needed. Milestone 38's
 gate is what forces that: it reads the leading marker, and an outcome appended
 under a reservation marker fails the build.
+
+CI verdict for cycle 39, read from the runs themselves. At `e52b648`, runs
+`34909051335` and `34909027946`, both **success**. Verify without a database:
+**825 passed, 147 skipped across 63 files (2 skipped)**, plus the cluster pass, 1
+skipped — the new gate reads 6 tests in both jobs and needs no database, since
+every conflict it drives is made over the in-memory backend. Verify against
+PostgreSQL: **1408 passed across 65 files**, plus the cluster pass, 1 passed, so
+**1409**. Test partition, in both jobs: 66 test files, 65 in the suite pass and 1
+in the cluster pass, each in exactly one. The counts moved 819 → 825 and
+1403 → 1409, and README carries both.
