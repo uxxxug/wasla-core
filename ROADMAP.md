@@ -6947,4 +6947,12 @@ remain the business of the milestones that own them, and widening the matrix is 
 decision somebody has to make on purpose. Milestone 34's sweep, which held
 vacuously and said so, is the reason that sentence is a test and not a comment.
 
-CI verdict: recorded below in a second commit, after the push.
+CI verdict, read from the runs themselves rather than inferred from a green
+local tree. At `d61b94d`, runs `34898391640` and `34898386719`, both **success**.
+Verify without a database: **806 passed, 147 skipped across 60 files (2 skipped)**,
+plus the cluster pass, 1 skipped — the new file reads 7 tests in both jobs, and
+its slowest assertion is the one that drives a real budget, 404ms. Verify against
+PostgreSQL: **1389 passed across 62 files**, plus the cluster pass, 1 passed, so
+**1390**. Test partition, in both jobs: 63 test files, 62 in the suite pass and 1
+in the cluster pass, each in exactly one. The counts moved 799 → 806 and
+1383 → 1390, and README carries both.
