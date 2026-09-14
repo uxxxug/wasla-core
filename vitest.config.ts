@@ -1,4 +1,8 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+// @ts-expect-error - plain ESM, deliberately not TypeScript: this module is the
+// one definition of the test partition and is read by `scripts/`, which runs
+// under bare node with no build step.
+import { clusterFiles, requestedPass, suiteFiles } from "./scripts/test-partition.mjs";
 
 /**
  * The suite had no configuration file until this cycle, which is why the two
@@ -19,8 +23,25 @@ import { defineConfig } from "vitest/config";
  * their own pass, so nothing competes with them — because a timeout that is
  * merely generous would still be masking contention instead of ending it.
  */
+/**
+ * Which files run is decided here, from `scripts/test-partition.mjs`, and not in
+ * a `package.json` command line. It used to be decided in two command lines
+ * that disagreed: `test:suite` excluded a glob while `test:cluster` named a
+ * single file, so a lifecycle file added later would have run in neither pass
+ * with `npm test` still reporting green. Measured, then closed — see milestone
+ * 35 in `ROADMAP.md` and `docs/test-partition.md`.
+ *
+ * The consequence worth naming: a bare `vitest run` now performs exactly CI's
+ * suite pass, so a local count and the count in a CI log are the same number
+ * about the same files. `scripts/check-test-partition.mjs` fails the build if
+ * any test file belongs to neither pass or to both.
+ */
+const pass: "suite" | "cluster" = requestedPass();
+
 export default defineConfig({
   test: {
+    include: pass === "cluster" ? clusterFiles() : suiteFiles(),
+    exclude: [...configDefaults.exclude],
     setupFiles: ["tests/support/worker-database.ts"],
     hookTimeout: 120_000,
     testTimeout: 120_000,

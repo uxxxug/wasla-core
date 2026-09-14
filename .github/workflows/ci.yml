@@ -43,6 +43,14 @@ jobs:
       - name: Migration validation
         run: node scripts/check-migrations.mjs
 
+      # Deliberately before the tests would be trusted rather than after them:
+      # this step answers "was every test file actually run", and a green suite
+      # is not evidence of that. Measured on main at 5567e49 — a lifecycle test
+      # file matching the suite pass's exclusion glob but not the cluster pass's
+      # named file ran in neither pass while `npm test` reported green.
+      - name: Test partition
+        run: npm run check:test-partition
+
       - name: Roadmap freshness
         if: github.event_name == 'push'
         env:
@@ -108,6 +116,12 @@ jobs:
 
       - name: Migration status
         run: node scripts/db-migrate.mjs status
+
+      # Run in this job too, not only in the one without a database. The two jobs
+      # report separate counts that a reader adds together, so each has to be able
+      # to say on its own that the files behind its numbers were all run.
+      - name: Test partition
+        run: npm run check:test-partition
 
       - name: Tests against PostgreSQL
         run: npm test
