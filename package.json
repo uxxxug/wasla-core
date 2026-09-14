@@ -17,12 +17,13 @@
     "check:roadmap": "node scripts/check-roadmap.mjs",
     "check:contracts": "node scripts/check-contracts.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
-    "verify": "npm run typecheck && npm run test && npm run check:governance && npm run check:contracts",
+    "check:test-partition": "node scripts/check-test-partition.mjs",
+    "verify": "npm run typecheck && npm run test && npm run check:governance && npm run check:contracts && npm run check:test-partition",
     "db:status": "node scripts/db-migrate.mjs status",
     "db:up": "node scripts/db-migrate.mjs up",
     "db:down": "node scripts/db-migrate.mjs down",
-    "test:suite": "vitest run --exclude 'tests/migration-*-lifecycle.test.ts'",
-    "test:cluster": "vitest run tests/migration-0011-lifecycle.test.ts"
+    "test:suite": "WASLA_TEST_PASS=suite vitest run",
+    "test:cluster": "WASLA_TEST_PASS=cluster vitest run"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
