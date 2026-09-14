@@ -283,22 +283,43 @@ export class RateLimiter {
  * reading the response must not learn it.
  */
 export const rateLimited = (decision: Extract<RateLimitDecision, { allowed: false }>): CoreError =>
-  new CoreError("rate_limited", "rate limit exceeded for this credential and route class", {
-    retry_after_ms: decision.retry_after_ms,
-    limit: decision.limit,
-  });
+  new CoreError(
+    "rate_limited",
+    "rate limit exceeded for this credential and route class",
+    {
+      // Milliseconds here and whole seconds on the header, from the same
+      // decision. Two precisions of one measured duration is not two sources
+      // of truth — both are computed from `decision.retry_after_ms` and
+      // neither can move without the other — and the detail is published, so
+      // dropping it to make the point would be a breaking change to callers
+      // for a tidiness this milestone did not need.
+      retry_after_ms: decision.retry_after_ms,
+      limit: decision.limit,
+    },
+    retryAfterSeconds(decision.retry_after_ms),
+  );
 
-/** Headers advertised on every limited response, and on allowed ones. */
+/**
+ * Seconds, rounded up, per RFC 9110, with a floor of 1: a `retry-after` of `0`
+ * invites an immediate retry that would be refused again.
+ */
+export const retryAfterSeconds = (ms: number): number => Math.max(1, Math.ceil(ms / 1000));
+
+/**
+ * The budget headers, advertised on every answer whether the request was
+ * allowed or refused.
+ *
+ * **Not** `retry-after`. That header used to be written here for a refusal,
+ * which put it a long way from the `retryable` flag in the body that means the
+ * same thing — and the two disagreed elsewhere in CORE for a whole milestone
+ * (B-44). It is now rendered from `CoreError.retryAfterSeconds`, which
+ * `rateLimited` sets from this same decision, so the header and the flag come
+ * from one field and the router merges it like any other refusal's.
+ */
 export function rateLimitHeaders(decision: RateLimitDecision): Record<string, string> {
-  const headers: Record<string, string> = {
+  return {
     "x-ratelimit-limit": String(decision.limit),
     "x-ratelimit-remaining": String(decision.remaining),
     "x-ratelimit-reset": String(Math.ceil(decision.reset_at.getTime() / 1000)),
   };
-  if (!decision.allowed) {
-    // Seconds, rounded up, per RFC 9110: a `retry-after` of 0 invites an
-    // immediate retry that would be refused again.
-    headers["retry-after"] = String(Math.max(1, Math.ceil(decision.retry_after_ms / 1000)));
-  }
-  return headers;
 }

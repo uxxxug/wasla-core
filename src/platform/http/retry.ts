@@ -549,31 +549,29 @@ export const idempotencyKeyReused = () =>
  * to the request and it is not pretending to be: the request did not run, and
  * `retry-after` says when to ask again.
  *
- * One thing this refusal reports wrongly, measured rather than assumed: the
- * body's `retryable` is `false`, because `CoreError` derives it from the code
- * alone and every `conflict` is unretryable. That is right for a reuse and
- * wrong here — this one comes good by itself, which is why it carries
- * `retry-after` at all. Left wrong on purpose and recorded as a blocker: making
- * it right means letting a refusal override the flag its code implies, which is
- * a change to the shared error type, and reaching into that type from this
- * cycle would be changing the thing under measurement while measuring it.
+ * The time to come back is stated on the error itself rather than assembled
+ * beside it, which is what makes `retryable: true` and `retry-after: 1` one
+ * fact instead of two that can disagree. Milestone 33 shipped them disagreeing
+ * — the body said `retryable: false` because `CoreError` derived the flag from
+ * the code alone — and recorded it as B-44 rather than hiding it; milestone 34
+ * closed it by moving the time into the error. The four refusals in that
+ * measurement were the only contradictions in 105.
+ *
+ * One second, whole, per RFC 9110, which refuses `0`. It is a floor rather
+ * than an estimate: CORE cannot know how long the twin will take, and a number
+ * invented from the claim horizon would be a minute of waiting for work that
+ * measurably finishes in milliseconds.
  */
 export const idempotencyKeyInFlight = (claimedAt: string) =>
   conflict(
     "an identical request under this Idempotency-Key is already being processed: it was not run again, and nothing was created. " +
       "Resend the identical request after retry-after to be given the answer the first one produced",
     { claimed_at: claimedAt },
+    IN_FLIGHT_RETRY_AFTER_SECONDS,
   );
 
-/**
- * The header that tells a refused twin when to come back.
- *
- * One second, whole, per RFC 9110 and per `response-headers.ts`, which refuses
- * `0`. It is a floor rather than an estimate: CORE cannot know how long the
- * twin will take, and a number invented from the claim horizon would be a
- * minute of waiting for work that measurably finishes in milliseconds.
- */
-export const IN_FLIGHT_HEADERS: Readonly<Record<string, string>> = { "retry-after": "1" };
+/** See `idempotencyKeyInFlight`: a floor, not an estimate. */
+export const IN_FLIGHT_RETRY_AFTER_SECONDS = 1;
 
 /**
  * The header that marks an answer as one CORE has given before.

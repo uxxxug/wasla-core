@@ -20,7 +20,6 @@ import {
   type RateLimiter,
 } from "./rate-limit.js";
 import {
-  IN_FLIGHT_HEADERS,
   KEYED_BY_DEFAULT,
   REPLAYED_HEADERS,
   SAFE,
@@ -382,7 +381,7 @@ export class Router<A = unknown> {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: sealHeaders({ "x-correlation-id": correlationId }),
+        headers: sealHeaders(coreError.headers, { "x-correlation-id": correlationId }),
       };
     }
     const correlationId = headers.value("x-correlation-id") ?? newId();
@@ -429,7 +428,10 @@ export class Router<A = unknown> {
         return {
           status: error.status,
           body: error.toBody(correlationId),
-          headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
+          // `error.headers` carries the `retry-after`: the limiter states the
+          // time on the error it raises, so the header and the body's
+          // `retryable` are read off one field rather than assembled apart.
+          headers: sealHeaders(rateHeaders, error.headers, { "x-correlation-id": correlationId }),
         };
       }
     }
@@ -510,7 +512,7 @@ export class Router<A = unknown> {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
+        headers: sealHeaders(rateHeaders, coreError.headers, { "x-correlation-id": correlationId }),
       };
     }
 
@@ -529,7 +531,6 @@ export class Router<A = unknown> {
       retryKey = headers.value("idempotency-key");
       let recorded: RetryCompletedRow | null = null;
       let failure: CoreError | null = null;
-      let failureHeaders: Readonly<Record<string, string>> = {};
       if (retryKey === undefined) {
         // `parseHeaders` drops a zero-length value, so an empty header arrives
         // here as an absent one and is refused by this branch; a blank value
@@ -572,7 +573,6 @@ export class Router<A = unknown> {
               // than run, which is the difference between a collapsed retry
               // and a second organization.
               failure = idempotencyKeyInFlight(outcome.claimed_at);
-              failureHeaders = IN_FLIGHT_HEADERS;
               break;
             case "reused":
               failure = idempotencyKeyReused();
@@ -599,7 +599,10 @@ export class Router<A = unknown> {
         return {
           status: failure.status,
           body: failure.toBody(correlationId),
-          headers: sealHeaders(rateHeaders, failureHeaders, {
+          // Whatever this refusal is, its own headers: an in-flight twin
+          // states a `retry-after` and a reuse does not, and neither the
+          // router nor the caller has to know which is which.
+          headers: sealHeaders(rateHeaders, failure.headers, {
             "x-correlation-id": correlationId,
           }),
         };
@@ -766,7 +769,7 @@ export class Router<A = unknown> {
       return {
         status: coreError.status,
         body: coreError.toBody(correlationId),
-        headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
+        headers: sealHeaders(rateHeaders, coreError.headers, { "x-correlation-id": correlationId }),
       };
     }
   }

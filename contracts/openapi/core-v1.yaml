@@ -2267,22 +2267,23 @@ components:
         identical request after `retry-after` replays the winner's answer, which
         is what the key was for.
 
-        Read `retry-after`, not `retryable`, on this one. `retryable` is derived
-        from `code` alone and every `conflict` reports `false`, which is right
-        for the reuse case and wrong for this one — an in-flight refusal does
-        come good by itself. Recorded as a blocker rather than papered over
-        here: making the flag right means giving a refusal a say in its own
-        retryability, which is a change to the shared error type and not to this
-        route.
+        `retryable` and `retry-after` agree on this response and always will:
+        since milestone 34 a refusal states its retry time once and both the
+        header and the flag are rendered from it, so an in-flight refusal is
+        `retryable: true` with a `retry-after`, and a reuse refusal is
+        `retryable: false` with none. Until then the flag was derived from
+        `code` alone and reported `false` here while the header said otherwise,
+        which was recorded as a blocker rather than papered over, and is now
+        closed. A caller may key on either; they cannot disagree.
       headers:
         x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
         x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
         x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
         x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
-        # Sent on the in-flight refusal only. A reuse refusal never comes good
-        # on its own — the key is spent and the body will not match — so it
-        # carries no `retry-after`, and the header is optional here for exactly
-        # that reason.
+        # Sent on the in-flight refusal only, and exactly when `retryable` is
+        # true. A reuse refusal never comes good on its own — the key is spent
+        # and the body will not match — so it carries neither the header nor
+        # the flag, and the header is optional here for exactly that reason.
         retry-after: { $ref: "#/components/headers/RetryAfter" }
       content:
         application/json:
