@@ -128,13 +128,21 @@ export async function runScenario(): Promise<Scenario> {
   }, true);
   const subjectPrincipal = bodyOf<{ principal_id: string; identity_id: string }>(identity);
 
+  // With the administrator's credential, not anonymously: since milestone 31
+  // issuing a session requires `session.issue`, which `platform_admin` holds and
+  // an unauthenticated caller does not. Driven anonymously this now answers
+  // `401`, and the response gate would be checking the refusal's schema instead
+  // of the issued session's.
   const issued = await call("POST", "/v1/sessions", "/v1/sessions", {
     principal_id: subjectPrincipal.principal_id,
     channel_type: "telegram",
-  }, true);
+  });
   const issuedSession = bodyOf<{ session_id: string }>(issued);
 
   await call("GET", "/v1/sessions/current", "/v1/sessions/current");
+  // Somebody else's session, which needs `identity.write` — also the
+  // administrator's. A caller ending its own session would leave every later
+  // call in this scenario holding a revoked token.
   await call("POST", "/v1/sessions/revoke", "/v1/sessions/revoke", {
     session_id: issuedSession.session_id,
   });

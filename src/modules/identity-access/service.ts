@@ -191,6 +191,41 @@ export class IdentityService {
     return { session, token };
   }
 
+  /**
+   * Ends a session on behalf of a caller, which is the entitlement question
+   * `revokeSession` below deliberately does not ask.
+   *
+   * Two rules, and the order between them matters:
+   *
+   *  - **Your own session is yours to end.** No permission is required, because
+   *    logging out is not an administrative act and requiring one would mean an
+   *    ordinary member could never log out.
+   *  - **Anyone else's session needs `identity.write`.** Ending a session is
+   *    changing who can act as an identity, which is what that permission
+   *    already means.
+   *
+   * The authorization is checked **before** the "does this session exist"
+   * refusal, so an unprivileged caller is told the same thing whether the id is
+   * real or invented. That ordering is the whole point: until milestone 31 this
+   * route answered `204` to anybody for any id, and simply requiring a
+   * credential without this ordering would have replaced an open door with the
+   * existence oracle milestone 30 spent a cycle removing from the fulfillment
+   * reads.
+   */
+  async revokeSessionAs(
+    actor: AuthenticatedPrincipal,
+    sessionId: string,
+    correlationId: string,
+  ): Promise<void> {
+    assertId("session_id", sessionId);
+    const session = await this.repo.getSession(sessionId);
+    if (session === undefined || session.principal_id !== actor.principal_id) {
+      this.authorize(actor, "identity.write");
+    }
+    if (session === undefined) throw notFound("session not found");
+    await this.revokeSession(session.session_id, correlationId);
+  }
+
   async revokeSession(sessionId: string, correlationId: string): Promise<void> {
     assertId("session_id", sessionId);
     const session = await this.repo.getSession(sessionId);

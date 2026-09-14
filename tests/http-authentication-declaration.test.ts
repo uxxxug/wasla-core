@@ -49,6 +49,18 @@
  * today a weaker statement than it reads. Those are recorded, gated by
  * `anonymous-privilege-escalation.test.ts`, and not touched here.
  *
+ * **Superseded in one respect, and only additively (milestone 31).** The
+ * paragraph above was true when it was written and is kept as written. B-39 and
+ * B-40 were answered in the next cycle: issuing a session requires
+ * `session.issue`, revoking one requires that it be your own or that you hold
+ * `identity.write`, and the census below therefore names four anonymous routes
+ * instead of six and 48 required instead of 46. So "authenticated" is no longer
+ * the weaker statement that paragraph warns about — a token can now only come
+ * from a caller entitled to issue it, or from `npm run bootstrap:credential`,
+ * which needs the database rather than an HTTP request. The measurements in this
+ * header are the ones taken on the milestone-30 reservation commit and are not
+ * restated; `tests/session-issuance-entitlement.test.ts` carries milestone 31's.
+ *
  * No database: memory backend, so this gate runs in both CI jobs.
  */
 import { beforeAll, describe, expect, it } from "vitest";
@@ -63,14 +75,24 @@ const clock = new FixedClock(new Date("2026-06-01T00:00:00.000Z"));
 const core = createCoreApp({ clock, persistence: memoryPersistence(clock), rateLimit: false });
 const registrations = core.router.registrations();
 
-/** The six routes entitled to answer without a credential, named rather than counted. */
+/**
+ * The routes entitled to answer without a credential, named rather than counted.
+ *
+ * **Four, not the six this milestone left.** `POST /v1/sessions` and
+ * `POST /v1/sessions/revoke` were anonymous here because B-39 and B-40 were
+ * open: requiring a credential on them without deciding who may issue and who
+ * may revoke would have changed the refusal without closing the hole. Milestone
+ * 31 decided both — `session.issue` to issue, your own session or
+ * `identity.write` to revoke — so they are authenticated now, and the count
+ * below moves from 46 to 48. The measurements in the header stay as they were
+ * taken; nothing above this line is rewritten because a later cycle improved
+ * the number.
+ */
 const ANONYMOUS = [
   "GET /health",
   "GET /ready",
   "GET /metrics",
   "POST /v1/identities",
-  "POST /v1/sessions",
-  "POST /v1/sessions/revoke",
 ];
 
 const JUNK_ID = "01JZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -152,24 +174,28 @@ describe("every route declares whether it needs a credential", () => {
     // By name, not by count: a route added later that quietly declares itself
     // anonymous fails here, which is the whole point of writing the list out.
     expect(anonymous.sort()).toEqual([...ANONYMOUS].sort());
-    expect(registrations.filter((route) => route.authentication.required).length).toBe(46);
+    expect(registrations.filter((route) => route.authentication.required).length).toBe(48);
   });
 
   it("makes every anonymous route say why, in a sentence", () => {
     for (const route of registrations.filter((one) => !one.authentication.required)) {
       const reason = route.authentication.reason;
       expect(reason, label(route)).toBeTruthy();
-      // A reason is an argument, not a word. Three of these name the blocker
-      // that keeps them anonymous, which is how B-39 and B-40 stay visible.
+      // A reason is an argument, not a word. The three probes name the blocker
+      // that keeps them anonymous, which is how B-5 stays visible.
       expect(reason!.length, label(route)).toBeGreaterThan(20);
     }
     const reasons = registrations
       .filter((one) => !one.authentication.required)
       .map((one) => one.authentication.reason!)
       .join(" ");
-    expect(reasons).toContain("B-39");
-    expect(reasons).toContain("B-40");
     expect(reasons).toContain("B-5");
+    // B-39 and B-40 were answered in milestone 31, so no route may still be
+    // anonymous *because of them*. Asserted as an absence rather than deleted:
+    // a future cycle that re-opens either route citing a closed blocker fails
+    // here instead of quietly reintroducing the reason.
+    expect(reasons).not.toContain("B-39");
+    expect(reasons).not.toContain("B-40");
   });
 
   it("refuses a route declared anonymous with an empty reason", () => {
@@ -413,10 +439,11 @@ describe("the contract publishes the refusal", () => {
       .filter((one) => one.includes("/v1/"));
     const missing = required.filter((one) => !documented.has(one)).sort();
     const spurious = [...documented].filter((one) => !required.includes(one)).sort();
-    // Measured at 3 of 46 before this milestone.
+    // Measured at 3 of 46 before this milestone. 48 since milestone 31 made the
+    // two session routes require a credential.
     expect(missing).toEqual([]);
     expect(spurious).toEqual([]);
-    expect(documented.size).toBe(46);
+    expect(documented.size).toBe(48);
   });
 
   it("explains the ordering where a client will read it", () => {

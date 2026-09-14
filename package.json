@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "WASLA CORE — shared operating layer, shared engines, event backbone, fulfillment coordination.",
+  "description": "WASLA CORE \u2014 shared operating layer, shared engines, event backbone, fulfillment coordination.",
   "engines": {
     "node": ">=20"
   },
@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "replay": "vite-node src/platform/replay/main.ts --",
     "revive": "vite-node src/platform/replay/revive-main.ts --",
+    "bootstrap:credential": "vite-node src/platform/bootstrap/main.ts --",
     "test": "npm run test:suite && npm run test:cluster",
     "check:governance": "node scripts/check-governance.mjs",
     "check:roadmap": "node scripts/check-roadmap.mjs",

@@ -37,6 +37,19 @@
  * asserts the current behaviour so the gap is measured evidence in the suite
  * rather than a sentence in a document that could quietly stop being true. When
  * B-39 is answered, this case is the one that must be changed, on purpose.
+ *
+ * **It was answered in milestone 31, and that case was changed on purpose.** The
+ * paragraph above is kept as written, because it is the record of what was known
+ * when milestone 29 shipped and of the commitment it made. What changed:
+ * `POST /v1/sessions` now requires `session.issue`, held by `platform_admin` and
+ * by a `service` credential — the second of the three directions that paragraph
+ * lists, which is the one B-39 recommended. So the last case below now asserts
+ * `401` for an anonymous caller, `403` for an authenticated one holding nothing,
+ * and `201` only for a caller entitled to issue, with the issued session
+ * belonging to the named principal rather than to the issuer. The escalation
+ * chain this file measures is closed at both steps: the grant since milestone 29,
+ * the minting since milestone 31. `tests/session-issuance-entitlement.test.ts`
+ * carries the rest of that cycle's evidence, including revocation (B-40).
  */
 import { describe, expect, it } from "vitest";
 import { loadContract } from "./support/openapi.js";
@@ -262,7 +275,7 @@ describe("anonymous privilege escalation", () => {
     expect(read.status).toBe(403);
   });
 
-  it("records B-39: a session is still minted for any principal without proof of possession", async () => {
+  it("B-39, answered: no session is minted for a principal the caller may not become", async () => {
     const { core, organizationId, adminToken } = await fixture();
     // The administrator's own principal id, which is not a secret: it appears in
     // `GET /v1/sessions/current`, in every membership answer, and in audit reads.
@@ -278,18 +291,62 @@ describe("anonymous privilege escalation", () => {
       headers: {},
       body: { principal_id: adminPrincipalId, channel_type: "phone" },
     });
-    // Asserted as it currently is, deliberately: this is the open half of the
-    // escalation, it is B-39, and the honest place for it is a failing-if-it-changes
-    // measurement rather than prose. Closing B-39 means changing this expectation
-    // on purpose, in the cycle that decides what proof of possession is.
-    expect(minted.status).toBe(201);
-    const impersonated = (minted.body as { access_token: string }).access_token;
+    // **Changed on purpose in milestone 31**, which is what the comment this case
+    // used to carry said closing B-39 would mean. Until then this expectation read
+    // `toBe(201)` and the token that came back read another tenant's organization
+    // with a `200`: full impersonation of a named principal by anybody who had
+    // seen its id. Issuing a session now requires `session.issue`, so an
+    // unauthenticated caller is refused at the edge and never reaches the handler.
+    expect(minted.status).toBe(401);
+    expect((minted.body as { code: string }).code).toBe("unauthenticated");
+    expect(minted.body).not.toHaveProperty("access_token");
+
+    // A credential is not enough either: a principal with a real session and no
+    // membership anywhere holds no `session.issue`, and before milestone 31 this
+    // same call answered `201` for the administrator's principal.
+    const nobody = await outsider(core, "+966500000008");
+    const nobodySession = await core.identity.issueSession({
+      principal_id: nobody,
+      channel_type: "phone",
+      correlation_id: "escalation-test",
+    });
+    const attempted = await core.router.handle({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: { authorization: `Bearer ${nobodySession.token}` },
+      body: { principal_id: adminPrincipalId, channel_type: "phone" },
+    });
+    expect(attempted.status).toBe(403);
+    expect(attempted.body).not.toHaveProperty("access_token");
+
+    // And the administrator, who holds `session.issue`, still can — so the
+    // refusals above are about entitlement and not about the route being broken.
+    const legitimate = await core.router.handle({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: { authorization: `Bearer ${adminToken}` },
+      body: { principal_id: nobody, channel_type: "phone" },
+    });
+    expect(legitimate.status).toBe(201);
+    // The session it minted is the powerless principal's own, not the
+    // administrator's: issuing on somebody's behalf must not upgrade them.
+    const issuedFor = await core.router.handle({
+      method: "GET",
+      url: "/v1/sessions/current",
+      headers: {
+        authorization: `Bearer ${(legitimate.body as { access_token: string }).access_token}`,
+      },
+    });
+    expect((issuedFor.body as { principal_id: string }).principal_id).toBe(nobody);
+    expect((issuedFor.body as { roles: string[] }).roles).toEqual([]);
     const read = await core.router.handle({
       method: "GET",
       url: `/v1/organizations/${organizationId}`,
-      headers: { authorization: `Bearer ${impersonated}` },
+      headers: {
+        authorization: `Bearer ${(legitimate.body as { access_token: string }).access_token}`,
+      },
     });
-    expect(read.status).toBe(200);
+    expect(read.status).toBe(403);
   });
 
   /**
