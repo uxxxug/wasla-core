@@ -6866,3 +6866,21 @@ because `enforce_admins` is false, and reported as a bypass by the remote. CI
 passed on `main` afterwards (`34891648288`). The note above this one holds the
 audit trail; every commit since has gone through a branch and a PR.
 
+**CI verdict (the judgment, not the local run).** PR
+[#27](https://github.com/uxxxug/wasla-core/pull/27), head `d69fdd5`, runs
+`34894384677` (pull_request) and `34894377974` (push) — both `success` on both
+jobs. *Verify without a database*: **799 passed / 147 skipped across 59 files, 2
+skipped**, plus 1 skipped in the cluster pass. *Verify against PostgreSQL*
+(`postgres:16`): **1382 passed across 61 files, none skipped, plus 1 in the
+cluster pass — 1383**. The new gate reads **10 tests** in both jobs, and the new
+build step reports the same line in both: `test partition ok: 62 test files, 61
+in the suite pass and 1 in the cluster pass, each in exactly one`.
+
+**And the thing this cycle was for.** A bare `vitest run` locally now reports
+**799 passed / 147 skipped (946)** — character for character the no-database
+job's line. The 147-versus-148 difference this document carried for twelve
+cycles is not merely explained, it no longer exists, because there is no longer
+a second way to run the suite that produces a different number. Every earlier
+record keeps its 148 and its wrong hypothesis, as corrections here are additive;
+from this commit on, one number.
+
