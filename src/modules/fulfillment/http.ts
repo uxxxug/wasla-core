@@ -1,7 +1,8 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { Fulfillment } from "./domain.js";
 import type { FulfillmentService } from "./service.js";
 
@@ -20,7 +21,7 @@ function withDisposition(
 }
 
 export function registerFulfillmentRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   fulfillment: FulfillmentService,
   identity: IdentityService,
 ): void {
@@ -30,6 +31,7 @@ export function registerFulfillmentRoutes(
   router.get(
     "/v1/fulfillments/reconciliation/inconsistent",
     [{ name: "organization_id", kind: "text", required: true }],
+    AUTHENTICATED,
     async (ctx) => {
     const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
@@ -51,6 +53,7 @@ export function registerFulfillmentRoutes(
   router.get(
     "/v1/fulfillments/reconciliation/pending-financial-decision",
     [{ name: "organization_id", kind: "text", required: true }],
+    AUTHENTICATED,
     async (ctx) => {
     const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
@@ -71,6 +74,7 @@ export function registerFulfillmentRoutes(
   router.get(
     "/v1/fulfillments/reconciliation/stale-holds",
     [{ name: "organization_id", kind: "text", required: true }],
+    AUTHENTICATED,
     async (ctx) => {
     const organizationId = ctx.selection.requiredText("organization_id");
     await requirePrincipal(ctx, identity, "fulfillment.read", organizationId);
@@ -87,7 +91,7 @@ export function registerFulfillmentRoutes(
     };
   });
 
-  router.get("/v1/fulfillments/:fulfillment_id", [], async (ctx) => {
+  router.get("/v1/fulfillments/:fulfillment_id", [], AUTHENTICATED, async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.read", record.organization_id);
     return { status: 200, body: withDisposition(fulfillment, record) };
@@ -98,6 +102,7 @@ export function registerFulfillmentRoutes(
   router.post(
     "/v1/fulfillments/:fulfillment_id/cancel",
     objectBody({ name: "reason", kind: "text" }),
+    AUTHENTICATED,
     async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.request", record.organization_id);

@@ -1,11 +1,12 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { OrganizationService } from "./service.js";
 
 export function registerOrganizationRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   organizations: OrganizationService,
   identity: IdentityService,
 ): void {
@@ -15,6 +16,7 @@ export function registerOrganizationRoutes(
       { name: "name", kind: "text", required: true },
       { name: "country_code", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     // `await`: both of these are async, and a promise handed back as a body is
@@ -27,7 +29,7 @@ export function registerOrganizationRoutes(
     return { status: 201, body: organization };
   });
 
-  router.get("/v1/organizations/:organization_id", [], async (ctx) => {
+  router.get("/v1/organizations/:organization_id", [], AUTHENTICATED, async (ctx) => {
     const organizationId = ctx.params["organization_id"]!;
     await requirePrincipal(ctx, identity, "organization.read", organizationId);
     return { status: 200, body: await organizations.require(organizationId) };

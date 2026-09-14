@@ -2,6 +2,12 @@ import { IncomingMessage, ServerResponse } from "node:http";
 import { CoreError, invalid } from "../errors.js";
 import { newId } from "../ids.js";
 import type { MetricsRegistry } from "../observability/metrics.js";
+import {
+  AUTHENTICATED,
+  bearerCredential,
+  type AuthenticationSpec,
+  type Authenticator,
+} from "./authentication.js";
 import { NO_BODY, parseBody, type Body, type BodySpec } from "./body.js";
 import { parseHeaders, type RawHeaders, type RequestHeaders } from "./headers.js";
 import { sealHeaders } from "./response-headers.js";
@@ -14,7 +20,7 @@ import {
   type RateLimiter,
 } from "./rate-limit.js";
 
-export interface RequestContext {
+export interface RequestContext<A = unknown> {
   method: string;
   path: string;
   params: Record<string, string>;
@@ -49,6 +55,25 @@ export interface RequestContext {
    * for a header `DECLARED_HEADERS` names, and asking for anything else throws.
    */
   headers: RequestHeaders;
+  /**
+   * Who is making this request, established by the router before the handler
+   * ran, or `null` on a route whose registration declared itself anonymous.
+   *
+   * A handler does not authenticate. Milestone 30 measured what happens when it
+   * does: authentication was a line inside a function body, so 28 registrations
+   * answered `400` about the body to a caller holding no credential, and two
+   * answered `404` for an identifier that does not exist and `401` for one that
+   * does — an existence oracle for anonymous callers. The router now
+   * authenticates every registration that declared `AUTHENTICATED`, before the
+   * query string is parsed, before the body is parsed and before any handler
+   * runs, so `401` precedes `400` and precedes every lookup by construction
+   * rather than by each handler remembering to.
+   *
+   * `null` is not "unknown": on a required route the request never reaches a
+   * handler without a principal, so a handler seeing `null` is on a route that
+   * declared itself anonymous and said why.
+   */
+  principal: A | null;
   correlation_id: string;
   request_id: string;
 }
@@ -59,9 +84,11 @@ export interface HandlerResult {
   headers?: Record<string, string>;
 }
 
-export type Handler = (ctx: RequestContext) => Promise<HandlerResult> | HandlerResult;
+export type Handler<A = unknown> = (
+  ctx: RequestContext<A>,
+) => Promise<HandlerResult> | HandlerResult;
 
-interface Route {
+interface Route<A> {
   method: string;
   /**
    * The registered path, parameters included (`/v1/fulfillments/:fulfillment_id`).
@@ -71,7 +98,7 @@ interface Route {
    */
   template: string;
   segments: string[];
-  handler: Handler;
+  handler: Handler<A>;
   /**
    * Every query parameter this route accepts. An empty list means the route
    * accepts none and any query string is refused — the default, because a
@@ -83,17 +110,28 @@ interface Route {
    * property, because a forgotten declaration must fail closed here too.
    */
   body: BodySpec;
+  /**
+   * Whether this route may be reached without a credential. `AUTHENTICATED` —
+   * the default — requires one, because a forgotten declaration must fail
+   * closed here as it does for `accepts` and `body`.
+   */
+  authentication: AuthenticationSpec;
 }
 
 /**
- * What the router needs in order to be observable and defensible. Both optional:
- * most tests construct a bare router and must not have to know that metrics or
- * rate limiting exist, and a bare router behaves exactly as it did before
- * milestone 8.
+ * What the router needs in order to be observable and defensible.
+ *
+ * `metrics` and `rateLimiter` are optional: a bare router must not have to know
+ * that either exists, and behaves exactly as it did before milestone 8.
+ * `authenticator` is not optional. A router that cannot authenticate could only
+ * serve a required route by letting it through, and "the deployment forgot to
+ * wire authentication" is precisely the failure this milestone exists to make
+ * impossible — so it is impossible to construct.
  */
-export interface RouterOptions {
+export interface RouterOptions<A> {
   metrics?: MetricsRegistry;
   rateLimiter?: RateLimiter;
+  authenticator: Authenticator<A>;
 }
 
 export interface LogRecord {
@@ -127,18 +165,19 @@ function isThenable(value: unknown): boolean {
   );
 }
 
-export class Router {
-  private routes: Route[] = [];
+export class Router<A = unknown> {
+  private routes: Route<A>[] = [];
   readonly logs: LogRecord[] = [];
 
-  constructor(private readonly options: RouterOptions = {}) {}
+  constructor(private readonly options: RouterOptions<A>) {}
 
   add(
     method: string,
     path: string,
-    handler: Handler,
+    handler: Handler<A>,
     accepts: readonly ParamSpec[] = [],
     body: BodySpec = NO_BODY,
+    authentication: AuthenticationSpec = AUTHENTICATED,
   ): void {
     this.routes.push({
       method,
@@ -147,6 +186,7 @@ export class Router {
       handler,
       accepts,
       body,
+      authentication,
     });
   }
 
@@ -158,8 +198,13 @@ export class Router {
    * with them. A route that reads nothing from the query string writes `[]`, and
    * says so.
    */
-  get(path: string, accepts: readonly ParamSpec[], handler: Handler) {
-    this.add("GET", path, handler, accepts);
+  get(
+    path: string,
+    accepts: readonly ParamSpec[],
+    authentication: AuthenticationSpec,
+    handler: Handler<A>,
+  ) {
+    this.add("GET", path, handler, accepts, NO_BODY, authentication);
   }
 
   /**
@@ -178,12 +223,14 @@ export class Router {
     readonly template: string;
     readonly accepts: readonly ParamSpec[];
     readonly body: BodySpec;
+    readonly authentication: AuthenticationSpec;
   }[] {
     return this.routes.map((route) => ({
       method: route.method,
       template: route.template,
       accepts: route.accepts,
       body: route.body,
+      authentication: route.authentication,
     }));
   }
   /**
@@ -193,11 +240,19 @@ export class Router {
    * is the whole of what a write route reads from its caller, and a route that
    * reads none of it writes `NO_BODY` and says so.
    */
-  post(path: string, body: BodySpec, handler: Handler) {
-    this.add("POST", path, handler, [], body);
+  post(
+    path: string,
+    body: BodySpec,
+    authentication: AuthenticationSpec,
+    handler: Handler<A>,
+  ) {
+    this.add("POST", path, handler, [], body, authentication);
   }
 
-  private match(method: string, path: string): { route: Route; params: Record<string, string> } | null {
+  private match(
+    method: string,
+    path: string,
+  ): { route: Route<A>; params: Record<string, string> } | null {
     const parts = path.split("/").filter(Boolean);
     for (const route of this.routes) {
       if (route.method !== method) continue;
@@ -370,9 +425,18 @@ export class Router {
       return result;
     }
 
+    let principal: A | null = null;
     let selection: Selection;
     let parsedBody: Body;
     try {
+      // Authentication first — before the query string is parsed, before the
+      // body is parsed, and before any handler can look anything up. A caller
+      // with no credential is told that, and is told nothing else: not whether
+      // its body was well formed, and not whether the identifier it named
+      // exists. Milestone 30 measured both leaks on this router.
+      if (matched.route.authentication.required) {
+        principal = await this.options.authenticator.authenticate(bearerCredential(headers));
+      }
       // Parsed here, before the handler and after the rate limit, for the same
       // reason the limit is checked here: a request CORE cannot understand must
       // not have touched a store, an outbox or an audit entry on its way to a
@@ -407,13 +471,14 @@ export class Router {
       };
     }
 
-    const ctx: RequestContext = {
+    const ctx: RequestContext<A> = {
       method: input.method,
       path: url.pathname,
       params: matched.params,
       selection,
       input: parsedBody,
       headers,
+      principal,
       correlation_id: correlationId,
       request_id: requestId,
     };

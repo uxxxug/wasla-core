@@ -1,3 +1,4 @@
+import { anonymous } from "../http/authentication.js";
 import type { Router } from "../http/router.js";
 import type { MetricsRegistry } from "./metrics.js";
 
@@ -30,12 +31,23 @@ import type { MetricsRegistry } from "./metrics.js";
  * inside the process — where the listener is exposed is a deployment decision,
  * and CORE's deployment topology is still an external dependency (B-5).
  */
-export function registerMetricsRoutes(router: Router, registry: MetricsRegistry): void {
-  router.get("/metrics", [], async () => ({
-    status: 200,
-    // A string body: the router's Node adapter writes strings verbatim with the
-    // Prometheus content type instead of JSON-encoding them.
-    body: registry.render(),
-    headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
-  }));
+export function registerMetricsRoutes<A>(router: Router<A>, registry: MetricsRegistry): void {
+  router.get(
+    "/metrics",
+    [],
+    // Declared anonymous rather than left anonymous. A scraper is a process
+    // with no session, and requiring a credential would mean CORE could only be
+    // monitored by something that can obtain one — but the reason it is safe is
+    // the paragraph above, not the absence of a line of code, and B-5 is the
+    // record that keeping this off the public internet is a deployment duty
+    // CORE cannot discharge from inside the process.
+    anonymous("a scrape target has no session; kept off the public internet by deployment (B-5)"),
+    async () => ({
+      status: 200,
+      // A string body: the router's Node adapter writes strings verbatim with
+      // the Prometheus content type instead of JSON-encoding them.
+      body: registry.render(),
+      headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
+    }),
+  );
 }

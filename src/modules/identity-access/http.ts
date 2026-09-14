@@ -1,4 +1,5 @@
 import { unauthenticated } from "../../platform/errors.js";
+import { AUTHENTICATED, anonymous } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
 import { CHANNEL_TYPES } from "./domain.js";
@@ -14,29 +15,44 @@ const ROLES: readonly Role[] = [
   "service",
 ];
 
-
-export function bearer(ctx: RequestContext): string {
-  // One declared read. The `Array.isArray(header) ? header[0]` this replaced
-  // chose one of two credentials without saying so; a repeated `authorization`
-  // is now refused at the edge by `parseHeaders`, and what arrives here is a
-  // single bounded value whose *validity* is still this module's question.
-  const raw = ctx.headers.value("authorization");
-  if (!raw || !raw.startsWith("Bearer ")) throw unauthenticated("missing bearer token");
-  return raw.slice("Bearer ".length);
+/**
+ * The authenticated caller the router already established.
+ *
+ * There is no second authentication here, and no second read of
+ * `authorization`. Until milestone 30 every handler that needed a caller
+ * authenticated one itself, which made authentication a property of a function
+ * body: 28 registrations answered `400` about the body to a caller with no
+ * credential at all, and the two fulfillment reads answered `404` for an
+ * unknown identifier and `401` for a real one. The router now authenticates
+ * before it parses anything, so by the time a handler runs the question is
+ * already answered — and answering it twice would let the two answers differ.
+ */
+export function currentPrincipal(
+  ctx: RequestContext<AuthenticatedPrincipal>,
+): AuthenticatedPrincipal {
+  // Unreachable on a route that declared `AUTHENTICATED`: the router refuses
+  // the request before the handler exists. Reachable only if a route declares
+  // itself anonymous and then asks who the caller is, which is a contradiction
+  // in the registration, and is refused rather than guessed.
+  if (ctx.principal === null) throw unauthenticated("missing bearer token");
+  return ctx.principal;
 }
 
 export async function requirePrincipal(
-  ctx: RequestContext,
+  ctx: RequestContext<AuthenticatedPrincipal>,
   identity: IdentityService,
   permission: Permission,
   organizationId?: string,
 ): Promise<AuthenticatedPrincipal> {
-  const actor = await identity.authenticate(bearer(ctx));
+  const actor = currentPrincipal(ctx);
   await identity.authorize(actor, permission, organizationId);
   return actor;
 }
 
-export function registerIdentityRoutes(router: Router, identity: IdentityService): void {
+export function registerIdentityRoutes(
+  router: Router<AuthenticatedPrincipal>,
+  identity: IdentityService,
+): void {
   // Resolve-or-create an identity from a channel account. Idempotent by design.
   router.post(
     "/v1/identities",
@@ -47,6 +63,10 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
       { name: "source_system", kind: "text" },
       { name: "legacy_id", kind: "nullable_text" },
     ),
+    // An unknown caller has to be able to appear: this is where a person who
+    // has never spoken to CORE becomes a principal, so requiring a credential
+    // here would mean no credential could ever be obtained.
+    anonymous("the entry point: a caller with no identity yet asks for one"),
     async (ctx) => {
     const sourceSystem = ctx.input.text("source_system");
     const result = await identity.registerIdentity({
@@ -75,6 +95,13 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
       { name: "principal_id", kind: "text", required: true },
       { name: "channel_type", kind: "enum", values: CHANNELS, required: true },
     ),
+    // The login surface: a caller presenting no token is exactly who asks for
+    // one. That this route will mint a token for *any* `principal_id` it is
+    // given is B-39, and it is open — an authentication requirement here would
+    // not close it and would break every caller obtaining its first session, so
+    // it stays recorded as the blocker it is rather than being half-answered
+    // here. `tests/anonymous-privilege-escalation.test.ts` holds it visible.
+    anonymous("the login surface: this is how a credential is obtained (B-39)"),
     async (ctx) => {
     const { session, token } = await identity.issueSession({
       principal_id: ctx.input.requiredText("principal_id"),
@@ -93,14 +120,19 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
   });
 
   // Verify the caller's own session. Returns principal, org membership and permissions.
-  router.get("/v1/sessions/current", [], async (ctx) => {
-    const actor = await identity.authenticate(bearer(ctx));
-    return { status: 200, body: actor };
+  router.get("/v1/sessions/current", [], AUTHENTICATED, async (ctx) => {
+    return { status: 200, body: currentPrincipal(ctx) };
   });
 
   router.post(
     "/v1/sessions/revoke",
     objectBody({ name: "session_id", kind: "text", required: true }),
+    // That this route revokes any named session without a credential is B-40,
+    // and it is open. Declaring `AUTHENTICATED` here would change the refusal a
+    // caller sees without deciding whose session a principal may end — the
+    // question B-40 actually records — and would silently flip the gate that
+    // keeps the blocker visible. It stays declared, open and named.
+    anonymous("revocation takes no credential today (B-40)"),
     async (ctx) => {
     identity.revokeSession(ctx.input.requiredText("session_id"), ctx.correlation_id);
     return { status: 204, body: null };
@@ -113,8 +145,9 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
       { name: "permission", kind: "text", required: true },
       { name: "organization_id", kind: "text" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
-    const actor = await identity.authenticate(bearer(ctx));
+    const actor = currentPrincipal(ctx);
     const permission = ctx.input.requiredText("permission") as Permission;
     const organizationId = ctx.input.text("organization_id") ?? undefined;
     try {
@@ -132,6 +165,7 @@ export function registerIdentityRoutes(router: Router, identity: IdentityService
       { name: "organization_id", kind: "text", required: true },
       { name: "roles", kind: "enum_list", values: ROLES, required: true, minItems: 1 },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     const roles = [...ctx.input.strings("roles")] as Role[];
     // Authenticated and authorized **on the organization being granted into**,

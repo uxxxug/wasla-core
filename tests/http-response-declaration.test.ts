@@ -60,6 +60,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
+import { anonymous } from "../src/platform/http/authentication.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
 import { loadContract, violations, type Operation } from "./support/openapi.js";
@@ -200,10 +201,18 @@ describe("declared HTTP responses", () => {
     // of registrations the coverage case compares against the contract.
     const clock = new FixedClock(new Date("2026-06-01T00:00:00.000Z"));
     const core = createCoreApp({ clock, persistence: memoryPersistence(clock), rateLimit: false });
-    core.router.get("/v1/__unawaited", [], async () => ({
+    core.router.get(
+      "/v1/__unawaited",
+      [],
+      // A throwaway probe about the shape of a body, not about who may read
+      // it: declared anonymous so the refusal under test is the internal error
+      // and not the 401 the router would otherwise answer first.
+      anonymous("throwaway probe: the assertion is about an unawaited body"),
+      async () => ({
       status: 200,
-      body: Promise.resolve({ organization_id: "never-seen" }) as unknown,
-    }));
+        body: Promise.resolve({ organization_id: "never-seen" }) as unknown,
+      }),
+    );
     const response = await core.router.handle({ method: "GET", url: "/v1/__unawaited", headers: {} });
     expect(response.status).toBe(500);
     expect(JSON.stringify(response.body)).not.toContain("never-seen");

@@ -1,26 +1,27 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { GeographyService } from "./service.js";
 
 export function registerGeographyRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   geography: GeographyService,
   identity: IdentityService,
 ): void {
   // Reference reads are open to any authenticated principal.
-  router.get("/v1/geography/countries", [], async (ctx) => {
+  router.get("/v1/geography/countries", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { countries: await geography.countries() } };
   });
 
-  router.get("/v1/geography/countries/:country_code/regions", [], async (ctx) => {
+  router.get("/v1/geography/countries/:country_code/regions", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { regions: await geography.regions(ctx.params["country_code"] ?? "") } };
   });
 
-  router.get("/v1/geography/regions/:region_id/cities", [], async (ctx) => {
+  router.get("/v1/geography/regions/:region_id/cities", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     return { status: 200, body: { cities: await geography.cities(ctx.params["region_id"] ?? "") } };
   });
@@ -32,6 +33,7 @@ export function registerGeographyRoutes(
       { name: "longitude", kind: "decimal", required: true },
       { name: "country_code", kind: "text" },
     ],
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const countryCode = ctx.selection.text("country_code");
@@ -53,6 +55,7 @@ export function registerGeographyRoutes(
       { name: "name", kind: "text", required: true },
       { name: "default_currency", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -73,6 +76,7 @@ export function registerGeographyRoutes(
       { name: "code", kind: "text", required: true },
       { name: "name", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -94,6 +98,7 @@ export function registerGeographyRoutes(
       { name: "latitude", kind: "number", required: true },
       { name: "longitude", kind: "number", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     return {
@@ -117,6 +122,7 @@ export function registerGeographyRoutes(
       { name: "centre_latitude", kind: "number" },
       { name: "centre_longitude", kind: "number" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const latitude = ctx.input.number("centre_latitude");

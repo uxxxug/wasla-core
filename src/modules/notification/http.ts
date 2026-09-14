@@ -1,7 +1,8 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { NotificationStatus } from "./domain.js";
 import type { NotificationReadService, NotificationRecipientRegistry } from "./service.js";
 
@@ -28,7 +29,7 @@ const STATUSES: readonly NotificationStatus[] = [
  * to somebody's phone.
  */
 export function registerNotificationRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   recipients: NotificationRecipientRegistry,
   reads: NotificationReadService,
   identity: IdentityService,
@@ -47,6 +48,7 @@ export function registerNotificationRoutes(
       { name: "channel", kind: "text", required: true },
       { name: "correlation_id", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const created = await recipients.register({
@@ -62,6 +64,7 @@ export function registerNotificationRoutes(
   router.get(
     "/v1/notification-recipients",
     [{ name: "organization_id", kind: "text" }],
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const organizationId = ctx.selection.text("organization_id");
@@ -75,6 +78,7 @@ export function registerNotificationRoutes(
   router.post(
     "/v1/notification-recipients/:recipient_id/deactivate",
     objectBody({ name: "correlation_id", kind: "text", required: true }),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const updated = await recipients.setActive(
@@ -98,6 +102,7 @@ export function registerNotificationRoutes(
       { name: "organization_id", kind: "text" },
       { name: "limit", kind: "limit", default: 100, min: 1, max: 500 },
     ],
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const status = ctx.selection.text("status") as (typeof STATUSES)[number] | undefined;

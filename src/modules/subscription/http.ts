@@ -1,7 +1,8 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { NO_BODY, objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { BillingInterval, SubscriptionOwnerType } from "./domain.js";
 import type { SubscriptionService } from "./service.js";
 
@@ -27,7 +28,7 @@ const BILLING_INTERVALS = ["day", "week", "month", "year"] as const;
  * class as `/v1/wallets`, not a product integration path.
  */
 export function registerSubscriptionRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   billing: SubscriptionService,
   identity: IdentityService,
 ): void {
@@ -59,6 +60,7 @@ export function registerSubscriptionRoutes(
         ],
       },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const intervalCount = ctx.input.number("interval_count");
@@ -78,19 +80,19 @@ export function registerSubscriptionRoutes(
     return { status: 201, body: { ...result.plan, grants: result.grants } };
   });
 
-  router.get("/v1/plans", [{ name: "status", kind: "enum", values: PLAN_STATUSES }], async (ctx) => {
+  router.get("/v1/plans", [{ name: "status", kind: "enum", values: PLAN_STATUSES }], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
     const status = ctx.selection.text("status") as (typeof PLAN_STATUSES)[number] | undefined;
     return { status: 200, body: { plans: await billing.listPlans(status) } };
   });
 
-  router.get("/v1/plans/:plan_id", [], async (ctx) => {
+  router.get("/v1/plans/:plan_id", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
     const result = await billing.getPlan(ctx.params["plan_id"] ?? "");
     return { status: 200, body: { ...result.plan, grants: result.grants } };
   });
 
-  router.post("/v1/plans/:plan_id/activate", NO_BODY, async (ctx) => {
+  router.post("/v1/plans/:plan_id/activate", NO_BODY, AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -101,7 +103,7 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.post("/v1/plans/:plan_id/retire", NO_BODY, async (ctx) => {
+  router.post("/v1/plans/:plan_id/retire", NO_BODY, AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -121,6 +123,7 @@ export function registerSubscriptionRoutes(
       { name: "wallet_id", kind: "text", required: true },
       { name: "starts_at", kind: "text" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const startsAt = ctx.input.text("starts_at");
@@ -146,7 +149,7 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.get("/v1/subscriptions/:subscription_id", [], async (ctx) => {
+  router.get("/v1/subscriptions/:subscription_id", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.read");
     const result = await billing.getSubscription(ctx.params["subscription_id"] ?? "");
     return { status: 200, body: { ...result.subscription, periods: result.periods } };
@@ -155,6 +158,7 @@ export function registerSubscriptionRoutes(
   router.post(
     "/v1/subscriptions/:subscription_id/cancel",
     objectBody({ name: "reason", kind: "text", required: true }),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const result = await billing.cancelSubscription({
@@ -176,6 +180,7 @@ export function registerSubscriptionRoutes(
       { name: "usage_reference", kind: "text", required: true },
       { name: "at", kind: "text" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const at = ctx.input.text("at");
@@ -192,7 +197,7 @@ export function registerSubscriptionRoutes(
     return { status: result.recorded ? 201 : 200, body: result.usage };
   });
 
-  router.post("/v1/subscription-periods/:period_id/collect", NO_BODY, async (ctx) => {
+  router.post("/v1/subscription-periods/:period_id/collect", NO_BODY, AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const result = await billing.chargePeriod({
       period_id: ctx.params["period_id"] ?? "",

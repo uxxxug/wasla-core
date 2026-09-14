@@ -47,12 +47,13 @@
  * jobs rather than only the one with Postgres.
  */
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { Selection, type ParamSpec } from "../src/platform/http/query.js";
 import { calls, readCode, sourceFiles } from "./support/source.js";
+import { anonymousCredential } from "./support/credential.js";
 
 const clock = new FixedClock(new Date("2026-06-01T00:00:00.000Z"));
 const core = createCoreApp({ clock, persistence: memoryPersistence(clock), rateLimit: false });
@@ -152,13 +153,30 @@ function contractQueryParameters(): Map<string, Set<string>> {
   return byTemplate;
 }
 
+/**
+ * A credential that is valid and entitled to nothing.
+ *
+ * Every probe below is sent with it. Until milestone 30 these probes were sent
+ * anonymously and the parse answered first; the router now authenticates a
+ * route that declared `AUTHENTICATED` before it parses the query string, so an
+ * anonymous probe would measure the 401 and never reach the refusal this file
+ * exists to assert. Authenticated-but-unauthorized keeps what this file had:
+ * the 400 is still shown to precede the 403 this caller would otherwise get.
+ */
+let token = "";
+beforeAll(async () => {
+  token = await anonymousCredential(core);
+});
+
 async function call(
   method: string,
   path: string,
+  credential: string | null = token,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const response = await core.router.handle({
     method,
     url: path,
+    headers: credential === null ? {} : { authorization: `Bearer ${credential}` },
     body: method === "GET" ? undefined : {},
   });
   return { status: response.status, body: (response.body ?? {}) as Record<string, unknown> };
@@ -190,13 +208,27 @@ describe("every route refuses the parameters it does not read", () => {
     }
   });
 
-  it("refuses an unknown parameter before authenticating, and reveals nothing else", async () => {
-    // The refusal is about the route's own contract — which parameters exist is
-    // published in `contracts/openapi.yaml` — so answering it before the
-    // credential is checked discloses nothing a reader of the contract lacks. It
-    // is asserted rather than assumed because the ordering is deliberate: a
+  it("refuses an unknown parameter to a caller who has a credential, 401 to one who has none", async () => {
+    // The reverse of what milestone 24 asserted here, deliberately. Its
+    // reasoning was that "the refusal is about the route's own contract — which
+    // parameters exist is published — so answering it before the credential is
+    // checked discloses nothing a reader of the contract lacks", and that "a
     // request CORE cannot understand must not reach a store, and authentication
-    // is a store read.
+    // is a store read".
+    //
+    // The first half is kept: an authenticated caller still hears about its
+    // typo, below. The second half is what milestone 30 measured the cost of —
+    // ordering the parse first meant 28 registrations described their input to
+    // a caller holding no credential, and two fulfillment reads distinguished a
+    // real identifier from an invented one for that same caller. The store
+    // argument survives the reversal: a request with no bearer header is
+    // refused before any session is read, so the anonymous answer still costs
+    // zero reads, and a junk credential costs one indexed read that the rate
+    // limiter — checked earlier still — already bounds.
+    const anonymous = await call("GET", `/v1/notifications?${UNKNOWN}=1`, null);
+    expect(anonymous.status).toBe(401);
+    expect(JSON.stringify(anonymous.body)).not.toContain(UNKNOWN);
+
     const { status, body } = await call("GET", `/v1/notifications?${UNKNOWN}=1`);
     expect(status).toBe(400);
     expect(body["code"]).toBe("invalid_request");

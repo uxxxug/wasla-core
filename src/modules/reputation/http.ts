@@ -1,8 +1,9 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { invalid } from "../../platform/errors.js";
 import type { Selection } from "../../platform/http/query.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import { isReputationSubjectType, type ReputationSubject } from "./domain.js";
 import { MAX_SIGNAL_PAGE, type ReputationService } from "./service.js";
 
@@ -44,7 +45,7 @@ function subjectOf(ctx: {
  * quietly taken here.
  */
 export function registerReputationRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   reputation: ReputationService,
   identity: IdentityService,
 ): void {
@@ -53,6 +54,7 @@ export function registerReputationRoutes(
   router.get(
     "/v1/reputation/:subject_type/:subject_id",
     [{ name: "organization_id", kind: "text", required: true }],
+    AUTHENTICATED,
     async (ctx) => {
     const subject = subjectOf(ctx);
     await requirePrincipal(ctx, identity, "reputation.read", subject.organization_id);
@@ -67,6 +69,7 @@ export function registerReputationRoutes(
       { name: "organization_id", kind: "text", required: true },
       { name: "limit", kind: "limit", default: 50, min: 1, max: MAX_SIGNAL_PAGE },
     ],
+    AUTHENTICATED,
     async (ctx) => {
     const subject = subjectOf(ctx);
     await requirePrincipal(ctx, identity, "reputation.read", subject.organization_id);

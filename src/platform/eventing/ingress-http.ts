@@ -1,11 +1,12 @@
+import { AUTHENTICATED } from "../http/authentication.js";
 import { opaqueBody } from "../http/body.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
-import type { IdentityService } from "../../modules/identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../../modules/identity-access/service.js";
 import type { EventIngress } from "./ingress.js";
 
 export function registerIngressRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   ingress: EventIngress,
   identity: IdentityService,
 ): void {
@@ -20,6 +21,7 @@ export function registerIngressRoutes(
     // two would drift. Milestone 25's gate names this route, so a second opaque
     // body cannot appear without the gate reporting it.
     opaqueBody("the event envelope is validated against contracts/events by normalize.ts"),
+    AUTHENTICATED,
     async (ctx) => {
     const actor = await requirePrincipal(ctx, identity, "events.submit");
     // The caller comes from the credential, never from the request body.
