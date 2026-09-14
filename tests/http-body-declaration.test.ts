@@ -44,12 +44,13 @@
  * No database: none of this depends on a store, so it runs in both CI jobs.
  */
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { Body, parseBody, type BodySpec, type FieldSpec } from "../src/platform/http/body.js";
 import { calls, readCode, sourceFiles } from "./support/source.js";
+import { anonymousCredential } from "./support/credential.js";
 
 const clock = new FixedClock(new Date("2026-06-01T00:00:00.000Z"));
 const core = createCoreApp({ clock, persistence: memoryPersistence(clock), rateLimit: false });
@@ -114,11 +115,33 @@ function minimalBody(spec: BodySpec): Record<string, unknown> {
   return body;
 }
 
-async function send(route: { method: string; template: string }, body: unknown) {
+/**
+ * A credential that is valid and entitled to nothing.
+ *
+ * Every probe below is sent with it. Until milestone 30 these probes were sent
+ * anonymously and the parse answered first; the router now authenticates a
+ * route that declared `AUTHENTICATED` before it parses anything, so an
+ * anonymous probe would measure the 401 and never reach the refusal this file
+ * exists to assert. Authenticated-but-unauthorized is the weakest credential
+ * that still gets past the router, and it keeps the old property this file had
+ * for free: the 400 is shown to come before the 403 this caller would
+ * otherwise get, so a parse refusal still cannot be confused with a permission
+ * answer.
+ */
+let token = "";
+beforeAll(async () => {
+  token = await anonymousCredential(core);
+});
+
+async function send(
+  route: { method: string; template: string },
+  body: unknown,
+  credential: string | null = token,
+) {
   return core.router.handle({
     method: route.method,
     url: concrete(route.template),
-    headers: {},
+    headers: credential === null ? {} : { authorization: `Bearer ${credential}` },
     body,
   });
 }
@@ -156,17 +179,45 @@ describe("every write route accepts only the body it declares", () => {
     }
   });
 
-  it("refuses an unknown property before it authenticates", async () => {
-    // Order matters for honesty about the answer: a request carrying no token and
-    // a typo must hear about the typo, because 401 would send the caller to fix a
-    // credential that was never the problem. Milestone 24 made the same choice
-    // for parameters; the two must not disagree.
-    const response = await send(
+  it("refuses an unknown property to a caller who has one, and 401 to a caller who has none", async () => {
+    // This case is the reverse of the one milestone 25 wrote here, and the
+    // reversal is deliberate rather than incidental. What it used to assert:
+    // "a request carrying no token and a typo must hear about the typo, because
+    // 401 would send the caller to fix a credential that was never the
+    // problem". That reasoning is kept — for a caller CORE has authenticated,
+    // the typo is still what it hears about, and that is the first assertion
+    // below.
+    //
+    // What changed is the answer to a caller with **no** credential. Milestone
+    // 30 measured what the old order cost: 28 of 52 registrations described
+    // their body to a caller who had presented nothing, and the two fulfillment
+    // reads answered 404 for an unknown identifier and 401 for a real one,
+    // which told an anonymous caller which identifiers exist. An anonymous
+    // caller now learns one thing — that it is anonymous.
+    //
+    // Milestone 25's other reason was that "a request CORE cannot understand
+    // must not reach a store, and authentication is a store read". It still
+    // does not: a request with no bearer header is refused by the router before
+    // any session is looked up, so this answer costs zero reads. A request with
+    // a *junk* credential costs one indexed session read, which the rate
+    // limiter — checked before authentication — already bounds.
+    const authenticated = await send(
       { method: "POST", template: "/v1/wallets" },
       { owner_type: "identity", owner_id: "x", currency: "SAR", CURRENCY: "SAR" },
     );
-    expect(response.status).toBe(400);
-    expect(messageOf(response)).toContain("CURRENCY");
+    expect(authenticated.status).toBe(400);
+    expect(messageOf(authenticated)).toContain("CURRENCY");
+
+    const anonymous = await send(
+      { method: "POST", template: "/v1/wallets" },
+      { owner_type: "identity", owner_id: "x", currency: "SAR", CURRENCY: "SAR" },
+      null,
+    );
+    expect(anonymous.status).toBe(401);
+    // And it is told nothing about the body it sent: not the property it
+    // misspelled, and not the spelling the route would have accepted.
+    expect(JSON.stringify(anonymous.body)).not.toContain("CURRENCY");
+    expect(JSON.stringify(anonymous.body)).not.toContain("currency");
   });
 
   it("refuses any property on a route that declares no body", async () => {
@@ -283,8 +334,9 @@ describe("every write route accepts only the body it declares", () => {
         grants: [{ feature_key: "f", limit_value: null }],
       },
     );
-    // Not a 400: the body was understood. Without a token it is a 401, and that
-    // is the handler's answer rather than the parse's.
+    // Not a 400: the body was understood. This credential is entitled to
+    // nothing, so the answer is the 403 the authorization check gives — which
+    // is the point: the parse refusal above came first.
     expect(explicit.status).not.toBe(400);
   });
 
@@ -432,7 +484,9 @@ describe("every write route accepts only the body it declares", () => {
     // the router itself receives is a different interface and does carry one —
     // something has to hand the raw body to `parseBody`.
     const router = readCode("src/platform/http/router.ts");
-    const context = /export interface RequestContext \{([\s\S]*?)\n\}/.exec(router);
+    // The type parameter arrived with milestone 30: the context now carries the
+    // principal the router established, and its type is the module's.
+    const context = /export interface RequestContext(?:<[^>]*>)? \{([\s\S]*?)\n\}/.exec(router);
     expect(context, "RequestContext not found").not.toBeNull();
     expect(context![1]!).not.toMatch(/\bbody\b/);
     expect(context![1]!).toMatch(/input: Body;/);

@@ -47,6 +47,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
 import { createCoreApp } from "../src/app.js";
+import { anonymous } from "../src/platform/http/authentication.js";
 import { FixedClock } from "../src/platform/clock.js";
 import { memoryPersistence } from "../src/platform/persistence/backends.js";
 import {
@@ -241,9 +242,17 @@ describe("declared response headers", () => {
     // A throwaway app, not the scenario's: adding a route to a shared router
     // breaks the coverage gate that says the driven set equals the contract's.
     const probe = app(false);
-    probe.router.get("/v1/throwing-probe", [], () => {
-      throw new Error("boom");
-    });
+    probe.router.get(
+      "/v1/throwing-probe",
+      [],
+      // Declared anonymous so the answer under test is the 500 this case is
+      // about, rather than the 401 an authenticated declaration would produce
+      // before the handler ever ran.
+      anonymous("throwaway probe: the assertion is about an unhandled exception"),
+      () => {
+        throw new Error("boom");
+      },
+    );
     const thrown = await probe.router.handle({
       method: "GET",
       url: "/v1/throwing-probe",

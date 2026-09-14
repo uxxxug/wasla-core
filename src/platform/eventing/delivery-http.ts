@@ -1,12 +1,13 @@
+import { AUTHENTICATED } from "../http/authentication.js";
 import { notFound } from "../errors.js";
 import { NO_BODY, objectBody } from "../http/body.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
-import type { IdentityService } from "../../modules/identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../../modules/identity-access/service.js";
 import { redactDelivery, type SubscriptionRegistry } from "./delivery.js";
 
 export function registerDeliveryRoutes(
-  router: Router,
+  router: Router<AuthenticatedPrincipal>,
   registry: SubscriptionRegistry,
   identity: IdentityService,
 ): void {
@@ -20,6 +21,7 @@ export function registerDeliveryRoutes(
       { name: "endpoint_url", kind: "text", required: true },
       { name: "signing_secret", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const created = await registry.register({
@@ -33,7 +35,7 @@ export function registerDeliveryRoutes(
     return { status: 201, body: created };
   });
 
-  router.get("/v1/event-subscriptions", [], async (ctx) => {
+  router.get("/v1/event-subscriptions", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const items = await registry.list();
     return { status: 200, body: { count: items.length, items } };
@@ -42,7 +44,7 @@ export function registerDeliveryRoutes(
   // Pausing a subscriber stops the fan-out queueing new work for it. Deliveries
   // already queued stay queued: they were promised, and dropping them silently
   // would be worse than delivering them late.
-  router.post("/v1/event-subscriptions/:subscription_id/deactivate", NO_BODY, async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/deactivate", NO_BODY, AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();
@@ -51,7 +53,7 @@ export function registerDeliveryRoutes(
     return { status: 200, body: { subscription_id: id, active: false } };
   });
 
-  router.post("/v1/event-subscriptions/:subscription_id/activate", NO_BODY, async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/activate", NO_BODY, AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();
@@ -62,7 +64,7 @@ export function registerDeliveryRoutes(
 
   // What CORE has promised to deliver and has not. An empty list is the
   // invariant an operator should expect to see.
-  router.get("/v1/event-deliveries/undelivered", [], async (ctx) => {
+  router.get("/v1/event-deliveries/undelivered", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.read");
     const items = await registry.undelivered();
     // The claim token is redacted for the reason the signing secret is: it is a

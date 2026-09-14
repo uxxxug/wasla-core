@@ -19,6 +19,7 @@ import {
 import { FetchTransport } from "./platform/eventing/fetch-transport.js";
 import { registerDeliveryRoutes } from "./platform/eventing/delivery-http.js";
 import { newId } from "./platform/ids.js";
+import { anonymous } from "./platform/http/authentication.js";
 import { Router } from "./platform/http/router.js";
 import {
   DEFAULT_RATE_LIMIT_POLICY,
@@ -30,7 +31,7 @@ import { MetricsRegistry } from "./platform/observability/metrics.js";
 import { registerMetricsRoutes } from "./platform/observability/http.js";
 import { DepthSampler } from "./platform/observability/sampler.js";
 import { workerMetrics } from "./platform/observability/worker-metrics.js";
-import { IdentityService } from "./modules/identity-access/service.js";
+import { IdentityService, type AuthenticatedPrincipal } from "./modules/identity-access/service.js";
 import { OrganizationService } from "./modules/organization/service.js";
 import { registerIdentityRoutes } from "./modules/identity-access/http.js";
 import { registerOrganizationRoutes } from "./modules/organization/http.js";
@@ -55,7 +56,7 @@ import { registerNotificationRoutes } from "./modules/notification/http.js";
 import type { NotificationChannel } from "./modules/notification/ports.js";
 
 export interface CoreApp {
-  router: Router;
+  router: Router<AuthenticatedPrincipal>;
   bus: LocalEventBus;
   outbox: OutboxStore;
   boundary: TransactionBoundary;
@@ -340,19 +341,40 @@ export function createCoreApp(
           clock,
           options.rateLimitPolicy ?? DEFAULT_RATE_LIMIT_POLICY,
         );
-  const router = new Router({ metrics, rateLimiter });
-  router.get("/health", [], () => ({ status: 200, body: { status: "ok" } }));
-  router.get("/ready", [], async () => ({
-    status: 200,
-    body: {
-      status: "ready",
-      persistence: store.kind,
-      // An aggregate count, not the length of every pending row. Reading the
-      // whole queue to report its size made a readiness probe cost more the
-      // busier the system was.
-      outbox_pending: (await outbox.counts())["pending"] ?? 0,
-    },
-  }));
+  // The identity service is the router's authenticator, and the router cannot
+  // be constructed without one: every registration that declared
+  // `AUTHENTICATED` is refused before its handler exists, in one place, rather
+  // than by each handler remembering to ask.
+  const router = new Router({ metrics, rateLimiter, authenticator: identity });
+  router.get(
+    "/health",
+    [],
+    // A liveness probe is answered by whatever is watching the process, which
+    // holds no session and must get an answer even when identity itself is
+    // unwell. It reports one word and reads nothing.
+    anonymous("a liveness probe holds no session and must answer even when identity is unwell"),
+    () => ({ status: 200, body: { status: "ok" } }),
+  );
+  router.get(
+    "/ready",
+    [],
+    // The same, plus a count of the outbox backlog and the name of the
+    // persistence backend: operational facts about CORE itself, with no tenant
+    // dimension. Like `/metrics`, it is kept off the public internet by
+    // deployment (B-5), not by a credential.
+    anonymous("a readiness probe holds no session; system-level facts only (B-5)"),
+    async () => ({
+      status: 200,
+      body: {
+        status: "ready",
+        persistence: store.kind,
+        // An aggregate count, not the length of every pending row. Reading the
+        // whole queue to report its size made a readiness probe cost more the
+        // busier the system was.
+        outbox_pending: (await outbox.counts())["pending"] ?? 0,
+      },
+    }),
+  );
   registerMetricsRoutes(router, metrics);
   registerIdentityRoutes(router, identity);
   registerOrganizationRoutes(router, organization, identity);

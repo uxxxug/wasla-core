@@ -1,11 +1,12 @@
+import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
-import type { IdentityService } from "../identity-access/service.js";
+import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
 import type { WalletOwnerType } from "./domain.js";
 import type { MoneyService } from "./service.js";
 
-export function registerMoneyRoutes(router: Router, money: MoneyService, identity: IdentityService): void {
+export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, money: MoneyService, identity: IdentityService): void {
   router.post(
     "/v1/wallets",
     objectBody(
@@ -13,6 +14,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
       { name: "owner_id", kind: "text", required: true },
       { name: "currency", kind: "text", required: true },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const result = await money.createWallet({
@@ -24,7 +26,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
     return { status: result.created ? 201 : 200, body: result.wallet };
   });
 
-  router.get("/v1/wallets/:wallet_id/balance", [], async (ctx) => {
+  router.get("/v1/wallets/:wallet_id/balance", [], AUTHENTICATED, async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     return { status: 200, body: await money.balance(ctx.params["wallet_id"] ?? "") };
   });
@@ -37,6 +39,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
       { name: "business_reference", kind: "text", required: true },
       { name: "expires_at", kind: "text" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const expiresAt = ctx.input.text("expires_at");
@@ -55,6 +58,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
   router.post(
     "/v1/payment-authorizations/:authorization_id/void",
     objectBody({ name: "reason", kind: "text", required: true }),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     return {
@@ -77,6 +81,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
       { name: "amount_minor", kind: "integer" },
       { name: "capture_reference", kind: "text" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const amount = ctx.input.number("amount_minor");
@@ -97,6 +102,7 @@ export function registerMoneyRoutes(router: Router, money: MoneyService, identit
       { name: "reason", kind: "text", required: true },
       { name: "amount_minor", kind: "integer" },
     ),
+    AUTHENTICATED,
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const amount = ctx.input.number("amount_minor");
