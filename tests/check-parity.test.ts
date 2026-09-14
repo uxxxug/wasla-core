@@ -124,6 +124,16 @@ interface Unprobeable {
 
 const UNPROBEABLE: readonly Unprobeable[] = [
   {
+    constraint: "idempotency_key_state_ck",
+    why: "the state is the store's own: `claim` writes 'claimed' and `complete` writes 'completed', and no caller supplies one — the same reason the outbox and inbound-event status checks are here",
+    declared: true,
+  },
+  {
+    constraint: "idempotency_key_state_record_ck",
+    why: "no port call can ask for the rows it forbids. A completed row with no status is unreachable because `complete` takes the status as an argument and stamps completed_at itself; a claimed row carrying an answer is unreachable because `claim` writes the three answer columns as null in the same statement that creates the row. It is declared all the same, because the nullability milestone 33 had to add to response_status is only safe while this holds",
+    declared: true,
+  },
+  {
     constraint: "outbox_status_check",
     why: "`append` takes an envelope, never a status: the store sets 'pending' and only its own transitions change it",
     declared: true,
@@ -232,12 +242,26 @@ const CASES: readonly CheckCase[] = [
     constraint: "idempotency_key_response_status_ck",
     what: "a recorded refusal, which would answer a caller's corrected request with the old rejection",
     async probe(store) {
+      // Two calls since milestone 33, because the row is now claimed before it
+      // is completed: the claim is legitimate and the completion is what the
+      // constraint has to refuse. Probed through the port a caller's request
+      // actually reaches, because that is the path a future change would break.
+      const lookup = {
+        key: "check-parity-refusal",
+        method: "POST",
+        scope: "/v1/organizations",
+      };
+      const claimed = await store.retry.claim({
+        ...lookup,
+        request_fingerprint: "f".repeat(64),
+      });
+      if (claimed.outcome !== "claimed") {
+        throw new Error(`the probe could not claim: ${claimed.outcome}`);
+      }
       return refuse(() =>
-        store.retry.record({
-          key: "check-parity-refusal",
-          method: "POST",
-          scope: "/v1/organizations",
-          request_fingerprint: "f".repeat(64),
+        store.retry.complete({
+          ...lookup,
+          claim_token: claimed.claim_token,
           response_status: 400,
           response_body: { error: { code: "invalid_request" } },
         }),

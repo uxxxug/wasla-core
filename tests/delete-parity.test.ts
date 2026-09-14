@@ -96,6 +96,12 @@ const REMOVAL_SHAPED: readonly RemovalShapedOperation[] = [
     note: "drops windows that have closed. Derived, bounded, reconstructible from the next request, referenced by nothing.",
   },
   {
+    port: "retry",
+    method: "release",
+    kind: "deletes a row",
+    note: "gives back an idempotency claim the handler did not earn — a refusal or a throw — so the caller can correct its request and resend it under the same key. Milestone 33 writes the row before the work to pick one of two concurrent twins; a claim with no answer behind it must not outlive the request that took it.",
+  },
+  {
     port: "outbox",
     method: "reclaimExpired",
     kind: "releases a lease",
@@ -120,6 +126,19 @@ const REMOVAL_SHAPED: readonly RemovalShapedOperation[] = [
     note: "the same lease reclaim for notification dispatch.",
   },
 ];
+
+/**
+ * The ports whose name is not the name of the table they delete from.
+ *
+ * Two, and both for the same reason: the port is named after what it does for a
+ * caller (`rateLimit`, `retry`) and the table after what it holds. Declared as a
+ * map rather than inlined in the gate's filter, so a third one is a line here
+ * instead of a second ternary nobody reads.
+ */
+const PORT_TABLES: Readonly<Record<string, string>> = {
+  rateLimit: "rate_limit_counter",
+  retry: "idempotency_key",
+};
 
 /** Every `.ts` file under a directory, recursively. */
 function sourceFiles(root: string): readonly string[] {
@@ -303,7 +322,7 @@ describe("delete-path parity", () => {
     const deletes = REMOVAL_SHAPED.filter((entry) => entry.kind === "deletes a row");
     const covered = new Set(deletableTables());
     expect(
-      deletes.filter((entry) => !covered.has(entry.port === "rateLimit" ? "rate_limit_counter" : entry.port)),
+      deletes.filter((entry) => !covered.has(PORT_TABLES[entry.port] ?? entry.port)),
       "an operation deletes rows from a table DELETE_PATHS does not cover",
     ).toEqual([]);
   });
@@ -404,7 +423,7 @@ describe.skipIf(!url)("delete-path parity against the live schema", () => {
       problems,
       "a declared delete path now touches a table with referential structure or a trigger, so the reason recorded for it in DELETE_PATHS is no longer true",
     ).toEqual([]);
-    expect(deletableTables()).toEqual(["inbox", "rate_limit_counter"]);
+    expect(deletableTables()).toEqual(["idempotency_key", "inbox", "rate_limit_counter"]);
   });
 });
 

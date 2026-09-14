@@ -1,6 +1,7 @@
 /**
- * What the schema does when a referenced row is deleted, and the three places
- * CORE deletes a row at all.
+ * What the schema does when a referenced row is deleted, and the four places
+ * CORE deletes a row at all (three until milestone 33 gave an idempotency claim
+ * a way to be given back).
  *
  * The four parity cycles — uniqueness, checks, foreign keys, triggers — each
  * closed a family of rules about rows that exist, and each ended with the same
@@ -24,7 +25,8 @@
  *    trigger, which `tests/delete-parity.test.ts` asserts against
  *    `pg_constraint` and `pg_trigger`.
  *
- * What this file deliberately does **not** do is add a delete path. CORE's
+ * What this file deliberately does **not** do is add a delete path of its own
+ * accord. CORE's
  * audit entries, ledger entries, usage records and reputation signals are
  * append-only by design and the schema has triggers saying so; the work here is
  * to make that design enforced, not to weaken it so a cascade becomes
@@ -129,10 +131,10 @@ export const REFERENTIAL_ACTIONS: Readonly<Record<string, ReferentialActionRule>
 /**
  * Every place in `src/` a row is removed, and why each one is safe.
  *
- * Three, measured by reading the source rather than by recalling it. Safety
- * here has a testable meaning: the table is neither a foreign-key parent nor a
- * child, and carries no trigger — so there is nothing to cascade, nothing to
- * orphan, and no append-only rule to break.
+ * Four since milestone 33, three before it, measured by reading the source
+ * rather than by recalling it. Safety here has a testable meaning: the table is
+ * neither a foreign-key parent nor a child, and carries no trigger — so there
+ * is nothing to cascade, nothing to orphan, and no append-only rule to break.
  */
 export interface DeletePath {
   /** The table the row is removed from. */
@@ -153,6 +155,11 @@ export const DELETE_PATHS: readonly DeletePath[] = [
     table: "rate_limit_counter",
     where: ["src/platform/http/pg-rate-limit.ts", "src/platform/http/rate-limit.ts"],
     why: "pruning windows that have closed. A counter is derived, bounded and reconstructible from the next request; no key references it and no trigger fires on it. Keeping closed windows would grow the table without bound for no reader.",
+  },
+  {
+    table: "idempotency_key",
+    where: ["src/platform/http/pg-retry.ts", "src/platform/http/retry.ts"],
+    why: "releasing an idempotency claim the handler did not earn: milestone 33 writes the row *before* the work so that one of two concurrent twins wins the right to do it, and a handler that then refuses or throws must give the key back, because a caller told its body was invalid has to be able to correct it and resend under the same key. Deleted rather than marked, because `RetryState` has two states and no third — a row meaning 'nobody is doing this and there is no answer' would make the absence of a record two things to check instead of one, and the primary key could no longer be the arbiter of the claim. Safe in the testable sense: the table is neither a foreign-key parent nor a child (`reference-keys.ts` deliberately holds no key for it) and carries no trigger, so there is nothing to cascade, nothing to orphan and no append-only rule to break. It is also not an audit trail: a released claim recorded no answer, and `audit_entry` holds what CORE did.",
   },
   {
     table: "*",

@@ -2254,11 +2254,36 @@ components:
         succeeded is worse than refusing the one it did make. The stored answer
         is left exactly as it was, so a retry of the original request still
         replays it.
+
+        Since milestone 33 it is also the answer when the *identical* request is
+        still in flight under that key: CORE claims the key before it runs the
+        handler, so of two concurrent twins one does the work and the other is
+        refused here with `code` `conflict`, `details.claimed_at` saying when
+        the winner took the key, and `retry-after` saying how long to wait
+        before asking again. The refused twin changed nothing. This is
+        deliberately a refusal and not a wait: the caller learns that its
+        request is being handled, rather than being held on an open connection
+        for an answer whose arrival would depend on timing. Resending the
+        identical request after `retry-after` replays the winner's answer, which
+        is what the key was for.
+
+        Read `retry-after`, not `retryable`, on this one. `retryable` is derived
+        from `code` alone and every `conflict` reports `false`, which is right
+        for the reuse case and wrong for this one — an in-flight refusal does
+        come good by itself. Recorded as a blocker rather than papered over
+        here: making the flag right means giving a refusal a say in its own
+        retryability, which is a change to the shared error type and not to this
+        route.
       headers:
         x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
         x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
         x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
         x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+        # Sent on the in-flight refusal only. A reuse refusal never comes good
+        # on its own — the key is spent and the body will not match — so it
+        # carries no `retry-after`, and the header is optional here for exactly
+        # that reason.
+        retry-after: { $ref: "#/components/headers/RetryAfter" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
