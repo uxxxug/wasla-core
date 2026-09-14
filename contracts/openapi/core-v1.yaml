@@ -56,6 +56,7 @@ paths:
       summary: Readiness probe
       security: []
       responses:
+        "503": { $ref: "#/components/responses/NotReady" }
         "400": { $ref: "#/components/responses/UnlimitedError" }
         "200":
           headers:
@@ -89,6 +90,7 @@ paths:
                 source_system: { type: string }
                 legacy_id: { type: string, nullable: true }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
           headers:
@@ -145,6 +147,7 @@ paths:
                 principal_id: { type: string, format: uuid }
                 channel_type: { $ref: "#/components/schemas/ChannelType" }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -172,6 +175,7 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
       summary: Verify the caller's session and resolve the acting principal
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -213,6 +217,7 @@ paths:
               properties:
                 session_id: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "204":
@@ -244,6 +249,7 @@ paths:
                 permission: { $ref: "#/components/schemas/Permission" }
                 organization_id: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -287,6 +293,7 @@ paths:
                   minItems: 1
                   items: { $ref: "#/components/schemas/Role" }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Error" }
@@ -345,6 +352,7 @@ paths:
                 name: { type: string, minLength: 1 }
                 country_code: { type: string, pattern: "^[A-Z]{2}$" }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -371,6 +379,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -404,6 +413,7 @@ paths:
                 owner_id: { type: string, format: uuid }
                 currency: { type: string, pattern: "^[A-Z]{3}$" }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -434,6 +444,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -476,6 +487,7 @@ paths:
                 business_reference: { type: string, minLength: 1 }
                 expires_at: { type: string, format: date-time, nullable: true }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -522,6 +534,7 @@ paths:
                   minLength: 1
                   description: Caller's idempotency key. Required for a partial capture.
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -567,6 +580,7 @@ paths:
                 refund_reference: { type: string, minLength: 1 }
                 reason: { type: string, minLength: 1 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -601,6 +615,7 @@ paths:
               properties:
                 reason: { type: string, minLength: 1 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -667,6 +682,7 @@ paths:
                         nullable: true
                         description: null means granted but unmetered; 0 means none.
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -690,6 +706,7 @@ paths:
           required: false
           schema: { type: string, enum: [draft, active, retired] }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -720,6 +737,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -749,6 +767,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -781,6 +800,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -855,6 +875,7 @@ paths:
                 wallet_id: { type: string, format: uuid }
                 starts_at: { type: string, format: date-time }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -890,6 +911,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -940,6 +962,7 @@ paths:
               properties:
                 reason: { type: string, minLength: 1 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -992,6 +1015,7 @@ paths:
                 usage_reference: { type: string, minLength: 1 }
                 at: { type: string, format: date-time }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1028,6 +1052,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1057,6 +1082,7 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
       summary: List reference countries
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1128,6 +1154,7 @@ paths:
                 name: { type: string, minLength: 1 }
                 default_currency: { type: string, minLength: 1 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1153,6 +1180,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1182,6 +1210,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
@@ -1219,6 +1248,7 @@ paths:
                 code: { type: string, minLength: 1 }
                 name: { type: string, minLength: 1 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1277,6 +1307,7 @@ paths:
                 latitude: { type: number }
                 longitude: { type: number }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1342,6 +1373,7 @@ paths:
                 centre_latitude: { type: number }
                 centre_longitude: { type: number }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1380,6 +1412,7 @@ paths:
             this contract with the router's own declarations and found it.
           schema: { type: string, minLength: 2, maxLength: 2 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1424,6 +1457,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1468,6 +1502,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1520,6 +1555,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1565,6 +1601,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1599,6 +1636,7 @@ paths:
               properties:
                 reason: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
@@ -1644,6 +1682,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/EventEnvelope" }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "202":
@@ -1719,6 +1758,7 @@ paths:
                     Shared secret CORE signs each body with. Write-only; stored
                     because HMAC needs the plaintext, never echoed, never logged.
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1756,6 +1796,7 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
       summary: List the endpoints CORE delivers events to
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1799,6 +1840,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1847,6 +1889,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1894,6 +1937,7 @@ paths:
         Pending plus dead deliveries. An empty list is the invariant to expect;
         a dead row is one an operator has to look at, since CORE stopped trying.
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -1964,6 +2008,7 @@ paths:
                 channel: { type: string, enum: [telegram, email, phone] }
                 correlation_id: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -2018,6 +2063,7 @@ paths:
           schema: { type: string, format: uuid }
           description: Restricts the list to one tenant's recipients.
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -2071,6 +2117,7 @@ paths:
               properties:
                 correlation_id: { type: string }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -2128,6 +2175,7 @@ paths:
           name: limit
           schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -2255,6 +2303,7 @@ paths:
             ambiguous read meant.
           schema: { type: string, format: uuid }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -2298,6 +2347,7 @@ paths:
           required: false
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
       responses:
+        "500": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -2430,6 +2480,32 @@ components:
         they cannot answer 429 and never send `x-ratelimit-*`. Referencing the
         shared `Error` here would document three headers CORE does not set on
         these routes, which milestone 28's gate compares against real answers.
+      headers:
+        x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotReady:
+      description: >
+        CORE is up and cannot serve yet: the dependency the readiness probe
+        checks did not answer. `code` is `unavailable` and `retryable` is true,
+        with no `retry-after` — CORE does not know when its dependency recovers,
+        and stating a time it cannot know would be worse than stating none
+        (milestone 34).
+
+
+        Added by milestone 37, together with the behaviour it documents. Until
+        then this failure escaped the handler and the router's fail-closed
+        default rendered it as `500` `internal`: CORE telling an orchestrator
+        that CORE has a defect, when what had happened is that CORE could not
+        serve. An orchestrator reading `500` from a readiness probe has grounds
+        to stop rolling out; reading `503` it waits. `details` names the
+        persistence backend and the dependency's own message, which is what an
+        operator needs and is not the same as leaking a stack.
+
+
+        Carries the correlation header and none of the budget headers: `/ready`
+        is on `UNLIMITED_ROUTES`.
       headers:
         x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
       content:
@@ -2748,7 +2824,6 @@ components:
               forbidden,
               not_found,
               conflict,
-              precondition_failed,
               rate_limited,
               unavailable,
               internal,
