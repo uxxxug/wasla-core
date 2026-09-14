@@ -2,35 +2,43 @@
  * Canonical error model (ADR: Contract Principles).
  * Every API error serialises to { code, message, details, retryable, correlation_id }.
  */
-export type ErrorCode =
-  | "invalid_request"
-  | "unauthenticated"
-  | "forbidden"
-  | "not_found"
-  | "conflict"
-  | "precondition_failed"
-  /**
-   * The caller asked too often. Its own code, because "wait and try the same
-   * request again" is advice no other code in this list gives: `unavailable`
-   * says CORE is unwell, `invalid_request` says the request was wrong, and
-   * `conflict` says the state moved. Only this one means the request was fine
-   * and the timing was not.
-   */
-  | "rate_limited"
-  | "unavailable"
-  | "internal";
-
-const STATUS: Record<ErrorCode, number> = {
+/**
+ * The vocabulary and the status each word maps to, in **one** table — milestone
+ * 37. Until then the code list was a hand-written union, the status map a second
+ * table, the retryable set a third and the published `Error.code` enum a fourth,
+ * all restating each other. Nothing compared them, and two words survived in all
+ * four that CORE could not say: `precondition_failed` was constructed nowhere in
+ * `src/` or `tests/` and is gone, and `unavailable` was constructed nowhere and
+ * now has a producer (`/ready`, below). `ErrorCode` is derived from this table's
+ * keys, so a code cannot exist without a status, and `tests/error-vocabulary`
+ * requires every key to be produced by a real answer and the published enum to
+ * be exactly these keys.
+ */
+const STATUS = {
   invalid_request: 400,
   unauthenticated: 401,
   forbidden: 403,
   not_found: 404,
   conflict: 409,
-  precondition_failed: 412,
   rate_limited: 429,
-  unavailable: 503,
   internal: 500,
-};
+  /**
+   * CORE is up and cannot serve. Distinct from `internal`, which says CORE has a
+   * defect: an orchestrator reading `500` from a readiness probe concludes the
+   * deployment is broken, while `503` tells it to wait. Produced by `/ready`
+   * when the dependency it checks cannot answer.
+   */
+  unavailable: 503,
+} as const satisfies Record<string, number>;
+
+/** Every code CORE can produce, derived from the one table above. */
+export type ErrorCode = keyof typeof STATUS;
+
+/** The vocabulary itself, for the gate and for anything that must enumerate it. */
+export const ERROR_CODES: readonly ErrorCode[] = Object.keys(STATUS) as ErrorCode[];
+
+/** The status each code answers with, readable without constructing an error. */
+export const statusForCode = (code: ErrorCode): number => STATUS[code];
 
 /**
  * Codes that are retryable **without CORE being able to say when**. A caller
@@ -143,3 +151,13 @@ export const notFound = (m: string, d?: Record<string, unknown>) =>
   new CoreError("not_found", m, d);
 export const conflict = (m: string, d?: Record<string, unknown>, retryAfterSeconds?: number) =>
   new CoreError("conflict", m, d, retryAfterSeconds);
+/**
+ * CORE is up and a dependency it needs is not. A constructor exists for the same
+ * reason the other five do — milestone 37 found `unavailable` published in the
+ * contract's `code` enum with no way to construct it, so a caller was asked to
+ * branch on an answer it could never receive. No `retryAfterSeconds`: CORE does
+ * not know when its dependency recovers, and `retryable` is true from the code
+ * alone.
+ */
+export const unavailable = (m: string, d?: Record<string, unknown>) =>
+  new CoreError("unavailable", m, d);

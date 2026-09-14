@@ -19,6 +19,7 @@ import {
 import { FetchTransport } from "./platform/eventing/fetch-transport.js";
 import { registerDeliveryRoutes } from "./platform/eventing/delivery-http.js";
 import { newId } from "./platform/ids.js";
+import { unavailable } from "./platform/errors.js";
 import { anonymous } from "./platform/http/authentication.js";
 import { Router } from "./platform/http/router.js";
 import {
@@ -372,17 +373,40 @@ export function createCoreApp(
     // dimension. Like `/metrics`, it is kept off the public internet by
     // deployment (B-5), not by a credential.
     anonymous("a readiness probe holds no session; system-level facts only (B-5)"),
-    async () => ({
-      status: 200,
-      body: {
-        status: "ready",
-        persistence: store.kind,
-        // An aggregate count, not the length of every pending row. Reading the
-        // whole queue to report its size made a readiness probe cost more the
-        // busier the system was.
-        outbox_pending: (await outbox.counts())["pending"] ?? 0,
-      },
-    }),
+    async () => {
+      // The one route that reports on a dependency rather than using it, so the
+      // one route where a failing dependency is an answer and not a defect.
+      //
+      // Milestone 37: this used to let the failure escape, and the router's
+      // fail-closed default turned it into `500` `internal` — CORE telling an
+      // orchestrator that CORE has a bug, when what happened is that CORE cannot
+      // serve yet. An orchestrator reading `500` from a readiness probe has
+      // grounds to stop; reading `503` it waits. The distinction is the whole
+      // reason `unavailable` is in the vocabulary, and until this commit nothing
+      // produced it.
+      let pending: number;
+      try {
+        pending = (await outbox.counts())["pending"] ?? 0;
+      } catch (cause) {
+        throw unavailable("not ready: the outbox backlog could not be read", {
+          persistence: store.kind,
+          // The reason, not the stack: an operator needs to know which
+          // dependency, and a probe answer is not a place to leak internals.
+          reason: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+      return {
+        status: 200,
+        body: {
+          status: "ready",
+          persistence: store.kind,
+          // An aggregate count, not the length of every pending row. Reading the
+          // whole queue to report its size made a readiness probe cost more the
+          // busier the system was.
+          outbox_pending: pending,
+        },
+      };
+    },
   );
   registerMetricsRoutes(router, metrics);
   registerIdentityRoutes(router, identity);
