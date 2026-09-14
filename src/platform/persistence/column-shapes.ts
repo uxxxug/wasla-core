@@ -182,18 +182,30 @@ export const COLUMN_SHAPES: Readonly<Record<string, readonly ColumnShape[]>> = {
     { column: "verified_at", type: "timestamptz", notNull: false },
     { column: "created_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
   ],
-  // Recorded answers, as migration 0020 reshaped the table 0001 created and
-  // nothing ever wrote to. Everything that identifies the request is NOT NULL,
-  // because a record missing any part of "what was asked" cannot be compared
-  // against a retry; `response_body` is nullable because SQL NULL is how both
-  // backends say "the recorded answer carried no body", and JSON null would
-  // mean that on one of them only.
+  // Claims and the answers they became, as migration 0021 reshaped what 0020
+  // reshaped from the table 0001 created and nothing ever wrote to. Everything
+  // that identifies the request is NOT NULL, because a record missing any part
+  // of "what was asked" cannot be compared against a retry; `response_body` is
+  // nullable because SQL NULL is how both backends say "the recorded answer
+  // carried no body", and JSON null would mean that on one of them only.
+  //
+  // The three answer columns are nullable since 0021 and that is the shape of
+  // the milestone rather than a loosening: the row exists *before* the answer
+  // does, because it is what decides which of two concurrent twins is allowed
+  // to produce one. `idempotency_key_state_record_ck` is what keeps the
+  // nullability from meaning anything else — null status, null body and null
+  // completion time occur together, under `state = 'claimed'`, and never once
+  // the row says `completed`.
   idempotency_key: [
     { column: "key", type: "text", notNull: true },
     { column: "method", type: "text", notNull: true },
     { column: "scope", type: "text", notNull: true },
     { column: "request_fingerprint", type: "text", notNull: true },
-    { column: "response_status", type: "integer", notNull: true },
+    { column: "state", type: "text", notNull: true, databaseDefault: "'claimed'::text" },
+    { column: "claim_token", type: "uuid", notNull: true },
+    { column: "claimed_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
+    { column: "completed_at", type: "timestamptz", notNull: false },
+    { column: "response_status", type: "integer", notNull: false },
     { column: "response_body", type: "jsonb", notNull: false },
     { column: "created_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
     { column: "expires_at", type: "timestamptz", notNull: true },

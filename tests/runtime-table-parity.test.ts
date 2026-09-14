@@ -194,8 +194,10 @@ describe("runtime tables: the two exemptions, tried rather than trusted", () => 
       (file) => file.endsWith(".sql") && !file.endsWith(".down.sql"),
     );
     // 20 since milestone 32's 0020 gave `idempotency_key` the columns a record
-    // of an answer needs; 19 before it.
-    expect(forward.length, "no migrations found: the gate would pass vacuously").toBe(20);
+    // of an answer needs; 19 before it. 21 since milestone 33's 0021 gave the
+    // same table the columns a *claim* needs, so the row can be written before
+    // the work rather than after it.
+    expect(forward.length, "no migrations found: the gate would pass vacuously").toBe(21);
     const silent = forward.filter((file) => {
       const sql = readFileSync(join(dir, file), "utf8");
       const version = file.replace(/\.sql$/, "");

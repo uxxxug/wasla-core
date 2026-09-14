@@ -154,8 +154,13 @@ describe("column parity: the declaration", () => {
     // gate covered the 28 ruled tables; `inbox.received_at` and
     // `rate_limit_counter.hits` joined it in milestone 19; 47 until milestone
     // 32, whose `idempotency_key.created_at` defaults to `now()` like every
-    // other created_at in the schema.)
-    expect(defaultedColumns().length).toBe(48);
+    // other created_at in the schema. 50 since milestone 33, which added
+    // `idempotency_key.state` defaulting to 'claimed' and `claimed_at`
+    // defaulting to `now()`: a row that exists before its answer does is a
+    // claim by default, and the moment it was taken is the moment it was
+    // written — both defaults the store overrides explicitly on every write, as
+    // it does for all 50.)
+    expect(defaultedColumns().length).toBe(50);
     expect(defaultedColumns()).toContain("outbox.created_at");
   });
 });
@@ -274,11 +279,13 @@ describe("column parity: where the reference backend is stricter, on purpose", (
 describe.skipIf(!url)("column parity against the live schema", () => {
   it("declares every column of every ruled table, with the schema's own type", async () => {
     const columns = await catalogColumns();
-    // 271 = the 254 of the 28 originally ruled tables, plus the 9 of `inbox`
+    // 275 = the 254 of the 28 originally ruled tables, plus the 9 of `inbox`
     // and `rate_limit_counter` brought under the gate in milestone 19, plus the
-    // 8 of `idempotency_key`, which milestone 32 made a table the code reads
-    // and writes rather than one nothing touched. (263 before that milestone.)
-    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(271);
+    // 12 of `idempotency_key`, which milestone 32 made a table the code reads
+    // and writes rather than one nothing touched. (263 before that milestone,
+    // 271 after it: milestone 33 added `state`, `claim_token`, `claimed_at` and
+    // `completed_at` so the row can exist before the answer does.)
+    expect(columns.length, "no columns read: the gate would pass vacuously").toBe(275);
     const problems: string[] = [];
     for (const column of columns) {
       const shapes = COLUMN_SHAPES[column.table] ?? [];
@@ -343,11 +350,19 @@ describe.skipIf(!url)("column parity against the live schema", () => {
     // memory: if a migration adds a nullable column this fails and the
     // declaration has to be extended before the count is updated.
     // 206 = 197 + the 9 of the two runtime tables (every one of them NOT NULL).
-    // 213 since milestone 32: `idempotency_key` has 8 columns and 7 of them are
-    // NOT NULL — `response_body` is deliberately nullable, because a bodyless
-    // answer is SQL NULL on both backends and would otherwise have to be stored
-    // as the JSON value `null`, which the reference backend refuses.
-    expect(live).toBe(213);
+    // 213 after milestone 32: `idempotency_key` had 8 columns and 7 of them
+    // were NOT NULL — `response_body` is deliberately nullable, because a
+    // bodyless answer is SQL NULL on both backends and would otherwise have to
+    // be stored as the JSON value `null`, which the reference backend refuses.
+    // 215 since milestone 33, which is +3 and −1 rather than +2: `state`,
+    // `claim_token` and `claimed_at` are NOT NULL because a claim without them
+    // could not be fenced or expired, `completed_at` is nullable because a
+    // claim has not completed, and `response_status` *stopped* being NOT NULL
+    // for the same reason. That loosening is the only one in the schema's
+    // history and it is not one: `idempotency_key_state_record_ck` ties all
+    // three nullable answer columns to `state`, so the absence of a status
+    // means "claimed" and can mean nothing else.
+    expect(live).toBe(215);
   });
 
   it("raises the same message the database raises for the same bad value", async () => {

@@ -449,19 +449,56 @@ export const ROW_RULES = {
    */
   inbox: [],
   /**
-   * The one rule is the one that keeps a refusal out of the table.
+   * Three rules, and the first is the one that keeps a refusal out of the table.
    *
    * The router records an answer only after a `2xx`, because a caller whose
    * request was refused for being invalid has to be able to correct it and
    * send it again under the same key. That is a rule in code, and code is
    * where it would be lost: `idempotency_key_response_status_ck` is what makes
    * a recorded refusal impossible on both backends instead of unlikely on one.
+   * Milestone 33 made it `NULL`-tolerant, because the row now exists before the
+   * answer does — and added the third rule so that the tolerance cannot be
+   * mistaken for permission to record an answer without a status.
    */
   idempotency_key: [
     numeric(
       "response_status",
       "idempotency_key_response_status_ck",
       (v) => v >= 200 && v < 300,
+      // Nullable: a claimed row has done no work yet, so it has no status. What
+      // stops that from being a hole is `idempotency_key_state_record_ck`
+      // below, which ties the absence to exactly one state.
+      true,
+    ),
+    vocabulary("state", ["claimed", "completed"], "idempotency_key_state_ck"),
+    /**
+     * A row is either a claim with no answer or an answer with no claim left to
+     * make, and never anything in between.
+     *
+     * This is the rule that makes the nullability above honest. Without it a
+     * `completed` row with no status would satisfy every other constraint on
+     * the table, and a retry would be answered with an HTTP status of
+     * `undefined` — a defect that would surface as a broken response rather
+     * than as a refused write, in whichever caller retried first.
+     */
+    rule(
+      "idempotency_key_state_record_ck",
+      ["state", "response_status", "response_body", "completed_at"],
+      (row) => {
+        const state = at(row, "state");
+        const status = at(row, "response_status");
+        const body = at(row, "response_body");
+        const completedAt = at(row, "completed_at");
+        if (state === "claimed") {
+          return isNull(status) && isNull(body) && isNull(completedAt);
+        }
+        if (state === "completed") return !isNull(status) && !isNull(completedAt);
+        // An unknown state is `idempotency_key_state_ck`'s refusal to raise, not
+        // this one's: two constraints quoting the same bad value would make the
+        // reference backend report a different name than Postgres does, which
+        // is what `tests/check-parity.test.ts` measures.
+        return true;
+      },
     ),
   ],
   rate_limit_counter: [

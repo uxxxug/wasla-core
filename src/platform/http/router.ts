@@ -20,12 +20,16 @@ import {
   type RateLimiter,
 } from "./rate-limit.js";
 import {
+  IN_FLIGHT_HEADERS,
   KEYED_BY_DEFAULT,
   REPLAYED_HEADERS,
   SAFE,
   fingerprintRequest,
+  idempotencyKeyInFlight,
   idempotencyKeyReused,
   missingIdempotencyKey,
+  type RetryClaimOutcome,
+  type RetryCompletedRow,
   type RetryRecordStore,
   type RetrySafetySpec,
 } from "./retry.js";
@@ -520,11 +524,12 @@ export class Router<A = unknown> {
     // nothing. Nothing above this point moved.
     const keyed = matched.route.retry.mechanism === "keyed";
     let retryKey: string | undefined;
-    let fingerprint = "";
+    let claimToken: string | undefined;
     if (keyed) {
       retryKey = headers.value("idempotency-key");
-      let recorded: Awaited<ReturnType<RetryRecordStore["find"]>> = null;
+      let recorded: RetryCompletedRow | null = null;
       let failure: CoreError | null = null;
+      let failureHeaders: Readonly<Record<string, string>> = {};
       if (retryKey === undefined) {
         // `parseHeaders` drops a zero-length value, so an empty header arrives
         // here as an absent one and is refused by this branch; a blank value
@@ -532,24 +537,47 @@ export class Router<A = unknown> {
         // the route was even matched.
         failure = missingIdempotencyKey(input.method, matched.route.template);
       } else {
-        fingerprint = fingerprintRequest(input.method, matched.route.template, parsedBody);
+        const fingerprint = fingerprintRequest(input.method, matched.route.template, parsedBody);
+        let outcome: RetryClaimOutcome | null = null;
         try {
-          recorded = await this.options.retry.find({
+          // Claimed, not looked up. Milestone 32 read the record here and the
+          // read is what left B-43 open: two twins read the same absence and
+          // both ran. One conditional insert decides which of them may, and
+          // the other three outcomes are all "do not run the handler".
+          outcome = await this.options.retry.claim({
             key: retryKey,
             method: input.method,
             scope: matched.route.template,
+            request_fingerprint: fingerprint,
           });
         } catch {
-          // A lookup that failed is not "no record". Running the handler anyway
-          // would be doing the work this route declared it must not do twice,
-          // with the protection silently absent — so the request is refused,
-          // and nothing has been written at this point for the refusal to
-          // undo. The cause is not passed to the caller, for the reason every
-          // internal error is not.
+          // A claim that failed is not a claim granted. Running the handler
+          // anyway would be doing the work this route declared it must not do
+          // twice, with the protection silently absent — so the request is
+          // refused, and nothing has been written at this point for the
+          // refusal to undo. The cause is not passed to the caller, for the
+          // reason every internal error is not.
           failure = new CoreError("internal", "unexpected error");
         }
-        if (recorded !== null && recorded.request_fingerprint !== fingerprint) {
-          failure = idempotencyKeyReused();
+        if (outcome !== null) {
+          switch (outcome.outcome) {
+            case "claimed":
+              claimToken = outcome.claim_token;
+              break;
+            case "completed":
+              recorded = outcome.record;
+              break;
+            case "in_flight":
+              // The twin is doing the work. This request is answered rather
+              // than run, which is the difference between a collapsed retry
+              // and a second organization.
+              failure = idempotencyKeyInFlight(outcome.claimed_at);
+              failureHeaders = IN_FLIGHT_HEADERS;
+              break;
+            case "reused":
+              failure = idempotencyKeyReused();
+              break;
+          }
         }
       }
       if (failure !== null) {
@@ -571,7 +599,9 @@ export class Router<A = unknown> {
         return {
           status: failure.status,
           body: failure.toBody(correlationId),
-          headers: sealHeaders(rateHeaders, { "x-correlation-id": correlationId }),
+          headers: sealHeaders(rateHeaders, failureHeaders, {
+            "x-correlation-id": correlationId,
+          }),
         };
       }
       if (recorded !== null) {
@@ -630,30 +660,44 @@ export class Router<A = unknown> {
           `route ${input.method} ${matched.route.template} returned a promise as its body`,
         );
       }
-      // Recorded only after the route answered, and only when it succeeded.
-      // A refusal is deliberately not recorded: a caller told its body was
-      // invalid has to be able to correct it and send it again under the same
-      // key, and a recorded 400 would answer the corrected request with the
-      // old refusal for the next 24 hours. The schema says the same thing in
-      // the one place code cannot bypass (`idempotency_key_response_status_ck`).
+      // The claim is settled here, one way or the other. Completed on a 2xx;
+      // released on anything else, because a caller told its body was invalid
+      // has to be able to correct it and send it again under the same key — and
+      // a claim left behind by a refusal would refuse the corrected request as
+      // in-flight, then as a reuse once the fingerprint changed. Recording the
+      // refusal itself is refused by the schema in the one place code cannot
+      // bypass (`idempotency_key_response_status_ck`), so releasing is not a
+      // convenience: it is the only thing the row can honestly become.
       let notRecorded = false;
-      if (keyed && retryKey !== undefined && result.status >= 200 && result.status < 300) {
+      if (claimToken !== undefined) {
+        const hold = {
+          key: retryKey as string,
+          method: input.method,
+          scope: matched.route.template,
+          claim_token: claimToken,
+        };
+        const succeeded = result.status >= 200 && result.status < 300;
         try {
-          await this.options.retry.record({
-            key: retryKey,
-            method: input.method,
-            scope: matched.route.template,
-            request_fingerprint: fingerprint,
-            response_status: result.status,
-            response_body: result.body ?? null,
-          });
+          const settled = succeeded
+            ? await this.options.retry.complete({
+                ...hold,
+                response_status: result.status,
+                response_body: result.body ?? null,
+              })
+            : await this.options.retry.release(hold);
+          // A claim that has moved on — taken over after the horizon, or
+          // already settled — is not an error, but it is not nothing either:
+          // the next retry of a success will run the handler again, which is
+          // the condition this milestone exists to remove, so it is logged
+          // under the same code a failed write is.
+          notRecorded = succeeded && !settled;
         } catch {
           // The work is done and the caller is owed its answer, so a store that
           // cannot record it must not turn a success into a 500 — that would
           // be CORE hiding an organization it just created. What it costs is
-          // that the next retry runs again, which is the behaviour of every
-          // route before this milestone, so this request is logged as an error
-          // naming exactly that.
+          // that the next retry runs again once the claim horizon passes,
+          // which is the behaviour of every route before milestone 32, so this
+          // request is logged as an error naming exactly that.
           notRecorded = true;
         }
       }
@@ -686,6 +730,24 @@ export class Router<A = unknown> {
         err instanceof CoreError
           ? err
           : new CoreError("internal", "unexpected error"); // never leak internals
+      // A handler that threw did not answer, so the claim has nothing to
+      // record and must not be left standing: the caller is entitled to send
+      // the same request again immediately, and a claim held for the horizon
+      // would refuse it for a minute for a request that never ran. Awaited and
+      // swallowed — a release that fails must not replace the handler's own
+      // error with a different one, and the horizon is the backstop.
+      if (claimToken !== undefined) {
+        try {
+          await this.options.retry.release({
+            key: retryKey as string,
+            method: input.method,
+            scope: matched.route.template,
+            claim_token: claimToken,
+          });
+        } catch {
+          // Deliberately empty: see above. The claim expires on its own.
+        }
+      }
       const duration = Date.now() - started;
       this.record(
         {
