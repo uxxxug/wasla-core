@@ -41,6 +41,7 @@ paths:
       summary: Liveness probe
       security: []
       responses:
+        "400": { $ref: "#/components/responses/UnlimitedError" }
         "200":
           headers:
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
@@ -55,6 +56,7 @@ paths:
       summary: Readiness probe
       security: []
       responses:
+        "400": { $ref: "#/components/responses/UnlimitedError" }
         "200":
           headers:
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
@@ -143,6 +145,7 @@ paths:
                 principal_id: { type: string, format: uuid }
                 channel_type: { $ref: "#/components/schemas/ChannelType" }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
           headers:
@@ -169,6 +172,7 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
       summary: Verify the caller's session and resolve the acting principal
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
           headers:
@@ -209,6 +213,7 @@ paths:
               properties:
                 session_id: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "204":
           description: Revoked (idempotent)
@@ -239,6 +244,7 @@ paths:
                 permission: { $ref: "#/components/schemas/Permission" }
                 organization_id: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
           headers:
@@ -281,6 +287,7 @@ paths:
                   minItems: 1
                   items: { $ref: "#/components/schemas/Role" }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
@@ -338,6 +345,7 @@ paths:
                 name: { type: string, minLength: 1 }
                 country_code: { type: string, pattern: "^[A-Z]{2}$" }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -363,6 +371,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -425,6 +434,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -466,6 +476,7 @@ paths:
                 business_reference: { type: string, minLength: 1 }
                 expires_at: { type: string, format: date-time, nullable: true }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -590,6 +601,7 @@ paths:
               properties:
                 reason: { type: string, minLength: 1 }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -708,6 +720,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -736,6 +749,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -767,6 +781,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -875,6 +890,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1012,6 +1028,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1040,6 +1057,7 @@ paths:
         - $ref: "#/components/parameters/CorrelationId"
       summary: List reference countries
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1110,6 +1128,7 @@ paths:
                 name: { type: string, minLength: 1 }
                 default_currency: { type: string, minLength: 1 }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1134,6 +1153,7 @@ paths:
           required: true
           schema: { type: string }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1162,6 +1182,8 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1197,6 +1219,7 @@ paths:
                 code: { type: string, minLength: 1 }
                 name: { type: string, minLength: 1 }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1254,6 +1277,7 @@ paths:
                 latitude: { type: number }
                 longitude: { type: number }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1318,6 +1342,7 @@ paths:
                 centre_latitude: { type: number }
                 centre_longitude: { type: number }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "201":
@@ -1540,6 +1565,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1573,6 +1599,8 @@ paths:
               properties:
                 reason: { type: string }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1585,7 +1613,16 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Fulfillment" }
-        "409": { description: Fulfillment already closed }
+        "409":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Fulfillment already closed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/events:
     post:
       parameters:
@@ -1627,8 +1664,26 @@ paths:
                   first_delivery:
                     type: boolean
                     description: False when CORE already held this event; no retry needed.
-        "400": { description: "Invalid envelope, or no consumer for this event type" }
-        "403": { description: This caller may not submit this event type }
+        "400":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: "Invalid envelope, or no consumer for this event type"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: This caller may not submit this event type
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/event-subscriptions:
     post:
       parameters:
@@ -1676,13 +1731,32 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/EventSubscription" }
-        "400": { description: "Not a core.* type, not https, or secret too short" }
-        "403": { description: Caller is not an operator }
+        "400":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: "Not a core.* type, not https, or secret too short"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       parameters:
         - $ref: "#/components/parameters/CorrelationId"
       summary: List the endpoints CORE delivers events to
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1702,7 +1776,16 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/EventSubscription" }
-        "403": { description: Caller is not an operator }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/event-subscriptions/{subscription_id}/deactivate:
     post:
       summary: Stop queueing new deliveries for a subscriber
@@ -1716,6 +1799,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1733,8 +1817,26 @@ paths:
                 properties:
                   subscription_id: { type: string, format: uuid }
                   active: { type: boolean }
-        "403": { description: Caller is not an operator }
-        "404": { description: No such subscription }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: No such subscription
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/event-subscriptions/{subscription_id}/activate:
     post:
       summary: Resume queueing deliveries for a subscriber
@@ -1745,6 +1847,7 @@ paths:
           required: true
           schema: { type: string, format: uuid }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1762,8 +1865,26 @@ paths:
                 properties:
                   subscription_id: { type: string, format: uuid }
                   active: { type: boolean }
-        "403": { description: Caller is not an operator }
-        "404": { description: No such subscription }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: No such subscription
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/event-deliveries/undelivered:
     get:
       parameters:
@@ -1773,6 +1894,7 @@ paths:
         Pending plus dead deliveries. An empty list is the invariant to expect;
         a dead row is one an operator has to look at, since CORE stopped trying.
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1792,7 +1914,16 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/EventDelivery" }
-        "403": { description: Caller is not an operator }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/notification-recipients:
     post:
       parameters:
@@ -1855,8 +1986,29 @@ paths:
             Unknown or non-notifiable event type, unreceivable channel, no
             verified link on that channel, or a tenant scope the event cannot
             carry
-        "403": { description: Caller is not an operator }
-        "404": { description: Identity or organization not found }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Identity or organization not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     get:
       summary: List who is told about which events
       parameters:
@@ -1866,6 +2018,7 @@ paths:
           schema: { type: string, format: uuid }
           description: Restricts the list to one tenant's recipients.
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1885,7 +2038,16 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/NotificationRecipient" }
-        "403": { description: Caller is not an operator }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/notification-recipients/{recipient_id}/deactivate:
     post:
       summary: Stop notifying a recipient about future events
@@ -1909,6 +2071,7 @@ paths:
               properties:
                 correlation_id: { type: string }
       responses:
+        "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "429": { $ref: "#/components/responses/RateLimited" }
         "200":
@@ -1921,8 +2084,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/NotificationRecipient" }
-        "403": { description: Caller is not an operator }
-        "404": { description: Recipient not found }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Recipient not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /v1/notifications:
     get:
       summary: Inspect what people have been told, and what is stuck
@@ -1986,8 +2167,26 @@ paths:
                   items:
                     type: array
                     items: { $ref: "#/components/schemas/Notification" }
-        "400": { description: Unknown status or out-of-range limit }
-        "403": { description: Caller is not an operator }
+        "400":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Unknown status or out-of-range limit
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          headers:
+            x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
+            x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
+            x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+          description: Caller is not an operator
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
   /metrics:
     get:
       parameters:
@@ -2013,6 +2212,7 @@ paths:
         decided (blocker B-5).
       security: []
       responses:
+        "400": { $ref: "#/components/responses/UnlimitedError" }
         "200":
           headers:
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
@@ -2214,6 +2414,24 @@ components:
         x-ratelimit-limit: { $ref: "#/components/headers/RateLimitLimit" }
         x-ratelimit-remaining: { $ref: "#/components/headers/RateLimitRemaining" }
         x-ratelimit-reset: { $ref: "#/components/headers/RateLimitReset" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    UnlimitedError:
+      description: >
+        The canonical error, answered by a route that is never rate limited, so
+        it carries the correlation header and none of the budget headers.
+
+
+        Added by milestone 36. `/health`, `/ready` and `/metrics` are on
+        `UNLIMITED_ROUTES` — throttling a liveness check makes a healthy
+        deployment look unhealthy for the wrong reason, and throttling the
+        scraper blinds the monitoring exactly when a flood is in progress — so
+        they cannot answer 429 and never send `x-ratelimit-*`. Referencing the
+        shared `Error` here would document three headers CORE does not set on
+        these routes, which milestone 28's gate compares against real answers.
+      headers:
+        x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
