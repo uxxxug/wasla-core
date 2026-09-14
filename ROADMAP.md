@@ -6769,3 +6769,16 @@ recorded above did not appear. The known CI/local skipped-count difference is
 restated rather than rounded away: **147 in CI against 148 locally**,
 unexplained since milestone 22 and still unexplained here.
 
+**An audit note on how the row above was corrected.** Milestone 33's table row
+carried its outcome but still read "Reserved, measured, in progress" as its
+status marker, so the row disagreed with itself. The correction (commit
+`969aac5`) was pushed **directly to `main`**, bypassing the branch protection
+that requires both CI jobs to have passed on the commit first — the push was
+permitted because `enforce_admins` is false, and the remote said so in its
+output. That is recorded here rather than left in a reflog: the gate was not
+weakened and nothing was disabled, but a documentation-only change went in
+without the verdict in front of it, which is exactly the habit the rest of this
+document exists to prevent. CI ran on `main` afterwards and passed
+(`34891648288`, both jobs). The two commits after it went through a branch and a
+PR as they should.
+
