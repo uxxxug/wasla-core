@@ -280,7 +280,7 @@ and B-1 were never the goal; they are the floor CORE's actual work stands on.
 | 27 | Routes document the response they return, and the documented shape is enforced | **Complete** (branch `http-response-declaration`) — the fourth and last surface of the HTTP contract family. Measured on `main` at `f71aba2` by *parsing* `contracts/openapi/core-v1.yaml` rather than scanning it: **34 of the 52 operations documented no response schema** (the reservation's text scan said 33; corrected additively here, and 35 if `/metrics`'s text body is counted), **nothing had ever parsed the contract as YAML** — so two response objects broken by unquoted commas inside a flow map had passed `check-contracts.mjs` for the file's whole life — and **nothing had ever compared a response body to the contract**, which hid three shipped divergences: `POST /v1/organizations` and `GET /v1/organizations/{id}` answered `{}` (unawaited promise as the body), `GET /v1/event-deliveries/undelivered` returned the `claim_token` fencing credential, and `GET /v1/sessions/current` returned six permissions the published `Permission` enum omitted. Now every operation documents the status, content type and schema it answers with; all 52 are driven to a success status and their real bodies validated strictly, an undocumented property failing the gate; the router refuses any route whose body is a thenable; and coverage is asserted three ways (contract = driven = registered). `tests/support/openapi.ts`, `tests/support/http-scenario.ts`, `tests/http-response-declaration.test.ts`, `docs/http-response-declaration.md`. | 26 |
 | 28 | Responses declare the headers they set, and every response carries the one every caller needs | **Complete** (branch `http-response-headers`) — the fifth and last undeclared HTTP surface. Measured on `main` at `ea793f3` by driving all 52 operations and reading the real answers: `x-correlation-id` set on **52 of 52** responses and documented on **0**; the three `x-ratelimit-*` headers sent on every limited response but documented only on the shared `RateLimited` 429; the unmatched `404` returning **no headers at all**; and the Node adapter's unparseable-body `400` answering `{code, message}` — the only refusal in CORE that was not the canonical `Error`. Now `src/platform/http/response-headers.ts` declares the six headers with when, why and an anchored shape; `sealHeaders` is the single place headers are produced and refuses an undeclared name or a wrong-shaped value, so an undocumented header is a 500 in a test rather than a field in production; both defective paths are fixed at the cause; and one `components/headers` section is referenced by every response object and both shared refusals, documented where the headers are really sent and withheld from the three routes `UNLIMITED_ROUTES` exempts — a set the gate derives from the limiter rather than restating. Nine gate cases, twelve falsifications (F10 invalid on its first attempt and recorded as such). 709/1272. `tests/http-response-header-declaration.test.ts`, `docs/http-response-headers.md`. | 27 |
 | 29 | Authentication precedes every lookup and every body check, and `401` is documented wherever it can happen | **Reserved, measured, in progress on branch `http-auth-order`** — a refusal-ordering defect that is an **unauthenticated existence oracle**, found by measuring the refusal surface after milestone 28. Measured on `main` at `a5ab512`, with no credential at all: `GET /v1/fulfillments/<an id that exists>` answers **401**, and `GET /v1/fulfillments/<an id that does not>` answers **404** — so anybody, holding nothing, can distinguish a real fulfillment id from an invented one by the status code alone. The cause is the order of checks, not the check itself: the route loads the row first because it needs `record.organization_id` to scope authorization (`await fulfillment.require(...)` on the line before `await requirePrincipal(...)`), so the lookup, and therefore the `404`, happens before authentication. `POST /v1/fulfillments/{id}/cancel` has the same shape. The same ordering shows up on the body: an anonymous `POST /v1/sessions/revoke`, `/v1/access/check`, `/v1/memberships`, `/v1/organizations` and 20 other write routes answers **400** about the body rather than **401**, because `parseBody` runs in the router and authentication runs inside the handler. And the contract records almost none of it: across 52 operations, **`401` is documented on 2** while an anonymous request is refused on 49 — `400` on 19, `403` on 19, `404` on 19, `409` on 14, `429` on 49. Scope: a declared authentication requirement per registration, the router authenticating before it parses a body and before any handler runs so `401` precedes `400` and `404` by construction rather than by review, `requirePrincipal` authorizing the principal the router already established instead of re-reading the credential, `401` documented on every operation that requires one, and a gate that drives every registered route anonymously and with a junk and a real identifier.  **What measuring first found instead, and what this cycle did.** Listing which routes authenticate at all — a scan for handlers that never call `requirePrincipal`, `bearer()` or `identity.authenticate` — returned five, and one was **`POST /v1/memberships`**, the route that decides who a tenant's administrators are. Measured against the real router with **no credential of any kind**: `POST /v1/identities` → `201` a new principal, `POST /v1/memberships` `{principal_id, organization_id: <any existing tenant>, roles: ["org_admin"]}` → **`201` granted**, `POST /v1/sessions` `{principal_id, channel_type}` → `201` a bearer token, `GET /v1/sessions/current` → `org_admin` with 7 permissions in the victim organization, `GET /v1/organizations/<the victim>` → `200`. Three ordinary calls, nothing held at the start, `org_admin` over somebody else's organization at the end; the only thing needed was an organization id, which appears in every fulfillment, invoice and audit answer that organization produces. The first two attempts answered `400` (`channel` not `channel_type`, `owner` not a real role) and are recorded because they are why the anonymous census under-counted: **a `400` about the body looks like a refusal and is not one.** Fixed at the root: the route now requires `organization.write` **on the organization named in the body**, the permission that already means "may change who this organization is" — `platform_admin` everywhere, `org_admin` inside its own tenant — so an administrator adds a colleague, an org_admin cannot reach a neighbouring tenant, and nobody adds themselves. No new permission, role or policy invented. The contract documents `401` and `403` on the operation with the history in its description. `tests/anonymous-privilege-escalation.test.ts` holds **8 cases**; five falsifications, of which **three passed the first version of the gate** - requiring `organization.read` instead of `organization.write` (no case held a principal holding one permission and not the other, so any colleague could have promoted themselves), and deleting `401` and then `403` from the contract operation (this route's refusals are reached by no other test, so no gate observed them). The gate was strengthened in response - an `org_member` self-promotion case with a premise assertion that the same token really reads the organization, and a cross-check that every status the file drives out of the route is documented - and all five are caught now. **What it does not claim: the escalation is only half closed, on purpose.** `POST /v1/sessions` still mints a token for **any** `principal_id` with no proof of possession, so an outsider knowing an administrator's principal id can still become them without touching the membership route — recorded as **B-39**, and the last case asserts that reachable path so the gap is evidence in the suite rather than a sentence in a document. `POST /v1/sessions/revoke` still needs no credential (**B-40**). Ordering and the fulfillment existence oracle are milestone 30. Full account in `docs/anonymous-privilege-escalation.md`. Measured: 717/148 without a database, 1280 with one | 28 |
-| 30 | Refusal ordering: `401` before `400` and before any lookup, and `401` documented wherever it can happen | **Reserved and in progress on branch `http-authentication-declaration`** — re-measured on `main` at `a2dccba` before any edit, and the numbers moved with milestone 29: 52 operations, `401` documented on **3** (`GET /v1/sessions/current`, `POST /v1/access/check`, and `POST /v1/memberships` which milestone 29 added), census `200`×38 `201`×15 `202`×1 `204`×1 `400`×19 `401`×3 `403`×20 `404`×19 `409`×14 `429`×49. An anonymous sweep of all 52 registrations answers `200` on 3 (`/health`, `/ready`, `/metrics` — anonymous by design), **`400` on 27**, `401` on 20, and `404` on 2. Of the 27, three are the login surface that is anonymous by design; **24 require authentication and answer `400` about the body first**, because `parseBody` runs in the router and the credential is read inside the handler. The 2 `404`s are the fulfillment routes, and with a **real** id the same anonymous request answers `401` — the existence oracle. | 29 |
+| 30 | Refusal ordering: `401` before `400` and before any lookup, and `401` documented wherever it can happen | **Complete** (branch `http-authentication-declaration`) — authentication is now a property of the route, enforced by the router before anything else it does. Re-measured on `main` at `a2dccba` before any edit: 52 operations, `401` documented on **3**; an anonymous sweep of all 52 registrations answering `200`×3, `400`×27, `401`×20, `404`×2. **Corrected additively during implementation**: with probe bodies that satisfy each route's required properties the same sweep reads `200`×3, `400`×**28**, `401`×**19**, `404`×2 — the earlier reading is not wrong, it used a body some routes refuse for a different reason (`…/void` requires a property, `…/capture` does not), and both are kept rather than one replacing the other. The two `404`s are `GET /v1/fulfillments/{id}` and `POST /v1/fulfillments/{id}/cancel`, which answered `404` for an invented id and `401` for a real one to the same anonymous caller — an **existence oracle** needing no credential. Now: `src/platform/http/authentication.ts` declares `AuthenticationSpec` (`AUTHENTICATED` or `anonymous(reason)`, where an empty reason throws at construction), every registration carries one, and `Router.handle` resolves it **after the rate limiter and before `parseSelection`, `parseBody` and the handler**. `bearerCredential` is the only place a credential is read out of the `authorization` header — `bearer()` is deleted and no handler calls `authenticate`; `requirePrincipal` authorizes the principal the router established. **46 routes require a credential, 6 are anonymous by declaration and each says why**, three naming the blocker that keeps them so (B-5 on the probes, B-39 on `POST /v1/sessions`, B-40 on `/v1/sessions/revoke`). After: `200`×3, `400`×3 (the anonymous write routes refusing an empty body), `401`×**46**, `404`×0, and real and invented identifiers are indistinguishable to an anonymous caller everywhere. `401` documented on **46 of 46** through a new `Unauthenticated` response component that states the ordering and the absence of the oracle. **This deliberately reverses milestones 24 and 25**, whose gates asserted `400` before `401`; both now assert the inverse, carry the reversal and its reasoning in the case itself, and drive their probes with a credential entitled to nothing (`tests/support/credential.ts`) so their `400`s are still proven — and proven to precede the `403` that caller would otherwise get. Their store argument survives: a request with no `authorization` header is refused before any session read at all, and a junk one costs one indexed read the limiter — still checked first — already bounds. `tests/http-authentication-declaration.test.ts` holds **16 cases**; seven falsifications, one of which (restoring the oracle) breaks the gate's own fixture and is recorded as a weakness of that case rather than a clean signal. Measured: **733/147 without a database, 1295 + 1 = 1296 with one**. Full account in `docs/authentication-ordering.md`. | 29 |
 
 ### What was claimed complete and actually is
 
@@ -6147,3 +6147,116 @@ numbers match the local measurement on an embedded PostgreSQL 18.4 in `C`
 collation exactly, and both exceed the previous cycle's by the 15 tests this one
 added. Every assertion in `tests/http-header-declaration.test.ts` therefore passed
 in the environment that gates the merge, not only locally.
+
+## Cycle 2026-09-14 (nineteenth) — authentication is a route declaration, resolved before anything else
+
+Milestone 29 closed an escalation and left its other half explicitly open:
+ordering, and the fulfillment existence oracle. This cycle is that half.
+
+**Measured before anything was edited**, on the reservation commit `af2afd7`, by
+driving all 52 registrations over the real router with no `authorization` header
+and a syntactically valid but invented identifier in every path parameter:
+`200`×3 (`/health`, `/ready`, `/metrics`), **`400`×28**, `401`×19, **`404`×2**,
+and `401` documented on **3 of the 46** operations that can answer it.
+
+**A correction to the reservation, recorded additively.** The reservation read
+`400`×27 / `401`×20 on the same commit. Neither reading is wrong: they used
+different probe bodies, and some routes refuse an empty body for a reason that
+has nothing to do with credentials — `POST /v1/payment-authorizations/{id}/void`
+requires a property, `…/capture` does not. Both figures stand; the sweep in the
+gate uses the second.
+
+**The finding that settled the ordering question** is not the 28. It is the 2.
+`GET /v1/fulfillments/{fulfillment_id}` answered `404` for an invented id and
+`401` for a real one, to the same anonymous caller, because the route loaded the
+row to get `organization_id` for its permission check. Anyone holding nothing
+could test whether a fulfillment id exists by reading a status code.
+`POST /v1/fulfillments/{id}/cancel` had the same shape.
+
+**What was built.** `src/platform/http/authentication.ts`: `AuthenticationSpec`
+is `AUTHENTICATED` or `anonymous(reason)`, and `anonymous("")` throws — an
+exemption without a written argument cannot be registered. Every `Router`
+registration carries one and the registration API defaults to `AUTHENTICATED`,
+so the unsafe direction is the one that has to be typed. `Router.handle`
+resolves it **after the rate limiter** and **before** `parseSelection`,
+`parseBody` and the handler, and `RouterOptions.authenticator` is required
+rather than optional, so a router that cannot enforce what its routes declare
+does not typecheck. `bearerCredential` is the only reader of the `authorization`
+header in `src/`; `bearer()` is deleted, no handler calls `authenticate`, and
+`requirePrincipal` authorizes the principal the router already established.
+`RequestContext<A>` carries it.
+
+Six routes are anonymous by declaration: the three probes (B-5 keeps them off
+the public internet by topology, not by code), `POST /v1/identities` and
+`POST /v1/sessions` because that is how a credential is obtained (B-39), and
+`POST /v1/sessions/revoke` because it needs none today (B-40). Three of the six
+reasons name the blocker that keeps them so, which is the point of requiring a
+reason — the exemptions that are wrong stay legible as wrong.
+
+**After**: `200`×3, `400`×3 (those three anonymous write routes refusing an
+empty body, which is the answer they should give), **`401`×46**, `404`×0. Real
+and invented identifiers are indistinguishable to an anonymous caller on every
+route. The contract documents `401` on **46 of 46** through a new
+`Unauthenticated` response component that states the two things a status code
+cannot: that this refusal comes first, and that it is the same answer for an
+identifier that exists and one that does not.
+
+**The conflict with milestones 24 and 25, resolved on purpose rather than
+patched away.** Those gates asserted `400` **before** `401`, for three stated
+reasons. The third — "a caller with a typo must hear about the typo" — is kept
+as behaviour: an authenticated caller still does, and both gates still assert
+exactly that. The second — "a request CORE cannot understand must not reach a
+store, and authentication is a store read" — is kept as fact: the limiter still
+runs first, a request with no `authorization` header is refused before
+`authenticate` is called at all so it costs **zero** reads, and a junk
+credential costs **one** indexed session read inside a budget the limiter has
+already applied. The first — "the parameter list is published, so disclosing it
+early discloses nothing" — was true and insufficient: the existence of a
+fulfillment id is not published, and one ordering cannot be right for the public
+half and the private half of the same answer. Both cases were replaced by their
+inverse, each carrying the reversal and this reasoning in the case itself, and
+`tests/support/credential.ts` mints them a credential that is **authenticated
+and entitled to nothing** — so their `400`s are still proven, and now proven to
+precede the `403` that caller would otherwise receive, which is a slightly
+stronger claim than they made before. Nothing was deleted from the earlier
+record; `docs/authentication-ordering.md` quotes it and answers it.
+
+**Gate.** `tests/http-authentication-declaration.test.ts`, 16 cases, no
+database, so it runs in both CI jobs. It asserts the declaration exists on every
+registration, names the six anonymous routes **by name** rather than counting
+them, requires a real sentence as a reason, drives the anonymous sweep with no
+credential and with a junk one, compares every parameterised route's anonymous
+answer for a real identifier against an invented one (21 comparisons, bodies as
+well as statuses), asserts `401` precedes both `400` families, asserts the
+source order limiter → authentication → parse, asserts a real credential still
+passes every route (via the response gate's scenario, so a declaration that
+refused everybody would not pass), pins the three modules allowed to read the
+header with the reason each is allowed, and cross-checks the contract in both
+directions — documented `iff` required.
+
+**Falsification.** Seven mutations, each applied to a committed tree, the gate
+run, the tree restored and confirmed clean: a required route declared anonymous
+(4 cases fail), authentication moved after both parses — milestone 24/25's
+ordering restored (4), authentication removed for parameterised routes, which
+restores the oracle (**the file fails outright: the gate's own fixture cannot be
+built, and that is recorded as a weakness of that case's fixture rather than
+dressed up as a clean signal**), the refusal naming the path it refused (2), one
+`"401"` deleted from the contract (1), the empty-reason guard removed (1), and a
+fourth reader of the header added in `money/http.ts` (1).
+
+**Measured, not asserted.** Without `DATABASE_URL`: 717 → **733 passed / 147
+skipped** across 54 files. With it: 1279 → **1295 passed across 56 files, plus 1
+in the cluster file — 1296**, none skipped, on a real PostgreSQL 18.4 with all 19
+migrations applied. `tsc --noEmit` clean; governance, contract, migration and
+roadmap gates pass. Four existing test files changed and none was loosened: the
+two gates above gained a credential and their inverted cases, and the two probe
+routes in the response gates now declare `anonymous(...)` because a probe route
+still has to say what it is.
+
+**What this cycle does not claim.** It does not make "authenticated" mean much
+on its own: **B-39** (`POST /v1/sessions` mints a token for any `principal_id`)
+and **B-40** (revocation needs no credential) are still open and still gated by
+`tests/anonymous-privilege-escalation.test.ts`, untouched. It does not change
+who may do what — that is `identity.authorize`. It does not make `/metrics` or
+`/ready` safe to expose; **B-5** still owns that. And the known CI/local
+skipped-count difference (147 in CI, 148 locally) is restated, not rounded away.
