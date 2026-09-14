@@ -1,6 +1,7 @@
 import { AUTHENTICATED } from "../http/authentication.js";
 import { notFound } from "../errors.js";
 import { NO_BODY, objectBody } from "../http/body.js";
+import { natural } from "../http/retry.js";
 import type { Router } from "../http/router.js";
 import { requirePrincipal } from "../../modules/identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../../modules/identity-access/service.js";
@@ -22,6 +23,9 @@ export function registerDeliveryRoutes(
       { name: "signing_secret", kind: "text", required: true },
     ),
     AUTHENTICATED,
+    natural(
+      "a subscription is unique on (subscriber, event_type, endpoint_url): measured on main at bd92b69 a repeat added no event_subscription row, so no event is delivered twice",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const created = await registry.register({
@@ -44,7 +48,9 @@ export function registerDeliveryRoutes(
   // Pausing a subscriber stops the fan-out queueing new work for it. Deliveries
   // already queued stay queued: they were promised, and dropping them silently
   // would be worse than delivering them late.
-  router.post("/v1/event-subscriptions/:subscription_id/deactivate", NO_BODY, AUTHENTICATED, async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/deactivate", NO_BODY, AUTHENTICATED, natural(
+      "deactivation is a transition that is a no-op once made",
+    ), async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();
@@ -53,7 +59,9 @@ export function registerDeliveryRoutes(
     return { status: 200, body: { subscription_id: id, active: false } };
   });
 
-  router.post("/v1/event-subscriptions/:subscription_id/activate", NO_BODY, AUTHENTICATED, async (ctx) => {
+  router.post("/v1/event-subscriptions/:subscription_id/activate", NO_BODY, AUTHENTICATED, natural(
+      "activation is a transition that is a no-op once made",
+    ), async (ctx) => {
     await requirePrincipal(ctx, identity, "organization.write");
     const id = ctx.params["subscription_id"] ?? "";
     const items = await registry.list();

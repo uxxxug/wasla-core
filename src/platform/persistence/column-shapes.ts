@@ -182,6 +182,22 @@ export const COLUMN_SHAPES: Readonly<Record<string, readonly ColumnShape[]>> = {
     { column: "verified_at", type: "timestamptz", notNull: false },
     { column: "created_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
   ],
+  // Recorded answers, as migration 0020 reshaped the table 0001 created and
+  // nothing ever wrote to. Everything that identifies the request is NOT NULL,
+  // because a record missing any part of "what was asked" cannot be compared
+  // against a retry; `response_body` is nullable because SQL NULL is how both
+  // backends say "the recorded answer carried no body", and JSON null would
+  // mean that on one of them only.
+  idempotency_key: [
+    { column: "key", type: "text", notNull: true },
+    { column: "method", type: "text", notNull: true },
+    { column: "scope", type: "text", notNull: true },
+    { column: "request_fingerprint", type: "text", notNull: true },
+    { column: "response_status", type: "integer", notNull: true },
+    { column: "response_body", type: "jsonb", notNull: false },
+    { column: "created_at", type: "timestamptz", notNull: true, databaseDefault: "now()" },
+    { column: "expires_at", type: "timestamptz", notNull: true },
+  ],
   inbound_event: [
     { column: "event_id", type: "uuid", notNull: true, path: "event.event_id" },
     { column: "event_type", type: "text", notNull: true, path: "event.event_type" },

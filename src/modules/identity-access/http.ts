@@ -1,6 +1,7 @@
 import { unauthenticated } from "../../platform/errors.js";
 import { AUTHENTICATED, anonymous } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
+import { natural, newEachTime } from "../../platform/http/retry.js";
 import type { RequestContext, Router } from "../../platform/http/router.js";
 import { CHANNEL_TYPES } from "./domain.js";
 import type { ChannelType, Permission, Role } from "./domain.js";
@@ -67,6 +68,9 @@ export function registerIdentityRoutes(
     // has never spoken to CORE becomes a principal, so requiring a credential
     // here would mean no credential could ever be obtained.
     anonymous("the entry point: a caller with no identity yet asks for one"),
+    natural(
+      "registerIdentity resolves an existing identity by its (channel_type, external_id) link: measured on main at bd92b69 the second call answered 200 rather than 201 with the same identity_id and principal_id, and no identity, principal or identity_link row was added",
+    ),
     async (ctx) => {
     const sourceSystem = ctx.input.text("source_system");
     const result = await identity.registerIdentity({
@@ -112,6 +116,9 @@ export function registerIdentityRoutes(
     // construction, and comes from `npm run bootstrap:credential`, which needs
     // database access rather than an HTTP request.
     AUTHENTICATED,
+    newEachTime(
+      "issuing a session is the one write where a repeat must create something: a caller asking twice wants two credentials, and collapsing them would hand back a token the first call may already have discarded — revocation, not idempotency, is how a session is undone",
+    ),
     async (ctx) => {
     // Not scoped to an organization: a session is not org-scoped — it carries
     // every membership the principal has — so there is no organization to check
@@ -154,6 +161,9 @@ export function registerIdentityRoutes(
     // rejection, so the caller was told a revocation succeeded that never
     // happened, and an unauthenticated request was a remote kill.
     AUTHENTICATED,
+    natural(
+      "revocation is a state machine that is a no-op once it has happened: the second call finds the session already revoked and answers the same way, because a session cannot be revoked twice",
+    ),
     async (ctx) => {
     // Awaited, and the entitlement rule lives in the service next to the lookup
     // it depends on: whose session this is cannot be decided without reading it,
@@ -174,6 +184,9 @@ export function registerIdentityRoutes(
       { name: "organization_id", kind: "text" },
     ),
     AUTHENTICATED,
+    natural(
+      "an entitlement check writes nothing at all — it is a read expressed as a POST because the question travels in the body — so a repeat is the same question asked twice",
+    ),
     async (ctx) => {
     const actor = currentPrincipal(ctx);
     const permission = ctx.input.requiredText("permission") as Permission;
@@ -194,6 +207,9 @@ export function registerIdentityRoutes(
       { name: "roles", kind: "enum_list", values: ROLES, required: true, minItems: 1 },
     ),
     AUTHENTICATED,
+    natural(
+      "a membership is unique on (organization_id, principal_id): measured on main at bd92b69 a repeat answered 409 and added no membership row, so the repeat is refused rather than duplicated",
+    ),
     async (ctx) => {
     const roles = [...ctx.input.strings("roles")] as Role[];
     // Authenticated and authorized **on the organization being granted into**,

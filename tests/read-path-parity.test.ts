@@ -201,7 +201,8 @@ describe("read-path parity: the columns a read can surface", () => {
   it("parses enough to be worth asserting", () => {
     // Vacuity guard. A parser that silently matched nothing would make every
     // gate below pass, so the shape of its own output is checked first.
-    expect(shapedTables().length, "no shaped tables: the gates would be vacuous").toBe(30);
+    // 31 since milestone 32 added `idempotency_key`; 30 before it.
+    expect(shapedTables().length, "no shaped tables: the gates would be vacuous").toBe(31);
     expect(reads.size, "no table is read anywhere: the parser found nothing").toBeGreaterThan(25);
     const surfaced = [...reads.values()].reduce((total, set) => total + set.size, 0);
     expect(surfaced, "suspiciously few columns parsed").toBeGreaterThan(150);

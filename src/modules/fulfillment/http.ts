@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
+import { natural } from "../../platform/http/retry.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
@@ -103,6 +104,9 @@ export function registerFulfillmentRoutes(
     "/v1/fulfillments/:fulfillment_id/cancel",
     objectBody({ name: "reason", kind: "text" }),
     AUTHENTICATED,
+    natural(
+      "cancelling a fulfillment is a transition a cancelled fulfillment cannot repeat",
+    ),
     async (ctx) => {
     const record = await fulfillment.require(ctx.params["fulfillment_id"] ?? "");
     await requirePrincipal(ctx, identity, "fulfillment.request", record.organization_id);

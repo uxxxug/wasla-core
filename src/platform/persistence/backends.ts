@@ -4,6 +4,8 @@ import type { Clock } from "../clock.js";
 import { InMemoryInbox, type InboxStore } from "../eventing/inbox.js";
 import { InMemoryRateLimitWindowStore, type RateLimitWindowStore } from "../http/rate-limit.js";
 import { PgRateLimitWindowStore } from "../http/pg-rate-limit.js";
+import { InMemoryRetryRecordStore, type RetryRecordStore } from "../http/retry.js";
+import { PgRetryRecordStore } from "../http/pg-retry.js";
 import { InMemoryInboundEventStore, type InboundEventStore } from "../eventing/ingress.js";
 import { InMemoryDeliveryStore, type DeliveryStore } from "../eventing/delivery.js";
 import { PgDeliveryStore } from "../eventing/pg-delivery.js";
@@ -86,6 +88,15 @@ export interface Persistence {
    * multiply every limit by the number of instances running.
    */
   rateLimit: RateLimitWindowStore;
+  /**
+   * Answers already given, for the routes that collapse a retry against the
+   * caller's `Idempotency-Key` (milestone 32). Part of the bundle for the same
+   * reason the limiter is: an in-process record behind two instances collapses
+   * a retry only when it happens to land on the instance that answered the
+   * first call, so choosing Postgres and choosing a record every instance can
+   * see has to be one decision.
+   */
+  retry: RetryRecordStore;
   identity: IdentityRepository;
   organization: OrganizationRepository;
   money: MoneyRepository;
@@ -134,6 +145,7 @@ export function memoryPersistence(clock: Clock): Persistence {
     replayLock: new InProcessReplayLock(),
     revivalLock: new InProcessReplayLock(),
     rateLimit: new InMemoryRateLimitWindowStore(clock),
+    retry: new InMemoryRetryRecordStore(clock),
     identity: new InMemoryIdentityRepository(keys),
     organization: new InMemoryOrganizationRepository(keys),
     money,
@@ -169,6 +181,7 @@ export function postgresPersistence(pool: PostgresPool, clock: Clock): Persisten
     replayLock: new PgAdvisoryReplayLock(pool),
     revivalLock: new PgAdvisoryReplayLock(pool, REVIVAL_LOCK_KEY),
     rateLimit: new PgRateLimitWindowStore(pool, clock),
+    retry: new PgRetryRecordStore(pool, clock),
     identity: new PgIdentityRepository(pool),
     organization: new PgOrganizationRepository(pool),
     money: new PgMoneyRepository(pool),

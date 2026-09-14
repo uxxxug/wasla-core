@@ -42,6 +42,11 @@
  * ordinary traffic (`headers.ts` records that asymmetry), but an undeclared
  * *response* header is CORE's own doing and nobody else's, so there is nothing to
  * be tolerant of.
+ *
+ * Milestone 32 added the seventh declaration, `idempotent-replay`, which is the
+ * first header whose presence is a fact about one call rather than about the
+ * route or the deployment: it marks an answer the router replayed from a
+ * recorded one instead of running the handler again.
  */
 
 /** When CORE sets a header, which is what a caller can rely on. */
@@ -56,6 +61,13 @@ export type ResponseHeaderWhen =
   | "limited"
   /** Only on an answer that asks the caller to come back later. */
   | "retry"
+  /**
+   * Only on an answer CORE has already given: a retried request that was
+   * collapsed against the caller's `Idempotency-Key` rather than run again.
+   * Absent on the first answer, which is what makes it readable as a fact
+   * about *this* call and not as a property of the route.
+   */
+  | "replay"
   /** Only on the routes that answer with something other than JSON. */
   | "route";
 
@@ -114,6 +126,16 @@ export const RESPONSE_HEADERS: readonly ResponseHeaderDeclaration[] = [
     reason:
       "Set by the routes whose answer is not JSON. `/metrics` is the only one in CORE, and its exposition format is part of what a scraper parses.",
     shape: /^[a-z]+\/[a-z0-9.+-]+(?:; *[a-z0-9-]+=[^;]+)*$/,
+  },
+  {
+    name: "idempotent-replay",
+    when: "replay",
+    reason:
+      "This answer was recorded earlier under the same Idempotency-Key and is being replayed: the request did not run again and nothing new was created. A caller reconciling its own records against CORE's needs to tell a collapsed retry from a fresh success, because the second 201 created nothing.",
+    // Only ever `true`. A header that could also say `false` would be sent on
+    // every answer to mean nothing, and `sealHeaders` refusing the value is
+    // what keeps "absent means fresh" true rather than conventional.
+    shape: /^true$/,
   },
 ];
 

@@ -16,12 +16,18 @@
  *   `CHECK` constraints, all three of which were recorded in
  *   `tests/check-parity.test.ts` as unprobeable *because the reference limiter
  *   held no row*.
- * - `idempotency_key` is written by nothing at all.
+ * - `idempotency_key` was written by nothing at all. Milestone 32 made it the
+ *   record of a keyed route's answer, so it is written on every successful
+ *   call to one, and its exemption is gone: it is declared in `COLUMN_SHAPES`,
+ *   ruled in `ROW_RULES`, and gated like the rest. The sentence above is kept
+ *   because it is what the table was, and B-37 — "a table nothing writes" — is
+ *   what this milestone closed.
  * - `schema_migrations` is the one table the original sentence described.
  *
- * The first two are rows now, and gated like the other 28. The last two are
- * exemptions — and an exemption in this repository is a claim a test tries to
- * break, not a sentence in a document, so both are asserted here.
+ * The first two are rows now, and gated like the other 28; the third became one
+ * in milestone 32. `schema_migrations` remains the single exemption — and an
+ * exemption in this repository is a claim a test tries to break, not a sentence
+ * in a document, so it is asserted here.
  */
 import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -63,11 +69,12 @@ const EXEMPT: readonly {
     why: "written by the migration files themselves, each recording its own version in the same transaction as its DDL; nothing in src/ or scripts/ writes it, and there is no reference backend for 'has this migration been applied', only a database",
     writtenBy: [],
   },
-  {
-    table: "idempotency_key",
-    why: "created by migration 0001 and written by nothing in src/ — the notification module's identically-named *column* is unrelated. It is not gated because there is no write to gate; removing it needs a reviewed destructive migration, which scripts/check-migrations.mjs deliberately refuses to accept as a side effect of a parity cycle (recorded as blocker B-37 rather than smuggled in here)",
-    writtenBy: [],
-  },
+  // `idempotency_key` was the second exemption until milestone 32. It is not
+  // listed here any more because the reason no longer holds: the router writes
+  // it through `InMemoryRetryRecordStore` and `PgRetryRecordStore`, so there is
+  // a write to gate, and the gate below — which fails a table that is both
+  // excused and written — is what would have caught it had the exemption been
+  // left in place.
 ];
 
 function sourceFiles(root: string): string[] {
@@ -186,7 +193,9 @@ describe("runtime tables: the two exemptions, tried rather than trusted", () => 
     const forward = readdirSync(dir).filter(
       (file) => file.endsWith(".sql") && !file.endsWith(".down.sql"),
     );
-    expect(forward.length, "no migrations found: the gate would pass vacuously").toBe(19);
+    // 20 since milestone 32's 0020 gave `idempotency_key` the columns a record
+    // of an answer needs; 19 before it.
+    expect(forward.length, "no migrations found: the gate would pass vacuously").toBe(20);
     const silent = forward.filter((file) => {
       const sql = readFileSync(join(dir, file), "utf8");
       const version = file.replace(/\.sql$/, "");

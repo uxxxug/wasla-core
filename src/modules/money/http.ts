@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { objectBody } from "../../platform/http/body.js";
+import { natural } from "../../platform/http/retry.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
@@ -15,6 +16,9 @@ export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, mone
       { name: "currency", kind: "text", required: true },
     ),
     AUTHENTICATED,
+    natural(
+      "openWallet is an upsert on (owner_type, owner_id, currency): measured on main at bd92b69 the second call answered 200 rather than 201 and the wallet count did not change",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const result = await money.createWallet({
@@ -40,6 +44,9 @@ export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, mone
       { name: "expires_at", kind: "text" },
     ),
     AUTHENTICATED,
+    natural(
+      "the caller supplies business_reference, which is unique per wallet: measured on main at bd92b69 a repeat returned the same authorization_id and added no payment_authorization row, so the amount is not held twice",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const expiresAt = ctx.input.text("expires_at");
@@ -59,6 +66,9 @@ export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, mone
     "/v1/payment-authorizations/:authorization_id/void",
     objectBody({ name: "reason", kind: "text", required: true }),
     AUTHENTICATED,
+    natural(
+      "voiding is a transition that cannot happen twice: a voided authorization is already void, and the repeat is answered from that state",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     return {
@@ -82,6 +92,9 @@ export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, mone
       { name: "capture_reference", kind: "text" },
     ),
     AUTHENTICATED,
+    natural(
+      "a capture is recorded under capture:<authorization_id>:<capture_reference>, which is unique: measured on main at bd92b69 a repeat answered 200 and created no second ledger_transaction, so the same money cannot be captured twice under one reference",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const amount = ctx.input.number("amount_minor");
@@ -103,6 +116,9 @@ export function registerMoneyRoutes(router: Router<AuthenticatedPrincipal>, mone
       { name: "amount_minor", kind: "integer" },
     ),
     AUTHENTICATED,
+    natural(
+      "a refund is recorded under refund:<authorization_id>:<refund_reference> in the same way: measured on main at bd92b69 a repeat answered 200 and created no second ledger_transaction",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "money.authorize");
     const amount = ctx.input.number("amount_minor");

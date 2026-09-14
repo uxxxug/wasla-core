@@ -216,6 +216,34 @@ export class Body {
   names(): readonly string[] {
     return [...this.values.keys()];
   }
+
+  /**
+   * The parsed body as plain data, for fingerprinting a retried request.
+   *
+   * Deliberately not `raw()`: that is the bytes a caller sent, and two requests
+   * that differ only in whitespace, in key order, or in a property the route
+   * does not declare are the same request. This is what CORE actually read, so
+   * the fingerprint milestone 32 records is a fingerprint of the request as
+   * CORE understood it — which is the only version of it the answer depended
+   * on.
+   *
+   * An opaque body has no declared properties, so what it was sent as is all
+   * there is to compare; a nested list is recursed into, because a list of
+   * `Body` is the one value type whose members are not plain data already.
+   * A property that was not sent is omitted rather than recorded as `undefined`,
+   * so "absent" and "absent" fingerprint alike whatever the route declares.
+   */
+  snapshot(): unknown {
+    if (this.isOpaque) return this.opaque;
+    const plain: Record<string, unknown> = {};
+    for (const [name, value] of this.values) {
+      if (value === undefined) continue;
+      plain[name] = Array.isArray(value)
+        ? value.map((item) => (item instanceof Body ? item.snapshot() : item))
+        : value;
+    }
+    return plain;
+  }
 }
 
 function fieldsOf(specs: readonly FieldSpec[], input: Record<string, unknown>, path: string): Map<string, Value> {

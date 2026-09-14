@@ -1,5 +1,6 @@
 import { AUTHENTICATED } from "../../platform/http/authentication.js";
 import { NO_BODY, objectBody } from "../../platform/http/body.js";
+import { keyed, natural } from "../../platform/http/retry.js";
 import type { Router } from "../../platform/http/router.js";
 import { requirePrincipal } from "../identity-access/http.js";
 import type { AuthenticatedPrincipal, IdentityService } from "../identity-access/service.js";
@@ -61,6 +62,9 @@ export function registerSubscriptionRoutes(
       },
     ),
     AUTHENTICATED,
+    natural(
+      "a plan is unique on its caller-supplied code: measured on main at bd92b69 a repeat answered 409 rather than creating a second plan, which is a refusal and not a duplicate",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const intervalCount = ctx.input.number("interval_count");
@@ -92,7 +96,9 @@ export function registerSubscriptionRoutes(
     return { status: 200, body: { ...result.plan, grants: result.grants } };
   });
 
-  router.post("/v1/plans/:plan_id/activate", NO_BODY, AUTHENTICATED, async (ctx) => {
+  router.post("/v1/plans/:plan_id/activate", NO_BODY, AUTHENTICATED, natural(
+      "activation is a transition that has already happened the second time: measured on main at bd92b69 an active plan answered 409 to a second activation and no row changed",
+    ), async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -103,7 +109,9 @@ export function registerSubscriptionRoutes(
     };
   });
 
-  router.post("/v1/plans/:plan_id/retire", NO_BODY, AUTHENTICATED, async (ctx) => {
+  router.post("/v1/plans/:plan_id/retire", NO_BODY, AUTHENTICATED, natural(
+      "retirement is the same transition in the other direction: measured on main at bd92b69 a second retirement answered 200 and wrote nothing, because a retired plan is already retired",
+    ), async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     return {
       status: 200,
@@ -124,6 +132,9 @@ export function registerSubscriptionRoutes(
       { name: "starts_at", kind: "text" },
     ),
     AUTHENTICATED,
+    keyed(
+      "a subscription is the most expensive duplicate in CORE: a repeat creates a second subscription on the same plan and wallet, and therefore a second recurring charge, with no natural key anywhere to collapse it",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const startsAt = ctx.input.text("starts_at");
@@ -159,6 +170,9 @@ export function registerSubscriptionRoutes(
     "/v1/subscriptions/:subscription_id/cancel",
     objectBody({ name: "reason", kind: "text", required: true }),
     AUTHENTICATED,
+    natural(
+      "cancellation is a transition that is a no-op once made: a cancelled subscription cannot be cancelled again",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const result = await billing.cancelSubscription({
@@ -181,6 +195,9 @@ export function registerSubscriptionRoutes(
       { name: "at", kind: "text" },
     ),
     AUTHENTICATED,
+    natural(
+      "a usage record is idempotent on (period, feature_key, usage_reference): measured on main at bd92b69 the second call answered 200 rather than 201 and added no usage_record row",
+    ),
     async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const at = ctx.input.text("at");
@@ -197,7 +214,9 @@ export function registerSubscriptionRoutes(
     return { status: result.recorded ? 201 : 200, body: result.usage };
   });
 
-  router.post("/v1/subscription-periods/:period_id/collect", NO_BODY, AUTHENTICATED, async (ctx) => {
+  router.post("/v1/subscription-periods/:period_id/collect", NO_BODY, AUTHENTICATED, natural(
+      "collection is a transition on the period: a period already settled is not collected a second time, so the repeat answers from the state the first call left",
+    ), async (ctx) => {
     await requirePrincipal(ctx, identity, "subscription.write");
     const result = await billing.chargePeriod({
       period_id: ctx.params["period_id"] ?? "",

@@ -42,6 +42,13 @@
  *     freshly generated correlation id, and the refusal says the header was
  *     rejected. Echoing an 8000-character value back to prove it was too long
  *     would be the defect answering itself.
+ *
+ * Milestone 32 added the sixth declaration, `idempotency-key`, and it is the
+ * first header CORE requires rather than merely reads: five write routes have
+ * no natural key to collapse a repeat on, so the caller's key is what lets the
+ * router answer a retried request with the answer it already gave. It is
+ * declared here like the rest, which is also why sending it before that
+ * milestone did nothing at all — an undeclared header is never read.
  */
 import { invalid } from "../errors.js";
 
@@ -65,7 +72,17 @@ export type HeaderUse =
    * and the first entry is the one CORE attributes to; bounded, because the
    * chain is caller-controlled text on the way to a hash.
    */
-  | "forwarded";
+  | "forwarded"
+  /**
+   * A key the caller chooses and CORE stores as the primary key of a recorded
+   * answer, then compares a later request against — milestone 32. Checked as an
+   * identifier rather than as caller text for two reasons the other uses do not
+   * share: it becomes a database key, so it must be a bounded single token; and
+   * a caller that sends a *slightly* different key by accident gets a second
+   * charge rather than a replay, so the accepted alphabet is the narrow one the
+   * generators of such keys (UUIDs, ULIDs, hashes) already produce.
+   */
+  | "idempotency";
 
 export interface HeaderSpec {
   /** The wire name, lower case: Node lower-cases incoming header names. */
@@ -84,6 +101,16 @@ export interface HeaderSpec {
  * is what refuses `"   "`, `"a\tb"` and the `"a, b"` a repeated header becomes.
  */
 const CORRELATION_ID = /^[A-Za-z0-9._:-]+$/;
+
+/**
+ * An idempotency key is a caller-chosen identifier, so it is accepted as one —
+ * and deliberately as the *same* expression rather than a second one that would
+ * drift from it. Both headers are strings a caller invents and CORE stores as a
+ * key, so "letters, digits and . _ : -" is the same rule for the same reason;
+ * an alias keeps the one regular expression while letting each use name itself
+ * where it is declared.
+ */
+const IDEMPOTENCY_KEY = CORRELATION_ID;
 
 /**
  * One credential, as `scheme token`. Deliberately not a check that the scheme is
@@ -137,6 +164,16 @@ export const DECLARED_HEADERS: readonly HeaderSpec[] = [
     use: "forwarded",
     maxLength: 128,
     why: "the reported client address, used by the rate limiter when neither of the above is present",
+  },
+  {
+    name: "idempotency-key",
+    use: "idempotency",
+    // The same bound as a correlation id, and for a stronger reason: the value
+    // is a `text` primary key column, so an unbounded one is unbounded storage
+    // with an index on it. A UUID is 36 characters and a caller prefixing its
+    // own system name still fits several times over.
+    maxLength: 128,
+    why: "the caller's retry key on a route with no natural key: CORE records the answer under it and replays that answer instead of creating a second organization, subscription or geography row",
   },
 ];
 
@@ -241,6 +278,15 @@ export function parseHeaders(raw: RawHeaders): RequestHeaders {
       case "forwarded": {
         if (!FORWARDED.test(value)) {
           throw invalid(`${spec.name} must be an address, or a comma-separated chain of them`);
+        }
+        break;
+      }
+      case "idempotency": {
+        if (!IDEMPOTENCY_KEY.test(value)) {
+          throw invalid(
+            `${spec.name} must be an identifier: letters, digits, and . _ : - only ` +
+              "(it is the key CORE records this request's answer under, so it must be a single stable token)",
+          );
         }
         break;
       }
