@@ -7056,3 +7056,12 @@ not know (`401`), then posted `code` instead of `country_code` (`400`); both wer
 caught only because the setup call is asserted to succeed rather than assumed.
 A probe that fails at setup and reports the wrong colour is the failure mode this
 whole method exists to prevent.
+
+CI verdict for cycle 37, read from the runs themselves rather than inferred from a
+green local tree. At `f7fd604`, runs `34902154567` and `34902110986`, both
+**success**. Verify without a database: **812 passed, 147 skipped across 61 files
+(2 skipped)**, plus the cluster pass, 1 skipped — the new file reads 6 tests in
+both jobs. Verify against PostgreSQL: **1395 passed across 63 files**, plus the
+cluster pass, 1 passed, so **1396**. Test partition, in both jobs: 64 test files,
+63 in the suite pass and 1 in the cluster pass, each in exactly one. The counts
+moved 806 → 812 and 1390 → 1396, and README carries both.
