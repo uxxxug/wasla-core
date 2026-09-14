@@ -6755,3 +6755,17 @@ milestone changed no schema and no migration, and CI is the verdict — where th
 same job passed. If it recurs it is a defect worth its own measurement rather
 than a retry.
 
+**CI verdict (the judgment, not the local run).** PR
+[#25](https://github.com/uxxxug/wasla-core/pull/25), head `abdc682`, runs
+`34890552217` (pull_request) and `34890526730` (push) — both `success` on both
+jobs. *Verify without a database*: **789 passed / 147 skipped across 58 files,
+2 skipped**, plus 1 skipped in the cluster file. *Verify against PostgreSQL*
+(`postgres:16`, all 21 migrations unchanged by this cycle): **1372 passed
+across 60 files, none skipped, and 1 passed in the cluster file — 1373 in
+total**. The new gate is named in both job logs: `tests/refusal-retryability.test.ts`
+is **8 tests** without a database and **11** with. Both totals match the local
+measurement exactly, and the cluster job passed in CI — where the local flake
+recorded above did not appear. The known CI/local skipped-count difference is
+restated rather than rounded away: **147 in CI against 148 locally**,
+unexplained since milestone 22 and still unexplained here.
+
