@@ -7327,3 +7327,12 @@ was extended to load notification message schemas from
 Falsification: four cases applied to a conformed payload from the published
 schema's examples — a required field removed, an undeclared field added, a
 field's type changed, and a conforming payload that must pass.
+
+CI verdict for cycle 41, read from the runs themselves. At `d574fdd`, runs
+`34916320846` and `34916344146`, both **success**. Verify without a database:
+**855 passed, 147 skipped across 67 files (2 skipped)**, plus the cluster pass, 1
+skipped. Verify against PostgreSQL: **1409 passed across 67 files**, plus the
+cluster pass, 1 skipped. Test partition: 68 test files, 67 in the suite pass
+and 1 in the cluster pass, each in exactly one. The counts moved 849 → 855 and
+1409 → 1409 (the new gate's 6 tests all run in the suite pass and need no
+database), and README carries both.
