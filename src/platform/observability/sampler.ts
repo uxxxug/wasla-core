@@ -28,13 +28,17 @@ export interface DepthSources {
    */
   fulfillment?: {
     countByStatus(): Promise<Record<string, number>>;
+    oldestAgeByStatus(now: Date): Promise<Record<string, number>>;
   };
   subscription?: {
     countSubscriptionsByStatus(): Promise<Record<string, number>>;
+    oldestAgeByStatus(now: Date): Promise<Record<string, number>>;
   };
   money?: {
     countWalletsByStatus(): Promise<Record<string, number>>;
     countAuthorizationsByStatus(): Promise<Record<string, number>>;
+    oldestWalletAgeByStatus(now: Date): Promise<Record<string, number>>;
+    oldestAuthorizationAgeByStatus(now: Date): Promise<Record<string, number>>;
   };
 }
 
@@ -102,22 +106,37 @@ export class DepthSampler {
       }
 
       if (this.sources.fulfillment) {
-        const fulfillmentCounts = await this.sources.fulfillment.countByStatus();
+        const now = this.clock.now();
+        const [fulfillmentCounts, fulfillmentAges] = await Promise.all([
+          this.sources.fulfillment.countByStatus(),
+          this.sources.fulfillment.oldestAgeByStatus(now),
+        ]);
         this.publishModule("core_fulfillment_depth", "status", fulfillmentCounts);
+        this.publishOldestAge("core_fulfillment_oldest_age_seconds", "status", fulfillmentAges);
       }
 
       if (this.sources.subscription) {
-        const subscriptionCounts = await this.sources.subscription.countSubscriptionsByStatus();
+        const now = this.clock.now();
+        const [subscriptionCounts, subscriptionAges] = await Promise.all([
+          this.sources.subscription.countSubscriptionsByStatus(),
+          this.sources.subscription.oldestAgeByStatus(now),
+        ]);
         this.publishModule("core_subscription_depth", "status", subscriptionCounts);
+        this.publishOldestAge("core_subscription_oldest_age_seconds", "status", subscriptionAges);
       }
 
       if (this.sources.money) {
-        const [walletCounts, authorizationCounts] = await Promise.all([
+        const now = this.clock.now();
+        const [walletCounts, authorizationCounts, walletAges, authorizationAges] = await Promise.all([
           this.sources.money.countWalletsByStatus(),
           this.sources.money.countAuthorizationsByStatus(),
+          this.sources.money.oldestWalletAgeByStatus(now),
+          this.sources.money.oldestAuthorizationAgeByStatus(now),
         ]);
         this.publishMoney("wallet", walletCounts);
         this.publishMoney("payment_authorization", authorizationCounts);
+        this.publishMoneyOldestAge("wallet", walletAges);
+        this.publishMoneyOldestAge("payment_authorization", authorizationAges);
       }
 
       this.registry.setGauge("core_sample_timestamp_seconds", {}, Math.floor(this.clock.now().getTime() / 1000));
@@ -160,6 +179,34 @@ export class DepthSampler {
         : ["authorized", "captured", "partially_captured", "voided"];
     for (const status of knownStatuses) {
       this.registry.setGauge("core_money_depth", { kind, status }, counts[status] ?? 0);
+    }
+  }
+
+  private publishOldestAge(
+    metric: "core_fulfillment_oldest_age_seconds" | "core_subscription_oldest_age_seconds",
+    label: string,
+    ages: Record<string, number>,
+  ): void {
+    // Same known-statuses pattern as publishModule: a gauge that keeps its old
+    // value when a count drops to zero is a gauge that lies, and an age gauge
+    // that keeps its old value when the last row leaves is worse — it reports a
+    // stale age for a status that is now empty.
+    const knownStatuses =
+      metric === "core_fulfillment_oldest_age_seconds"
+        ? ["coordinating", "dispatched", "completed", "failed", "cancelled"]
+        : ["active", "past_due", "cancelled", "expired"];
+    for (const status of knownStatuses) {
+      this.registry.setGauge(metric, { [label]: status }, ages[status] ?? 0);
+    }
+  }
+
+  private publishMoneyOldestAge(kind: string, ages: Record<string, number>): void {
+    const knownStatuses =
+      kind === "wallet"
+        ? ["active", "frozen", "closed"]
+        : ["authorized", "captured", "partially_captured", "voided"];
+    for (const status of knownStatuses) {
+      this.registry.setGauge("core_money_oldest_age_seconds", { kind, status }, ages[status] ?? 0);
     }
   }
 }

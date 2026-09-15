@@ -246,4 +246,19 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     }
     return counts;
   }
+
+  async oldestAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; age: string }>(
+      `select distinct on (status) status,
+        extract(epoch from ($1::timestamptz - created_at))::bigint as age
+       from fulfillment
+       order by status, created_at asc`,
+      [now.toISOString()],
+    );
+    const ages: Record<string, number> = {};
+    for (const row of result.rows) {
+      ages[row.status] = Number(row.age);
+    }
+    return ages;
+  }
 }

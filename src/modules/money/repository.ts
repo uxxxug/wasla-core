@@ -25,6 +25,13 @@ export interface MoneyRepository {
    */
   countWalletsByStatus(): Promise<Record<string, number>>;
   countAuthorizationsByStatus(): Promise<Record<string, number>>;
+  /**
+   * Age in seconds of the oldest wallet and authorization in each status,
+   * measured from `created_at`. Zero for statuses with no rows.
+   * Read-only, for the depth sampler.
+   */
+  oldestWalletAgeByStatus(now: Date): Promise<Record<string, number>>;
+  oldestAuthorizationAgeByStatus(now: Date): Promise<Record<string, number>>;
   updateAuthorization(authorization: PaymentAuthorization, scope: TransactionScope): Promise<void>;
   insertTransaction(transaction: LedgerTransaction, scope: TransactionScope): Promise<void>;
   findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined>;
@@ -277,6 +284,28 @@ export class InMemoryMoneyRepository implements MoneyRepository {
       counts[auth.status] = (counts[auth.status] ?? 0) + 1;
     }
     return counts;
+  }
+  async oldestWalletAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const oldest: Record<string, number> = {};
+    const nowMs = now.getTime();
+    for (const wallet of this.wallets.values()) {
+      const age = Math.floor((nowMs - Date.parse(wallet.created_at)) / 1000);
+      if (oldest[wallet.status] === undefined || age < oldest[wallet.status]!) {
+        oldest[wallet.status] = age;
+      }
+    }
+    return oldest;
+  }
+  async oldestAuthorizationAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const oldest: Record<string, number> = {};
+    const nowMs = now.getTime();
+    for (const auth of this.authorizations.values()) {
+      const age = Math.floor((nowMs - Date.parse(auth.created_at)) / 1000);
+      if (oldest[auth.status] === undefined || age < oldest[auth.status]!) {
+        oldest[auth.status] = age;
+      }
+    }
+    return oldest;
   }
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.assertAuthorizationShape(authorization);

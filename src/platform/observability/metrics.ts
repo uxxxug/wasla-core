@@ -133,6 +133,21 @@ export const CATALOGUE: Readonly<Record<string, MetricDefinition>> = {
     help: "Wallets and payment authorizations by status, as of the last sample.",
     labels: ["kind", "status"],
   },
+  core_fulfillment_oldest_age_seconds: {
+    type: "gauge",
+    help: "Age in seconds of the oldest fulfillment in each status, measured from created_at. Not the time in the current status — CORE records no status_changed_at. Zero means no rows in that status.",
+    labels: ["status"],
+  },
+  core_subscription_oldest_age_seconds: {
+    type: "gauge",
+    help: "Age in seconds of the oldest subscription in each status, measured from created_at. Zero means no rows in that status.",
+    labels: ["status"],
+  },
+  core_money_oldest_age_seconds: {
+    type: "gauge",
+    help: "Age in seconds of the oldest wallet or payment authorization in each status, measured from created_at. Zero means no rows in that status.",
+    labels: ["kind", "status"],
+  },
 } as const;
 
 export type MetricName = keyof typeof CATALOGUE;

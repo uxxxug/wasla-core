@@ -7490,3 +7490,50 @@ No new metric, no new endpoint, no schema change. Test counts moved
 865 → 866 in the suite pass (no database needed). CI also reports 1453 tests
 passing in the Postgres job, which is the suite pass against a real database
 plus the cluster migration-lifecycle file.
+
+### Cycle 46 — oldest pending age gauges
+
+Cycle 43 added depth gauges — how many fulfillments are in each status. This
+cycle adds the question that follows: how long has the oldest one been there?
+
+Three new gauges in the declared catalogue:
+
+- `core_fulfillment_oldest_age_seconds{status}`
+- `core_subscription_oldest_age_seconds{status}`
+- `core_money_oldest_age_seconds{kind, status}`
+
+Each is a gauge sampled by the depth sampler, not read at scrape time, for the
+same reason the depth gauges are not. The sampler now also calls
+`oldestAgeByStatus(now)` on the fulfillment repository,
+`oldestAgeByStatus(now)` on the subscription repository, and
+`oldestWalletAgeByStatus(now)` / `oldestAuthorizationAgeByStatus(now)` on the
+money repository — read-only `DISTINCT ON (status) ... ORDER BY created_at ASC`
+work in Postgres, and a scan for the minimum `created_at` per status in the
+in-memory store. Both backends implement each method.
+
+The age is measured from `created_at`, not from a `status_changed_at`
+timestamp — CORE records no such column on any of these tables. The metric
+help text says so explicitly, because an operator reading
+`core_fulfillment_oldest_age_seconds{status="coordinating"} = 259200` needs to
+know whether that means "the oldest coordinating fulfillment was created 3 days
+ago" (which it does) or "has been coordinating for 3 days" (which it might
+not, if it was dispatched and then re-coordinated — though that transition is
+not in the lifecycle). The distinction matters for interpretation, and the
+metric does not pretend to be more precise than the timestamp it is built from.
+
+Zero means no rows in that status, for the same reason the depth gauges use
+zero rather than absence: a gauge that keeps its old value when the last row
+leaves is a gauge that lies, and an age gauge that keeps its old value when the
+status is empty is worse — it reports a stale age for a status that no longer
+has any items.
+
+Gated by `tests/observability.test.ts` on the in-memory backend: creates a
+fulfillment, advances the fixed clock by a known amount, samples, and asserts
+the age is in the expected range. A second test creates a wallet after a clock
+advance and verifies both entities' ages in one sample. A third test dispatches
+the only coordinating fulfillment and proves the coordinating age drops to zero
+while the dispatched age rises above it — the falsification that would catch a
+gauge that keeps stale values.
+
+Test counts moved 866 → 868 in the suite pass (2 new tests, no database
+needed).

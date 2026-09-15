@@ -135,6 +135,14 @@ export interface FulfillmentRepository {
    * name an organization; the count names nobody.
    */
   countByStatus(): Promise<Record<string, number>>;
+  /**
+   * Age in seconds of the oldest fulfillment in each status, measured from
+   * `created_at`. CORE does not record `status_changed_at`, so this is the age
+   * since the row was created, not since it entered its current status — the
+   * metric name and help text say so. Zero for statuses with no rows.
+   * Read-only, for the depth sampler.
+   */
+  oldestAgeByStatus(now: Date): Promise<Record<string, number>>;
 }
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
@@ -254,6 +262,18 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
       counts[row.status] = (counts[row.status] ?? 0) + 1;
     }
     return counts;
+  }
+
+  async oldestAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const oldest: Record<string, number> = {};
+    const nowMs = now.getTime();
+    for (const row of this.rows.values()) {
+      const age = Math.floor((nowMs - Date.parse(row.created_at)) / 1000);
+      if (oldest[row.status] === undefined || age < oldest[row.status]!) {
+        oldest[row.status] = age;
+      }
+    }
+    return oldest;
   }
 }
 

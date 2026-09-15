@@ -249,6 +249,21 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
     return counts;
   }
 
+  async oldestAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const result = await this.db().query<{ status: string; age: string }>(
+      `SELECT DISTINCT ON (status) status,
+        EXTRACT(epoch FROM ($1::timestamptz - created_at))::bigint AS age
+       FROM subscription
+       ORDER BY status, created_at ASC`,
+      [now.toISOString()],
+    );
+    const ages: Record<string, number> = {};
+    for (const row of result.rows) {
+      ages[row.status] = Number(row.age);
+    }
+    return ages;
+  }
+
   // ── periods ─────────────────────────────────────────────────────────────
 
   async insertPeriod(period: SubscriptionPeriod, scope?: TransactionScope): Promise<void> {
