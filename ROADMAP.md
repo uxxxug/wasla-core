@@ -205,6 +205,17 @@ Nothing is reserved. Milestone 23 (selection parity for the HTTP read surface)
 merged from branch `http-selection-parity`; the account is in
 `docs/http-selection-parity.md` and the cycle record is at the end of this file.
 
+**Milestone 42 is complete**, delivered on branch `envelope-declaration`
+and merged into `main`; the account is in `docs/envelope-declaration.md`
+and the cycle record is at the end of this file. The envelope contract
+(`contracts/events/envelope.schema.json`) is a published contract that describes
+the wrapper every event carries, but nothing validated that emitted events
+conform to it. This cycle closed that by driving several core event types over
+the in-memory backend, reading every emitted event from the outbox, and
+asserting each full envelope satisfies the contract — required fields present,
+no undeclared fields, every present field's type matching the declaration, and
+`producer` in the declared enum.
+
 **Milestone 41 is complete**, delivered on branch `notification-message-declaration`
 and merged into `main`; the account is in `docs/notification-message-declaration.md`
 and the cycle record is at the end of this file. The notification message
@@ -7336,3 +7347,31 @@ cluster pass, 1 skipped. Test partition: 68 test files, 67 in the suite pass
 and 1 in the cluster pass, each in exactly one. The counts moved 849 → 855 and
 1409 → 1409 (the new gate's 6 tests all run in the suite pass and need no
 database), and README carries both.
+
+### Cycle 42 — event envelope declaration
+
+`contracts/events/envelope.schema.json` is a published contract: it is the
+wrapper every event carries — `event_id`, `event_type`, `version`, `producer`,
+`occurred_at`, `correlation_id`, `causation_id`, `entity_type`, `entity_id`,
+`payload`. The payload inside each event is validated against its own schema
+by the event-payload-declaration gate (milestone 40), but the envelope itself
+was not.
+
+Measured on `main` at `a70a898`: the envelope schema has 10 required fields
+and `additionalProperties: false`. The `producer` field has an enum constraint:
+`["wasla-core", "wasla-move", "wasla-market"]`. The `makeEvent()` function
+constructs envelopes with all required fields, but nothing validated that the
+produced envelope conforms to the published contract.
+
+`tests/envelope-declaration.test.ts` drives several core event types over the
+in-memory backend (money.credited, payment.authorized, identity.verified,
+fulfillment.created, fulfillment.dispatched, fulfillment.completed), reads
+every emitted event from the outbox, and validates each full envelope against
+the published contract. The shared support module `tests/support/event-schemas.ts`
+was extended to load the envelope schema alongside the event-specific and
+notification message schemas.
+
+Falsification: four cases applied to a conforming envelope constructed from
+the schema's required fields and properties (the schema's example is `{}`) —
+a required field removed, an undeclared field added, a field's type changed,
+and a conforming envelope that must pass.
