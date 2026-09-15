@@ -7537,3 +7537,49 @@ gauge that keeps stale values.
 
 Test counts moved 866 → 868 in the suite pass (2 new tests, no database
 needed).
+
+### Cycle 47 — dashboard displays oldest-age gauges and next-milestone review
+
+The standalone dashboard from cycle 44 never showed the three oldest-age
+gauges cycle 46 added, because it was last touched before they existed.
+
+`dashboard/index.html` now renders the age of the oldest item in each
+status underneath the count, in every entity card (fulfillment,
+subscription, wallet, authorization). The age is formatted as
+seconds/minutes/hours/days depending on magnitude, colored yellow past one
+hour and red past one day, and only shown when the count is nonzero — a
+zero-count status has no oldest item to report, matching the metric's own
+semantics. The demo mock data includes the three new series so the
+dashboard is previewable without a live CORE.
+
+Verified visually in demo mode via a cloud browser: age labels are
+properly stacked under counts with no text overlap or clipping. Rows with
+zero count correctly omit the age label. CI green on both jobs.
+
+No new metric, no new endpoint, no schema change. Test counts unchanged.
+
+### Next milestone review
+
+All 31 numbered roadmap milestones are either **Complete** or **Blocked by
+an external decision**. The CORE-side implementation surface is exhausted:
+
+- Milestones 1–4, 6, 8, 10, 12–28, 31, 32: **Complete** on the CORE side.
+- Milestone 5 (contract adoption): blocked — MOVE and MARKET must adopt.
+- Milestone 7 (migration/reconciliation tooling): blocked — needs production
+data inventory (B-2) and identity merge policy (B-3).
+- Milestone 9 (staging/cutover): blocked — needs deployment topology (B-5)
+and production release approval (B-6).
+- Milestone 11 (degradation rules / ADR 0010): blocked — the ADR text is not
+in the repository (B-35).
+- Milestone 3 (subscription policy): B-14 through B-19 are external policy
+decisions.
+- Milestone 10 (reputation policy): B-31 through B-34 are external policy
+decisions.
+- Milestone 2 (multi-hold settlement): blocked on a MARKET contract decision.
+
+The 18 pending external decisions (B-2 through B-42) are all policy or
+deployment questions that cannot be answered from inside the repository.
+Cycles 43–47 were all new directions not on the original roadmap (depth
+gauges, dashboard, CORS, oldest-age gauges, dashboard age display). The
+next actionable work is either a new CORE-side expansion the user directs,
+or unblocking one of the external decisions.
