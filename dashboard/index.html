@@ -93,10 +93,23 @@
       font-size: 18px;
       font-weight: 600;
       font-variant-numeric: tabular-nums;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
     }
     .stat-value.zero { color: var(--text-dim); }
     .stat-value.high { color: var(--yellow); }
     .stat-value.critical { color: var(--red); }
+    .stat-age {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+      display: block;
+      text-align: end;
+      margin-top: 2px;
+    }
+    .stat-age.stale { color: var(--yellow); }
+    .stat-age.very-stale { color: var(--red); }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -261,6 +274,34 @@
         </div>`;
     }
 
+    function formatAge(seconds) {
+      if (!seconds || seconds <= 0) return null;
+      if (seconds < 60) return `${Math.round(seconds)}ث`;
+      const minutes = seconds / 60;
+      if (minutes < 60) return `${Math.round(minutes)}د`;
+      const hours = minutes / 60;
+      if (hours < 24) return `${Math.round(hours)}س`;
+      const days = hours / 24;
+      return `${days.toFixed(1)}ي`;
+    }
+
+    function ageClass(seconds) {
+      if (seconds >= 86400) return 'stat-age very-stale';
+      if (seconds >= 3600) return 'stat-age stale';
+      return 'stat-age';
+    }
+
+    function renderStatRowWithAge(label, value, ageSeconds) {
+      const valClass = value === 0 ? 'stat-value zero' : value > 5 ? 'stat-value high' : 'stat-value';
+      const ageText = value > 0 ? formatAge(ageSeconds) : null;
+      const ageHtml = ageText ? `<span class="${ageClass(ageSeconds)}" title="عمر أقدم عنصر منذ إنشائه">أقدم: ${ageText}</span>` : '';
+      return `
+        <div class="stat-row">
+          <span class="stat-label">${label}</span>
+          <span class="${valClass}">${value}${ageHtml}</span>
+        </div>`;
+    }
+
     function renderDashboard(values) {
       const dash = document.getElementById('dashboard');
       let html = '';
@@ -300,30 +341,32 @@
       // Fulfillment
       html += '<div class="section-divider">حالات الطلبات</div>';
       const fStatuses = [
-        { key: 'coordinating', label: 'قيد التنسيق', badge: 'yellow' },
-        { key: 'dispatched', label: 'مُرسلة', badge: 'blue' },
-        { key: 'completed', label: 'مكتملة', badge: 'green' },
-        { key: 'failed', label: 'فاشلة', badge: 'red' },
-        { key: 'cancelled', label: 'ملغاة', badge: 'purple' },
+        { key: 'coordinating', label: 'قيد التنسيق' },
+        { key: 'dispatched', label: 'مُرسلة' },
+        { key: 'completed', label: 'مكتملة' },
+        { key: 'failed', label: 'فاشلة' },
+        { key: 'cancelled', label: 'ملغاة' },
       ];
       let fRows = '';
       for (const fs of fStatuses) {
         const v = getMetric(values, 'core_fulfillment_depth', { status: fs.key });
-        fRows += renderStatRow(fs.label, v, '', '');
+        const age = getMetric(values, 'core_fulfillment_oldest_age_seconds', { status: fs.key });
+        fRows += renderStatRowWithAge(fs.label, v, age);
       }
       html += `<div class="card"><div class="card-title">الطلبات</div>${fRows}</div>`;
 
       // Subscription
       const sStatuses = [
-        { key: 'active', label: 'نشطة', badge: 'green' },
-        { key: 'past_due', label: 'متأخرة الدفع', badge: 'red' },
-        { key: 'cancelled', label: 'ملغاة', badge: 'purple' },
-        { key: 'expired', label: 'منتهية', badge: 'yellow' },
+        { key: 'active', label: 'نشطة' },
+        { key: 'past_due', label: 'متأخرة الدفع' },
+        { key: 'cancelled', label: 'ملغاة' },
+        { key: 'expired', label: 'منتهية' },
       ];
       let sRows = '';
       for (const ss of sStatuses) {
         const v = getMetric(values, 'core_subscription_depth', { status: ss.key });
-        sRows += renderStatRow(ss.label, v, '', '');
+        const age = getMetric(values, 'core_subscription_oldest_age_seconds', { status: ss.key });
+        sRows += renderStatRowWithAge(ss.label, v, age);
       }
       html += `<div class="card"><div class="card-title">الاشتراكات</div>${sRows}</div>`;
 
@@ -336,7 +379,8 @@
       let wRows = '';
       for (const ws of wStatuses) {
         const v = getMetric(values, 'core_money_depth', { kind: 'wallet', status: ws.key });
-        wRows += renderStatRow(ws.label, v, '', '');
+        const age = getMetric(values, 'core_money_oldest_age_seconds', { kind: 'wallet', status: ws.key });
+        wRows += renderStatRowWithAge(ws.label, v, age);
       }
       html += `<div class="card"><div class="card-title">المحافظ</div>${wRows}</div>`;
 
@@ -349,7 +393,8 @@
       let aRows = '';
       for (const as of aStatuses) {
         const v = getMetric(values, 'core_money_depth', { kind: 'payment_authorization', status: as.key });
-        aRows += renderStatRow(as.label, v, '', '');
+        const age = getMetric(values, 'core_money_oldest_age_seconds', { kind: 'payment_authorization', status: as.key });
+        aRows += renderStatRowWithAge(as.label, v, age);
       }
       html += `<div class="card"><div class="card-title">التفويضات المالية</div>${aRows}</div>`;
 
@@ -433,12 +478,25 @@ core_fulfillment_depth{status="dispatched"} 7
 core_fulfillment_depth{status="completed"} 42
 core_fulfillment_depth{status="failed"} 1
 core_fulfillment_depth{status="cancelled"} 2
+# HELP core_fulfillment_oldest_age_seconds Age of the oldest fulfillment by status
+# TYPE core_fulfillment_oldest_age_seconds gauge
+core_fulfillment_oldest_age_seconds{status="coordinating"} 86400
+core_fulfillment_oldest_age_seconds{status="dispatched"} 7200
+core_fulfillment_oldest_age_seconds{status="completed"} 3600
+core_fulfillment_oldest_age_seconds{status="failed"} 1800
+core_fulfillment_oldest_age_seconds{status="cancelled"} 0
 # HELP core_subscription_depth Subscriptions by status
 # TYPE core_subscription_depth gauge
 core_subscription_depth{status="active"} 15
 core_subscription_depth{status="past_due"} 4
 core_subscription_depth{status="cancelled"} 1
 core_subscription_depth{status="expired"} 0
+# HELP core_subscription_oldest_age_seconds Age of the oldest subscription by status
+# TYPE core_subscription_oldest_age_seconds gauge
+core_subscription_oldest_age_seconds{status="active"} 259200
+core_subscription_oldest_age_seconds{status="past_due"} 172800
+core_subscription_oldest_age_seconds{status="cancelled"} 86400
+core_subscription_oldest_age_seconds{status="expired"} 0
 # HELP core_money_depth Wallets and payment authorizations by status
 # TYPE core_money_depth gauge
 core_money_depth{kind="wallet",status="active"} 12
@@ -448,6 +506,15 @@ core_money_depth{kind="payment_authorization",status="authorized"} 8
 core_money_depth{kind="payment_authorization",status="captured"} 3
 core_money_depth{kind="payment_authorization",status="partially_captured"} 1
 core_money_depth{kind="payment_authorization",status="voided"} 2
+# HELP core_money_oldest_age_seconds Age of the oldest wallet/authorization by status
+# TYPE core_money_oldest_age_seconds gauge
+core_money_oldest_age_seconds{kind="wallet",status="active"} 129600
+core_money_oldest_age_seconds{kind="wallet",status="frozen"} 43200
+core_money_oldest_age_seconds{kind="wallet",status="closed"} 0
+core_money_oldest_age_seconds{kind="payment_authorization",status="authorized"} 14400
+core_money_oldest_age_seconds{kind="payment_authorization",status="captured"} 7200
+core_money_oldest_age_seconds{kind="payment_authorization",status="partially_captured"} 10800
+core_money_oldest_age_seconds{kind="payment_authorization",status="voided"} 0
 # HELP core_queue_depth Queue depth by queue and state
 # TYPE core_queue_depth gauge
 core_queue_depth{queue="outbox",state="pending"} 5
