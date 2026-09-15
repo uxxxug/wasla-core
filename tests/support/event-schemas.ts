@@ -51,6 +51,11 @@ for (const file of readdirSync(notificationsDir).filter(
   schemaFiles.add(name);
 }
 
+// Also load the envelope schema (excluded from event-specific loading above).
+const envelopeRaw = JSON.parse(readFileSync(join(eventsDir, "envelope.schema.json"), "utf8")) as EventSchema;
+schemas.set("envelope", envelopeRaw);
+schemaFiles.add("envelope");
+
 /** Every core event type that has a published schema. */
 export const CORE_EVENT_TYPES: readonly string[] = [...schemas.keys()]
   .filter((t) => t.startsWith("core."))
