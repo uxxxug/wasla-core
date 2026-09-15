@@ -7438,6 +7438,18 @@ status, money wallet and authorization status, HTTP and worker aggregates. It
 also carries the 18 pending external decisions (B-2 through B-42) so the
 operator sees not only what the system is doing but what it is waiting for.
 
-No backend. No build step. No dependencies. A single file that can be opened
-from disk or served from any static host. RTL Arabic, matching the project's
-language. Auto-refresh toggle at 5 seconds.
+No backend. No build step. No dependencies. A single file. RTL Arabic, matching
+the project's language. Auto-refresh toggle at 5 seconds.
+
+Demo mode: append `?demo=1` to the URL to load the dashboard with realistic
+mock data, without a running CORE. This is how the preview is shown outside a
+CORE environment.
+
+Live use: the dashboard must be served from the same origin as `/metrics` or
+from an environment that can reach CORE's HTTP port. Opening it from a
+different host requires CORS to be configured on CORE's `/metrics` endpoint.
+
+This cycle also fixed a runtime gap: the `DepthSampler` was constructed in
+`createCoreApp` but never invoked in `server.ts`. The sampler now runs on a
+15-second interval (configurable via `SAMPLE_INTERVAL_MS`) and once at startup,
+so the metrics exposition is populated before any scrape.

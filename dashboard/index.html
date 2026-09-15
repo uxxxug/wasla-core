@@ -243,8 +243,10 @@
       return values;
     }
 
-    function getMetric(values, name, labels) {
-      const labelStr = Object.entries(labels).map(([k, v]) => `${k}="${v}"`).join(',');
+    function getMetric(values, name, labels = {}) {
+      const entries = Object.entries(labels);
+      if (entries.length === 0) return values[name] ?? 0;
+      const labelStr = entries.map(([k, v]) => `${k}="${v}"`).join(',');
       const key = `${name}{${labelStr}}`;
       return values[key] ?? 0;
     }
@@ -415,6 +417,72 @@
       }
     }
 
+        // ── Demo mode ───────────────────────────────────────────────
+    // When ?demo=1 is in the URL, the dashboard loads with realistic mock
+    // data instead of trying to fetch /metrics. This is useful for previewing
+    // the dashboard outside a CORE environment.
+    function isDemoMode() {
+      return new URLSearchParams(window.location.search).get('demo') === '1';
+    }
+
+    function loadDemoData() {
+      const mock = `# HELP core_fulfillment_depth Fulfillments by status
+# TYPE core_fulfillment_depth gauge
+core_fulfillment_depth{status="coordinating"} 3
+core_fulfillment_depth{status="dispatched"} 7
+core_fulfillment_depth{status="completed"} 42
+core_fulfillment_depth{status="failed"} 1
+core_fulfillment_depth{status="cancelled"} 2
+# HELP core_subscription_depth Subscriptions by status
+# TYPE core_subscription_depth gauge
+core_subscription_depth{status="active"} 15
+core_subscription_depth{status="past_due"} 4
+core_subscription_depth{status="cancelled"} 1
+core_subscription_depth{status="expired"} 0
+# HELP core_money_depth Wallets and payment authorizations by status
+# TYPE core_money_depth gauge
+core_money_depth{kind="wallet",status="active"} 12
+core_money_depth{kind="wallet",status="frozen"} 1
+core_money_depth{kind="wallet",status="closed"} 0
+core_money_depth{kind="payment_authorization",status="authorized"} 8
+core_money_depth{kind="payment_authorization",status="captured"} 3
+core_money_depth{kind="payment_authorization",status="partially_captured"} 1
+core_money_depth{kind="payment_authorization",status="voided"} 2
+# HELP core_queue_depth Queue depth by queue and state
+# TYPE core_queue_depth gauge
+core_queue_depth{queue="outbox",state="pending"} 5
+core_queue_depth{queue="outbox",state="published"} 2
+core_queue_depth{queue="inbound",state="pending"} 1
+core_queue_depth{queue="event_delivery",state="delivered"} 10
+core_queue_depth{queue="notification",state="pending"} 3
+# HELP core_reconciliation_depth Reconciliation depth by queue
+# TYPE core_reconciliation_depth gauge
+core_reconciliation_depth{queue="inconsistent"} 2
+core_reconciliation_depth{queue="pending_financial_decision"} 1
+core_reconciliation_depth{queue="stale_holds"} 0
+# HELP core_http_requests_total HTTP requests
+# TYPE core_http_requests_total counter
+core_http_requests_total{route="/metrics",method="get",status="200"} 42
+core_http_rate_limited_total{route="/v1/money/credit",method="post"} 3
+# HELP core_worker_claims_total Worker claims
+# TYPE core_worker_claims_total counter
+core_worker_claims_total{queue="outbox",worker="relay"} 100
+# HELP core_worker_outcomes_total Worker outcomes
+# TYPE core_worker_outcomes_total counter
+core_worker_outcomes_total{queue="outbox",worker="relay",outcome="completed"} 95
+# HELP core_sample_failures_total Sample failures
+# TYPE core_sample_failures_total counter
+core_sample_failures_total 0
+# HELP core_sample_timestamp_seconds Last sample timestamp
+# TYPE core_sample_timestamp_seconds gauge
+core_sample_timestamp_seconds 1789528800`;
+      const values = parseMetrics(mock);
+      renderDashboard(values);
+      document.getElementById('last-sample').textContent = 'آخر تحديث: ' + new Date(1789528800 * 1000).toLocaleString('ar-SA');
+      document.getElementById('connection-status').innerHTML = '<span class="status-dot yellow"></span>وضع تجريبي';
+      document.getElementById('error').textContent = 'وضع تجريبي — هذه بيانات افتراضية. افتح الصفحة بدون ?demo=1 للاتصال بـ CORE.';
+    }
+
     document.getElementById('fetch-btn').addEventListener('click', fetchMetrics);
     document.getElementById('metrics-url').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') fetchMetrics();
@@ -435,8 +503,12 @@
       }
     });
 
-    // Initial fetch
-    fetchMetrics();
+    // Initial fetch — demo mode if ?demo=1, otherwise try /metrics
+    if (isDemoMode()) {
+      loadDemoData();
+    } else {
+      fetchMetrics();
+    }
   </script>
 </body>
 </html>
