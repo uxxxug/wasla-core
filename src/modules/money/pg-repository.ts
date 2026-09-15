@@ -226,6 +226,36 @@ export class PgMoneyRepository implements MoneyRepository {
     return counts;
   }
 
+  async oldestWalletAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; age: string }>(
+      `select distinct on (status) status,
+        extract(epoch from ($1::timestamptz - created_at))::bigint as age
+       from wallet
+       order by status, created_at asc`,
+      [now.toISOString()],
+    );
+    const ages: Record<string, number> = {};
+    for (const row of result.rows) {
+      ages[row.status] = Number(row.age);
+    }
+    return ages;
+  }
+
+  async oldestAuthorizationAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; age: string }>(
+      `select distinct on (status) status,
+        extract(epoch from ($1::timestamptz - created_at))::bigint as age
+       from payment_authorization
+       order by status, created_at asc`,
+      [now.toISOString()],
+    );
+    const ages: Record<string, number> = {};
+    for (const row of result.rows) {
+      ages[row.status] = Number(row.age);
+    }
+    return ages;
+  }
+
   async updateAuthorization(
     authorization: PaymentAuthorization,
     scope: TransactionScope = NO_SCOPE,

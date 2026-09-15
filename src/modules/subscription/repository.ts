@@ -41,6 +41,11 @@ export interface SubscriptionRepository {
    * `select count(*)`-shaped, for the depth sampler.
    */
   countSubscriptionsByStatus(): Promise<Record<string, number>>;
+  /**
+   * Age in seconds of the oldest subscription in each status, measured from
+   * `created_at`. Zero for statuses with no rows. Read-only, for the depth sampler.
+   */
+  oldestAgeByStatus(now: Date): Promise<Record<string, number>>;
 
   insertPeriod(period: SubscriptionPeriod, scope: TransactionScope): Promise<void>;
   updatePeriod(period: SubscriptionPeriod, scope: TransactionScope): Promise<void>;
@@ -264,6 +269,18 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       counts[item.status] = (counts[item.status] ?? 0) + 1;
     }
     return counts;
+  }
+
+  async oldestAgeByStatus(now: Date): Promise<Record<string, number>> {
+    const oldest: Record<string, number> = {};
+    const nowMs = now.getTime();
+    for (const item of this.subscriptions.values()) {
+      const age = Math.floor((nowMs - Date.parse(item.created_at)) / 1000);
+      if (oldest[item.status] === undefined || age < oldest[item.status]!) {
+        oldest[item.status] = age;
+      }
+    }
+    return oldest;
   }
 
   /**

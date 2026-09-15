@@ -48,6 +48,7 @@ function failingUpdate(inner: FulfillmentRepository): FulfillmentRepository {
     // settlement is being applied (B-29).
     markExecutedAfterCancellation: (i, s) => inner.markExecutedAfterCancellation(i, s),
     countByStatus: () => inner.countByStatus(),
+    oldestAgeByStatus: (now: Date) => inner.oldestAgeByStatus(now),
   };
 }
 

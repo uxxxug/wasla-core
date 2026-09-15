@@ -1103,4 +1103,70 @@ describe.each(backends)("module state counts on $name", (backend) => {
     expect(values[`core_money_depth{kind="payment_authorization",status="voided"}`]).toBe(1);
     expect(values[`core_money_depth{kind="payment_authorization",status="authorized"}`]).toBe(0);
   });
+
+  it("reports the oldest age per status, measured from created_at", async () => {
+    // Create a fulfillment and advance the clock so it has a known age.
+    await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+    clock.advance(3600_000); // 1 hour
+    await core.depthSampler.sample();
+    let values = parseExposition(core.metrics.render());
+    // The oldest coordinating fulfillment is ~3600 seconds old. The exact value
+    // depends on how long the setup took, so assert a range.
+    const coordinatingAge = values[`core_fulfillment_oldest_age_seconds{status="coordinating"}`];
+    expect(coordinatingAge).toBeGreaterThanOrEqual(3599);
+    expect(coordinatingAge).toBeLessThan(3610);
+    // Dispatched has no rows — zero, not absent.
+    expect(values[`core_fulfillment_oldest_age_seconds{status="dispatched"}`]).toBe(0);
+
+    // Create a wallet, advance, and check its age too.
+    await core.money.createWallet({
+      owner_type: "organization",
+      owner_id: organizationId,
+      currency: "SAR",
+      correlation_id: randomUUID(),
+    });
+    clock.advance(1800_000); // 30 minutes more
+    await core.depthSampler.sample();
+    values = parseExposition(core.metrics.render());
+
+    const walletAge = values[`core_money_oldest_age_seconds{kind="wallet",status="active"}`];
+    expect(walletAge).toBeGreaterThanOrEqual(1799);
+    expect(walletAge).toBeLessThan(1810);
+
+    // The fulfillment is now ~5400 seconds old (3600 + 1800).
+    const fulfillmentAge = values[`core_fulfillment_oldest_age_seconds{status="coordinating"}`];
+    expect(fulfillmentAge).toBeGreaterThanOrEqual(5399);
+    expect(fulfillmentAge).toBeLessThan(5410);
+  });
+
+  it("resets the oldest age to zero when a status becomes empty", async () => {
+    // Create one coordinating fulfillment.
+    const created = await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+    clock.advance(3600_000);
+    await core.depthSampler.sample();
+    let values = parseExposition(core.metrics.render());
+    expect(values[`core_fulfillment_oldest_age_seconds{status="coordinating"}`]).toBeGreaterThan(0);
+
+    // Dispatch it — coordinating is now empty.
+    await core.fulfillment.consumeJobAccepted(
+      makeEvent({
+        event_type: "move.job.accepted",
+        version: 1,
+        producer: "wasla-move",
+        occurred_at: clock.now(),
+        correlation_id: randomUUID(),
+        entity_type: "operational_job",
+        entity_id: `job-${randomUUID()}`,
+        payload: {
+          fulfillment_id: created.fulfillment_id,
+          job_id: `job-${randomUUID()}`,
+          accepted_at: clock.now().toISOString(),
+        },
+      }),
+    );
+    await core.depthSampler.sample();
+    values = parseExposition(core.metrics.render());
+    expect(values[`core_fulfillment_oldest_age_seconds{status="coordinating"}`]).toBe(0);
+    expect(values[`core_fulfillment_oldest_age_seconds{status="dispatched"}`]).toBeGreaterThan(0);
+  });
 });
