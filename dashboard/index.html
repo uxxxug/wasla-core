@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wasla Core — لوحة العمليات</title>
+  <style>
+    :root {
+      --bg: #0a0e14;
+      --surface: #11161f;
+      --surface-hover: #161c28;
+      --border: #1e2533;
+      --text: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --purple: #bc8cff;
+      --orange: #e3b341;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 32px;
+    }
+    .header h1 {
+      font-size: 24px;
+      font-weight: 600;
+    }
+    .header .meta {
+      font-size: 13px;
+      color: var(--text-dim);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-left: 6px;
+    }
+    .status-dot.green { background: var(--green); }
+    .status-dot.red { background: var(--red); }
+    .status-dot.yellow { background: var(--yellow); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 20px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card:hover { border-color: var(--text-dim); }
+    .card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: 16px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label {
+      font-size: 14px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .stat-value {
+      font-size: 18px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+    .stat-value.zero { color: var(--text-dim); }
+    .stat-value.high { color: var(--yellow); }
+    .stat-value.critical { color: var(--red); }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .badge.green { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+    .badge.yellow { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+    .badge.red { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+    .badge.blue { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+    .badge.purple { background: rgba(188, 140, 255, 0.15); color: var(--purple); }
+    .blocker-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      grid-column: 1 / -1;
+    }
+    .blocker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .blocker-item {
+      padding: 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .blocker-id {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--orange);
+      margin-bottom: 4px;
+    }
+    .blocker-desc {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+    .refresh-bar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    input[type="url"] {
+      flex: 1;
+      padding: 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 14px;
+      font-family: monospace;
+    }
+    input[type="url"]:focus { outline: none; border-color: var(--accent); }
+    button {
+      padding: 8px 16px;
+      background: var(--accent);
+      color: #0a0e14;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.9; }
+    button.secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .error-msg {
+      color: var(--red);
+      font-size: 13px;
+      padding: 8px 0;
+    }
+    .section-divider {
+      grid-column: 1 / -1;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-top: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Wasla Core — لوحة العمليات</h1>
+    <div class="meta">
+      <span id="last-sample">آخر تحديث: —</span>
+      <span id="connection-status"><span class="status-dot yellow"></span>غير متصل</span>
+    </div>
+  </div>
+
+  <div class="refresh-bar">
+    <input type="url" id="metrics-url" placeholder="http://localhost:3000/metrics" value="">
+    <button id="fetch-btn">تحديث</button>
+    <button id="auto-btn" class="secondary">تحديث تلقائي</button>
+  </div>
+  <div id="error" class="error-msg"></div>
+
+  <div class="grid" id="dashboard">
+    <!-- Filled by JavaScript -->
+  </div>
+
+  <script>
+    const BLOCKERS = [
+      { id: "B-2", desc: "بيانات الإنتاج غير معروفة لحجم الجداول والتكرارات" },
+      { id: "B-3", desc: "سياسة دمج الهويات المكررة غير محددة" },
+      { id: "B-5", desc: "هدف وطوبولوجيا النشر غير محددة" },
+      { id: "B-6", desc: "لا موافقة على النشر للإنتاج" },
+      { id: "B-14", desc: "endpoint فحص الاستحقاق يحتاج ADR جديد" },
+      { id: "B-15", desc: "سياسة الاسترداد الجزئي (proration) غير محددة" },
+      { id: "B-16", desc: "سياسة فترة السماح (grace) غير محددة" },
+      { id: "B-17", desc: "الفترات التجريبية (trial) غير محددة" },
+      { id: "B-18", desc: "تراكم أو تجديد الحصص (quota) غير محدد" },
+      { id: "B-19", desc: "تجاوزات الاستحقاق (comped) غير محددة" },
+      { id: "B-20", desc: "خمس قرارات مالية عند فشل التسليم الجزئي" },
+      { id: "B-30", desc: "ما يُدفع عند تسليم العمل بعد الإلغاء" },
+      { id: "B-31", desc: "أوزان إشارات السمعة غير محددة" },
+      { id: "B-32", desc: "تلاشي السمعة مع الوقت غير محدد" },
+      { id: "B-33", desc: "حدود السمعة غير محددة" },
+      { id: "B-34", desc: "عبور السمعة بين المؤسسات غير محدد" },
+      { id: "B-35", desc: "قواعد التدهور (ADR 0010) غير مسجلة" },
+      { id: "B-42", desc: "نطاق session.issue غير محدد" },
+    ];
+
+    function parseMetrics(text) {
+      const values = {};
+      for (const line of text.split('\n')) {
+        if (!line || line.startsWith('#')) continue;
+        const idx = line.lastIndexOf(' ');
+        if (idx === -1) continue;
+        values[line.slice(0, idx)] = Number(line.slice(idx + 1));
+      }
+      return values;
+    }
+
+    function getMetric(values, name, labels) {
+      const labelStr = Object.entries(labels).map(([k, v]) => `${k}="${v}"`).join(',');
+      const key = `${name}{${labelStr}}`;
+      return values[key] ?? 0;
+    }
+
+    function renderStatRow(label, value, badgeClass, badgeText) {
+      const valClass = value === 0 ? 'stat-value zero' : value > 5 ? 'stat-value high' : 'stat-value';
+      const badge = badgeText ? `<span class="badge ${badgeClass}">${badgeText}</span>` : '';
+      return `
+        <div class="stat-row">
+          <span class="stat-label">${badge} ${label}</span>
+          <span class="${valClass}">${value}</span>
+        </div>`;
+    }
+
+    function renderDashboard(values) {
+      const dash = document.getElementById('dashboard');
+      let html = '';
+
+      // Queue depths
+      html += '<div class="section-divider">أعماق الطوابير</div>';
+
+      const queues = ['outbox', 'inbound', 'event_delivery', 'notification'];
+      const states = ['pending', 'published', 'processed', 'delivered', 'dead', 'retrying', 'failed'];
+      for (const q of queues) {
+        let rows = '';
+        let total = 0;
+        for (const s of states) {
+          const v = getMetric(values, 'core_queue_depth', { queue: q, state: s });
+          if (v > 0) { rows += renderStatRow(s, v, '', ''); total += v; }
+        }
+        if (!rows) rows = renderStatRow('فارغ', 0, 'green', 'OK');
+        html += `<div class="card"><div class="card-title">${q} (${total})</div>${rows}</div>`;
+      }
+
+      // Reconciliation
+      html += '<div class="section-divider">التسوية</div>';
+      const recQueues = [
+        { key: 'inconsistent', label: 'تناقضات مالية', critical: true },
+        { key: 'pending_financial_decision', label: 'قرارات مالية معلقة', critical: true },
+        { key: 'stale_holds', label: 'متجمدات قديمة', critical: false },
+      ];
+      let recRows = '';
+      for (const rq of recQueues) {
+        const v = getMetric(values, 'core_reconciliation_depth', { queue: rq.key });
+        const badge = v > 0 ? `<span class="badge ${rq.critical ? 'red' : 'yellow'}">${rq.critical ? 'خطر' : 'انتباه'}</span>` : '<span class="badge green">OK</span>';
+        recRows += renderStatRow(rq.label, v, '', '');
+        // Replace the badge — simpler approach: just add it inline
+      }
+      html += `<div class="card"><div class="card-title">التسوية</div>${recRows}</div>`;
+
+      // Fulfillment
+      html += '<div class="section-divider">حالات الطلبات</div>';
+      const fStatuses = [
+        { key: 'coordinating', label: 'قيد التنسيق', badge: 'yellow' },
+        { key: 'dispatched', label: 'مُرسلة', badge: 'blue' },
+        { key: 'completed', label: 'مكتملة', badge: 'green' },
+        { key: 'failed', label: 'فاشلة', badge: 'red' },
+        { key: 'cancelled', label: 'ملغاة', badge: 'purple' },
+      ];
+      let fRows = '';
+      for (const fs of fStatuses) {
+        const v = getMetric(values, 'core_fulfillment_depth', { status: fs.key });
+        fRows += renderStatRow(fs.label, v, '', '');
+      }
+      html += `<div class="card"><div class="card-title">الطلبات</div>${fRows}</div>`;
+
+      // Subscription
+      const sStatuses = [
+        { key: 'active', label: 'نشطة', badge: 'green' },
+        { key: 'past_due', label: 'متأخرة الدفع', badge: 'red' },
+        { key: 'cancelled', label: 'ملغاة', badge: 'purple' },
+        { key: 'expired', label: 'منتهية', badge: 'yellow' },
+      ];
+      let sRows = '';
+      for (const ss of sStatuses) {
+        const v = getMetric(values, 'core_subscription_depth', { status: ss.key });
+        sRows += renderStatRow(ss.label, v, '', '');
+      }
+      html += `<div class="card"><div class="card-title">الاشتراكات</div>${sRows}</div>`;
+
+      // Money
+      const wStatuses = [
+        { key: 'active', label: 'محافظ نشطة' },
+        { key: 'frozen', label: 'محافظ مجمدة' },
+        { key: 'closed', label: 'محافظ مغلقة' },
+      ];
+      let wRows = '';
+      for (const ws of wStatuses) {
+        const v = getMetric(values, 'core_money_depth', { kind: 'wallet', status: ws.key });
+        wRows += renderStatRow(ws.label, v, '', '');
+      }
+      html += `<div class="card"><div class="card-title">المحافظ</div>${wRows}</div>`;
+
+      const aStatuses = [
+        { key: 'authorized', label: 'تفويضات نشطة (مُحتجزة)' },
+        { key: 'captured', label: 'مُخصومة بالكامل' },
+        { key: 'partially_captured', label: 'مُخصومة جزئيًا' },
+        { key: 'voided', label: 'مُلغاة' },
+      ];
+      let aRows = '';
+      for (const as of aStatuses) {
+        const v = getMetric(values, 'core_money_depth', { kind: 'payment_authorization', status: as.key });
+        aRows += renderStatRow(as.label, v, '', '');
+      }
+      html += `<div class="card"><div class="card-title">التفويضات المالية</div>${aRows}</div>`;
+
+      // Sample timestamp
+      const ts = getMetric(values, 'core_sample_timestamp_seconds', {});
+      if (ts > 0) {
+        const date = new Date(ts * 1000);
+        document.getElementById('last-sample').textContent = `آخر تحديث: ${date.toLocaleString('ar-SA')}`;
+      }
+
+      // HTTP stats
+      html += '<div class="section-divider">إحصائيات HTTP</div>';
+      const httpTotal = Object.entries(values)
+        .filter(([k]) => k.startsWith('core_http_requests_total{'))
+        .reduce((sum, [, v]) => sum + v, 0);
+      const rateLimited = Object.entries(values)
+        .filter(([k]) => k.startsWith('core_http_rate_limited_total{'))
+        .reduce((sum, [, v]) => sum + v, 0);
+      const sampleFailures = getMetric(values, 'core_sample_failures_total', {});
+      html += `<div class="card"><div class="card-title">HTTP</div>`;
+      html += renderStatRow('إجمالي الطلبات', httpTotal, '', '');
+      html += renderStatRow('محدودة بمعدل', rateLimited, '', '');
+      html += renderStatRow('فشل أخذ العينات', sampleFailures, '', '');
+      html += '</div>';
+
+      // Worker stats
+      const claims = Object.entries(values)
+        .filter(([k]) => k.startsWith('core_worker_claims_total{'))
+        .reduce((sum, [, v]) => sum + v, 0);
+      const outcomes = Object.entries(values)
+        .filter(([k]) => k.startsWith('core_worker_outcomes_total{'))
+        .reduce((sum, [, v]) => sum + v, 0);
+      html += `<div class="card"><div class="card-title">العمال</div>`;
+      html += renderStatRow('مطالبات', claims, '', '');
+      html += renderStatRow('نتائج', outcomes, '', '');
+      html += '</div>';
+
+      // Blockers
+      html += '<div class="section-divider">القرارات المعلقة</div>';
+      html += '<div class="blocker-card"><div class="card-title">القرارات الخارجية المعلقة</div>';
+      html += '<div class="blocker-grid">';
+      for (const b of BLOCKERS) {
+        html += `<div class="blocker-item"><div class="blocker-id">${b.id}</div><div class="blocker-desc">${b.desc}</div></div>`;
+      }
+      html += '</div></div>';
+
+      dash.innerHTML = html;
+    }
+
+    async function fetchMetrics() {
+      const url = document.getElementById('metrics-url').value || 'http://localhost:3000/metrics';
+      const errEl = document.getElementById('error');
+      const statusEl = document.getElementById('connection-status');
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const text = await resp.text();
+        const values = parseMetrics(text);
+        renderDashboard(values);
+        errEl.textContent = '';
+        statusEl.innerHTML = '<span class="status-dot green"></span>متصل';
+      } catch (e) {
+        errEl.textContent = `تعذر الاتصال: ${e.message}. تأكد من أن CORE يعمل وأن العنوان صحيح.`;
+        statusEl.innerHTML = '<span class="status-dot red"></span>غير متصل';
+      }
+    }
+
+    document.getElementById('fetch-btn').addEventListener('click', fetchMetrics);
+    document.getElementById('metrics-url').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') fetchMetrics();
+    });
+
+    let autoInterval = null;
+    document.getElementById('auto-btn').addEventListener('click', (e) => {
+      if (autoInterval) {
+        clearInterval(autoInterval);
+        autoInterval = null;
+        e.target.textContent = 'تحديث تلقائي';
+        e.target.classList.add('secondary');
+      } else {
+        autoInterval = setInterval(fetchMetrics, 5000);
+        e.target.textContent = 'إيقاف';
+        e.target.classList.remove('secondary');
+        fetchMetrics();
+      }
+    });
+
+    // Initial fetch
+    fetchMetrics();
+  </script>
+</body>
+</html>
