@@ -19,6 +19,18 @@ const relay = setInterval(() => {
   });
 }, relayIntervalMs);
 
+// Depth sampler — runs on a fixed interval so the metrics exposition is
+// populated before any scrape, not read at scrape time. See DepthSampler.
+const sampleIntervalMs = Number(process.env["SAMPLE_INTERVAL_MS"] ?? 15000);
+const sampleTimer = setInterval(() => {
+  void app.depthSampler.sample().catch((err) => {
+    console.error(JSON.stringify({ level: "error", component: "depth-sampler", message: String(err) }));
+  });
+}, sampleIntervalMs);
+
+// Run once immediately so the first scrape has data.
+void app.depthSampler.sample().catch(() => {});
+
 server.listen(port, () => {
   console.log(JSON.stringify({ level: "info", component: "http", message: `listening on ${port}` }));
 });
@@ -26,6 +38,7 @@ server.listen(port, () => {
 function shutdown(signal: string) {
   console.log(JSON.stringify({ level: "info", component: "http", message: `shutting down (${signal})` }));
   clearInterval(relay);
+  clearInterval(sampleTimer);
   server.close(() => process.exit(0));
 }
 
