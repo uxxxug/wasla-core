@@ -205,6 +205,15 @@ Nothing is reserved. Milestone 23 (selection parity for the HTTP read surface)
 merged from branch `http-selection-parity`; the account is in
 `docs/http-selection-parity.md` and the cycle record is at the end of this file.
 
+**Milestone 40 is complete**, delivered on branch `event-payload-declaration`
+and merged into `main`; the account is in `docs/event-payload-declaration.md`
+and the cycle record is at the end of this file. The contract gate proved every
+emitted event type has a published schema, and nothing had ever read a payload:
+fourteen of nineteen core event types had no validation against their contracts.
+This cycle closed that by driving every event type over the in-memory backend
+and asserting each emitted payload conforms — required fields present, no
+undeclared fields, every present field's type matching the declaration.
+
 The re-measurement that opened milestone 23 **corrected the milestone 22 record**
 before reserving anything, and the correction is additive: milestone 22's own
 text says it gated "every other listing in the repository", and it did not. It
@@ -7231,3 +7240,41 @@ PostgreSQL: **1408 passed across 65 files**, plus the cluster pass, 1 passed, so
 **1409**. Test partition, in both jobs: 66 test files, 65 in the suite pass and 1
 in the cluster pass, each in exactly one. The counts moved 819 → 825 and
 1403 → 1409, and README carries both.
+
+### Cycle 40 — event payload declaration
+
+The contract gate (`scripts/check-contracts.mjs`) proves every emitted event
+type has a published schema. It has never read a payload. The
+fulfillment-lifecycle-contract test validates five fulfillment event payloads
+against their schemas, and nothing validates the other fourteen. A correct
+answer with no enforcement is a coincidence, not a guarantee.
+
+Measured on `main` at `9a50503`: all 19 core event types with published schemas.
+12 are emitted by the HTTP scenario, all conforming; 5 are validated by the
+fulfillment-lifecycle-contract test; 2 (subscription past_due, expired) have no
+path that produces them in any existing test. No gate enforces that an emitted
+payload matches its contract for 14 of 19 types.
+
+`tests/event-payload-declaration.test.ts` drives every core event type CORE can
+produce over the in-memory backend, reads the emitted payloads from the outbox,
+and asserts each one satisfies its published contract: required fields present,
+no undeclared field, every present field's type matching the declaration. A
+shared support module `tests/support/event-schemas.ts` loads all published
+schemas and provides `payloadErrors()`, `schemaFor()`, and
+`assertMatchesContract()`. Deliberately not a full JSON Schema validator (no
+ajv dependency): the three properties checked — missing required, undeclared
+field, wrong type — are the ones that actually go wrong.
+
+Falsification: four cases applied to a conformed payload from the published
+schema's examples — a required field removed, an undeclared field added, a
+field's type changed, and a conforming payload that must pass. The validation
+function is the same one the gate uses.
+
+The subscription `past_due` event needed an identity-owned wallet (empty) so
+the renewal charge fails; `createWallet` is idempotent per owner+currency, so
+the organisation's funded wallet would have been reused. The `expired` event
+needed a cancelled subscription whose period had ended, so the renewal sweep
+expires it. Fulfillment `dispatched` and `completed` needed manually-published
+`move.job.accepted` and `move.job.completed` envelopes, since
+`core.fulfillment.created` is written to the outbox rather than the bus and
+the MoveSimulator subscribes to the bus.
