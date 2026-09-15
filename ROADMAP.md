@@ -7278,3 +7278,12 @@ expires it. Fulfillment `dispatched` and `completed` needed manually-published
 `move.job.accepted` and `move.job.completed` envelopes, since
 `core.fulfillment.created` is written to the outbox rather than the bus and
 the MoveSimulator subscribes to the bus.
+
+CI verdict for cycle 40, read from the runs themselves. At `e3f70d0`, runs
+`34915103635` and `34915131442`, both **success**. Verify without a database:
+**849 passed, 147 skipped across 66 files (2 skipped)**, plus the cluster pass, 1
+skipped. Verify against PostgreSQL: **1409 passed across 66 files**, plus the
+cluster pass, 1 skipped. Test partition: 67 test files, 66 in the suite pass
+and 1 in the cluster pass, each in exactly one. The counts moved 825 → 849 and
+1409 → 1409 (the new gate's 24 tests all run in the suite pass and need no
+database), and README carries both.
