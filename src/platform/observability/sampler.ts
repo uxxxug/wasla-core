@@ -22,6 +22,20 @@ export interface DepthSources {
     listPendingFinancialDecision(organizationId?: string): Promise<readonly unknown[]>;
     listStaleHolds(organizationId?: string): Promise<readonly unknown[]>;
   };
+  /**
+   * Module state counts. Optional because the eventing tests sample queues with
+   * no module services wired. Each is a `count(*)`-shaped read, platform-wide.
+   */
+  fulfillment?: {
+    countByStatus(): Promise<Record<string, number>>;
+  };
+  subscription?: {
+    countSubscriptionsByStatus(): Promise<Record<string, number>>;
+  };
+  money?: {
+    countWalletsByStatus(): Promise<Record<string, number>>;
+    countAuthorizationsByStatus(): Promise<Record<string, number>>;
+  };
 }
 
 /**
@@ -87,6 +101,25 @@ export class DepthSampler {
         this.registry.setGauge("core_reconciliation_depth", { queue: "stale_holds" }, staleHolds.length);
       }
 
+      if (this.sources.fulfillment) {
+        const fulfillmentCounts = await this.sources.fulfillment.countByStatus();
+        this.publishModule("core_fulfillment_depth", "status", fulfillmentCounts);
+      }
+
+      if (this.sources.subscription) {
+        const subscriptionCounts = await this.sources.subscription.countSubscriptionsByStatus();
+        this.publishModule("core_subscription_depth", "status", subscriptionCounts);
+      }
+
+      if (this.sources.money) {
+        const [walletCounts, authorizationCounts] = await Promise.all([
+          this.sources.money.countWalletsByStatus(),
+          this.sources.money.countAuthorizationsByStatus(),
+        ]);
+        this.publishMoney("wallet", walletCounts);
+        this.publishMoney("payment_authorization", authorizationCounts);
+      }
+
       this.registry.setGauge("core_sample_timestamp_seconds", {}, Math.floor(this.clock.now().getTime() / 1000));
     } catch {
       // A failed sample must not take down the caller's loop, and must not
@@ -101,6 +134,32 @@ export class DepthSampler {
   private publish(queue: string, counts: Record<string, number>): void {
     for (const [state, value] of Object.entries(counts)) {
       this.registry.setGauge("core_queue_depth", { queue, state }, value);
+    }
+  }
+
+  private publishModule(
+    metric: "core_fulfillment_depth" | "core_subscription_depth",
+    label: string,
+    counts: Record<string, number>,
+  ): void {
+    // Always emit every known status, including zero. A gauge that keeps its
+    // old value when a count drops to zero is a gauge that lies.
+    const knownStatuses =
+      metric === "core_fulfillment_depth"
+        ? ["coordinating", "dispatched", "completed", "failed", "cancelled"]
+        : ["active", "past_due", "cancelled", "expired"];
+    for (const status of knownStatuses) {
+      this.registry.setGauge(metric, { [label]: status }, counts[status] ?? 0);
+    }
+  }
+
+  private publishMoney(kind: string, counts: Record<string, number>): void {
+    const knownStatuses =
+      kind === "wallet"
+        ? ["active", "frozen", "closed"]
+        : ["authorized", "captured", "partially_captured", "voided"];
+    for (const status of knownStatuses) {
+      this.registry.setGauge("core_money_depth", { kind, status }, counts[status] ?? 0);
     }
   }
 }

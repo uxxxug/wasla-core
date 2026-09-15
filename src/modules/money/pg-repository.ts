@@ -204,6 +204,28 @@ export class PgMoneyRepository implements MoneyRepository {
     return result.rows.map(toAuthorization);
   }
 
+  async countWalletsByStatus(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; count: string }>(
+      `select status, count(*)::text as count from wallet group by status`,
+    );
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.status] = Number(row.count);
+    }
+    return counts;
+  }
+
+  async countAuthorizationsByStatus(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; count: string }>(
+      `select status, count(*)::text as count from payment_authorization group by status`,
+    );
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.status] = Number(row.count);
+    }
+    return counts;
+  }
+
   async updateAuthorization(
     authorization: PaymentAuthorization,
     scope: TransactionScope = NO_SCOPE,

@@ -19,6 +19,12 @@ export interface MoneyRepository {
   findAuthorizationByReference(reference: string): Promise<PaymentAuthorization | undefined>;
   listAuthorizations(walletId: string): Promise<readonly PaymentAuthorization[]>;
   allAuthorizations(): Promise<readonly PaymentAuthorization[]>;
+  /**
+   * Count of wallets by status and authorizations by status, platform-wide.
+   * Read-only and `select count(*)`-shaped, for the depth sampler.
+   */
+  countWalletsByStatus(): Promise<Record<string, number>>;
+  countAuthorizationsByStatus(): Promise<Record<string, number>>;
   updateAuthorization(authorization: PaymentAuthorization, scope: TransactionScope): Promise<void>;
   insertTransaction(transaction: LedgerTransaction, scope: TransactionScope): Promise<void>;
   findTransactionByReference(reference: string): Promise<LedgerTransaction | undefined>;
@@ -257,6 +263,20 @@ export class InMemoryMoneyRepository implements MoneyRepository {
       (item) => item.created_at,
       (item) => item.authorization_id,
     );
+  }
+  async countWalletsByStatus(): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    for (const wallet of this.wallets.values()) {
+      counts[wallet.status] = (counts[wallet.status] ?? 0) + 1;
+    }
+    return counts;
+  }
+  async countAuthorizationsByStatus(): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    for (const auth of this.authorizations.values()) {
+      counts[auth.status] = (counts[auth.status] ?? 0) + 1;
+    }
+    return counts;
   }
   async updateAuthorization(authorization: PaymentAuthorization, _scope?: TransactionScope): Promise<void> {
     this.assertAuthorizationShape(authorization);

@@ -235,4 +235,15 @@ export class PgFulfillmentRepository implements FulfillmentRepository {
     );
     return result.rows.map(toFulfillment);
   }
+
+  async countByStatus(): Promise<Record<string, number>> {
+    const result = await this.pool.query<{ status: string; count: string }>(
+      `select status, count(*)::text as count from fulfillment group by status`,
+    );
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.status] = Number(row.count);
+    }
+    return counts;
+  }
 }

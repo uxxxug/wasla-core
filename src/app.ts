@@ -326,6 +326,9 @@ export function createCoreApp(
       delivery: store.delivery,
       notification: store.notification,
       reconciliation: fulfillment,
+      fulfillment: store.fulfillment,
+      subscription: store.subscription,
+      money: store.money,
     },
     clock,
   );
