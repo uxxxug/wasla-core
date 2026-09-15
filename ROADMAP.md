@@ -7428,3 +7428,16 @@ state would fail the gate.
 
 CI verdict for cycle 43. Test counts moved 862 → 865 (3 new tests, all in the
 suite pass, no database needed) and 1409 → 1412.
+
+### Cycle 44 — operations dashboard
+
+A standalone HTML page at `dashboard/index.html` that fetches the `/metrics`
+exposition, parses it client-side, and renders every count the sampler
+produces: queue depths, reconciliation counts, fulfillment status, subscription
+status, money wallet and authorization status, HTTP and worker aggregates. It
+also carries the 18 pending external decisions (B-2 through B-42) so the
+operator sees not only what the system is doing but what it is waiting for.
+
+No backend. No build step. No dependencies. A single file that can be opened
+from disk or served from any static host. RTL Arabic, matching the project's
+language. Auto-refresh toggle at 5 seconds.
