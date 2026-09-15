@@ -2264,6 +2264,16 @@ paths:
         "200":
           headers:
             x-correlation-id: { $ref: "#/components/headers/CorrelationId" }
+            access-control-allow-origin:
+              description: >
+                Allows a browser dashboard on a different origin to read the
+                metrics exposition. The endpoint is unauthenticated and carries
+                no tenant data (B-5), so any origin may read it.
+              schema: { type: string, enum: ["*"] }
+            access-control-allow-methods:
+              description: >
+                Names GET as the only method the /metrics route serves.
+              schema: { type: string, enum: ["GET"] }
           description: Prometheus exposition, version 0.0.4. Deterministic for unchanged state.
           content:
             text/plain:

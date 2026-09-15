@@ -47,7 +47,17 @@ export function registerMetricsRoutes<A>(router: Router<A>, registry: MetricsReg
       // A string body: the router's Node adapter writes strings verbatim with
       // the Prometheus content type instead of JSON-encoding them.
       body: registry.render(),
-      headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
+      headers: {
+        "content-type": "text/plain; version=0.0.4; charset=utf-8",
+        // CORS: the dashboard is a single HTML file that may be served from a
+        // different origin than CORE. A simple GET with no custom headers is a
+        // simple request under the CORS specification, so no preflight is sent —
+        // the browser reads these headers off the response and decides. The
+        // metrics endpoint is unauthenticated and carries no tenant data, so
+        // any origin may read it (B-5 keeps it off the public internet).
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET",
+      },
     }),
   );
 }
