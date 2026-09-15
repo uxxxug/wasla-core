@@ -205,6 +205,17 @@ Nothing is reserved. Milestone 23 (selection parity for the HTTP read surface)
 merged from branch `http-selection-parity`; the account is in
 `docs/http-selection-parity.md` and the cycle record is at the end of this file.
 
+**Milestone 41 is complete**, delivered on branch `notification-message-declaration`
+and merged into `main`; the account is in `docs/notification-message-declaration.md`
+and the cycle record is at the end of this file. The notification message
+contract (`contracts/notifications/notification-message.v1.schema.json`) is a
+published contract that describes the shape a channel adapter receives, but
+nothing validated that a real dispatch produces a message that conforms. This
+cycle closed that by driving a notification through the fan-out and dispatcher,
+capturing the `NotificationMessage` the adapter receives, and asserting it
+satisfies the contract — required fields present, no undeclared fields, every
+present field's type matching the declaration.
+
 **Milestone 40 is complete**, delivered on branch `event-payload-declaration`
 and merged into `main`; the account is in `docs/event-payload-declaration.md`
 and the cycle record is at the end of this file. The contract gate proved every
@@ -7287,3 +7298,32 @@ cluster pass, 1 skipped. Test partition: 67 test files, 66 in the suite pass
 and 1 in the cluster pass, each in exactly one. The counts moved 825 → 849 and
 1409 → 1409 (the new gate's 24 tests all run in the suite pass and need no
 database), and README carries both.
+
+### Cycle 41 — notification message declaration
+
+`contracts/notifications/notification-message.v1.schema.json` is a published
+contract: it is the shape a channel adapter receives, and the shape a real
+provider implementation is written against. The `NotificationMessage` interface
+in `domain.ts` is hand-coded to match it, and the dispatcher constructs a
+message from the stored row and hands it to the adapter. Nothing validated that
+the message a real dispatch produces actually conforms to the contract.
+
+Measured on `main` at `bc21041`: the contract has 9 required fields
+(`notification_id`, `idempotency_key`, `channel`, `address`, `template`,
+`body`, `data`, `attempt`) and `additionalProperties: false`. The
+`NotificationMessage` interface in `domain.ts` has all 9 fields plus optional
+`subject`. No test reads a dispatched message and validates it against the
+contract. The `notifications.test.ts` suite tests delivery semantics (leases,
+retries, fencing, deduplication) but not the message's shape.
+
+`tests/notification-message-declaration.test.ts` drives a notification through
+the fan-out and the dispatcher using a capturing channel adapter, reads the
+`NotificationMessage` the adapter receives, and asserts it satisfies the
+published contract. The shared support module `tests/support/event-schemas.ts`
+was extended to load notification message schemas from
+`contracts/notifications/` alongside the event schemas from
+`contracts/events/`.
+
+Falsification: four cases applied to a conformed payload from the published
+schema's examples — a required field removed, an undeclared field added, a
+field's type changed, and a conforming payload that must pass.

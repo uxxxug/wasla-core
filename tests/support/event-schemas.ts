@@ -1,8 +1,9 @@
 /**
- * Shared event schema loading and validation.
+ * Shared schema loading and validation.
  *
- * Used by the event-payload-declaration gate and available to any test that
- * needs to assert an emitted event payload satisfies its published contract.
+ * Used by the event-payload-declaration gate and the notification-message-
+ * declaration gate. Available to any test that needs to assert an emitted
+ * payload satisfies its published contract.
  *
  * Deliberately not a full JSON Schema validator (no ajv dependency): this
  * checks the three properties that actually go wrong between a producer and
@@ -18,6 +19,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, "..", "..");
 const eventsDir = join(root, "contracts", "events");
+const notificationsDir = join(root, "contracts", "notifications");
 
 export interface EventSchema {
   readonly required: readonly string[];
@@ -37,6 +39,16 @@ for (const file of readdirSync(eventsDir).filter(
   const eventType = file.replace(/\.v\d+\.schema\.json$/, "").replace(/\.schema\.json$/, "");
   schemas.set(eventType, raw as EventSchema);
   schemaFiles.add(eventType);
+}
+
+// Also load notification message contracts.
+for (const file of readdirSync(notificationsDir).filter(
+  (f) => f.endsWith(".schema.json"),
+)) {
+  const raw = JSON.parse(readFileSync(join(notificationsDir, file), "utf8"));
+  const name = file.replace(/\.v\d+\.schema\.json$/, "").replace(/\.schema\.json$/, "");
+  schemas.set(name, raw as EventSchema);
+  schemaFiles.add(name);
 }
 
 /** Every core event type that has a published schema. */
