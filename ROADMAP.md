@@ -7594,3 +7594,34 @@ gauges, dashboard, CORS, oldest-age gauges, dashboard age display). The
 current repository roadmap has no unblocked CORE-side milestone left; the
 next actionable work is either a new CORE-side expansion the user directs,
 or unblocking one of the external decisions above.
+
+### Cycle 48 — dashboard HTTP and worker metric breakdowns
+
+The dashboard from cycle 44 aggregated HTTP and worker metrics into flat
+totals — 1000 requests with no route or status dimension, 50 outcomes
+with no outcome type. An operator could see volume but not where errors
+were, or which workers were failing.
+
+Three new client-side helpers:
+
+- `getMetricSeries(values, name)` extracts every labeled series for a
+  metric, returning `[{labels, value}]`. The existing `getMetric` reads
+  one series by exact label match; this reads them all.
+- `histogramAverage(values, name)` sums `_sum` and `_count` across every
+  label set for a histogram metric, returning the mean. Not a percentile —
+the exposition carries bucket counts a percentile would need, but the
+average is the first thing an operator asks for and costs two additions.
+- `formatDuration(seconds)` renders as ms or s.
+
+HTTP card now shows 2xx / 4xx / 5xx counts, an error-rate percentage
+with a red badge when 5xx > 0 and yellow when only 4xx, and the average
+request duration across all routes. Worker card now shows completed /
+failed_permanent / retried / dead_lettered counts, and the average item
+duration across all workers.
+
+Demo data updated with per-route HTTP requests (six series across four
+routes), per-outcome worker counts (nine series across three workers),
+and histogram `_sum` / `_count` pairs for both duration metrics.
+
+No backend change. No new metric. No schema change. Test counts
+unchanged.
