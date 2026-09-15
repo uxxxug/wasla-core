@@ -274,6 +274,40 @@
         </div>`;
     }
 
+    /** Extract all series for a metric name, returning [{labels: {...}, value: n}]. */
+    function getMetricSeries(values, name) {
+      const prefix = name + '{';
+      const result = [];
+      for (const [key, val] of Object.entries(values)) {
+        if (!key.startsWith(prefix)) continue;
+        const labelPart = key.slice(prefix.length, key.lastIndexOf('}'));
+        const labels = {};
+        for (const pair of labelPart.split(',')) {
+          const eq = pair.indexOf('=');
+          if (eq !== -1) labels[pair.slice(0, eq)] = pair.slice(eq + 2, -1);
+        }
+        result.push({ labels, value: val });
+      }
+      return result;
+    }
+
+    /** Compute average from histogram _sum and _count series. */
+    function histogramAverage(values, name) {
+      let totalSum = 0, totalCount = 0;
+      for (const [key, val] of Object.entries(values)) {
+        if (key.startsWith(name + '_sum{')) totalSum += val;
+        else if (key.startsWith(name + '_count{')) totalCount += val;
+      }
+      return totalCount > 0 ? totalSum / totalCount : 0;
+    }
+
+    /** Format a duration in seconds as ms or s. */
+    function formatDuration(seconds) {
+      if (seconds <= 0) return '—';
+      if (seconds < 1) return `${Math.round(seconds * 1000)}ms`;
+      return `${seconds.toFixed(2)}s`;
+    }
+
     function formatAge(seconds) {
       if (!seconds || seconds <= 0) return null;
       if (seconds < 60) return `${Math.round(seconds)}ث`;
@@ -405,31 +439,51 @@
         document.getElementById('last-sample').textContent = `آخر تحديث: ${date.toLocaleString('ar-SA')}`;
       }
 
-      // HTTP stats
+      // HTTP stats — broken down by status class
       html += '<div class="section-divider">إحصائيات HTTP</div>';
-      const httpTotal = Object.entries(values)
-        .filter(([k]) => k.startsWith('core_http_requests_total{'))
-        .reduce((sum, [, v]) => sum + v, 0);
+      const httpSeries = getMetricSeries(values, 'core_http_requests_total');
+      const http2xx = httpSeries.filter(s => s.labels.status && s.labels.status[0] === '2').reduce((sum, s) => sum + s.value, 0);
+      const http4xx = httpSeries.filter(s => s.labels.status && s.labels.status[0] === '4').reduce((sum, s) => sum + s.value, 0);
+      const http5xx = httpSeries.filter(s => s.labels.status && s.labels.status[0] === '5').reduce((sum, s) => sum + s.value, 0);
+      const httpTotal = http2xx + http4xx + http5xx;
       const rateLimited = Object.entries(values)
         .filter(([k]) => k.startsWith('core_http_rate_limited_total{'))
         .reduce((sum, [, v]) => sum + v, 0);
       const sampleFailures = getMetric(values, 'core_sample_failures_total', {});
+      const avgReqDuration = histogramAverage(values, 'core_http_request_duration_seconds');
+      const errorCount = http4xx + http5xx;
+      const errorRate = httpTotal > 0 ? ((errorCount / httpTotal) * 100).toFixed(1) : '0.0';
       html += `<div class="card"><div class="card-title">HTTP</div>`;
       html += renderStatRow('إجمالي الطلبات', httpTotal, '', '');
+      const errBadge = errorCount > 0 ? `<span class="badge ${http5xx > 0 ? 'red' : 'yellow'}">${errorRate}%</span>` : '';
+      html += renderStatRow('معدل الخطأ', errorCount, http5xx > 0 ? 'red' : 'yellow', errBadge ? `${errorRate}%` : '');
+      html += renderStatRow('2xx نجاح', http2xx, '', '');
+      html += renderStatRow('4xx خطأ عميل', http4xx, http4xx > 0 ? 'yellow' : '', '');
+      html += renderStatRow('5xx خطأ خادم', http5xx, http5xx > 0 ? 'red' : '', '');
       html += renderStatRow('محدودة بمعدل', rateLimited, '', '');
+      html += `<div class="stat-row"><span class="stat-label">متوسط زمن الطلب</span><span class="stat-value">${formatDuration(avgReqDuration)}</span></div>`;
       html += renderStatRow('فشل أخذ العينات', sampleFailures, '', '');
       html += '</div>';
 
-      // Worker stats
+      // Worker stats — broken down by outcome type
       const claims = Object.entries(values)
         .filter(([k]) => k.startsWith('core_worker_claims_total{'))
         .reduce((sum, [, v]) => sum + v, 0);
-      const outcomes = Object.entries(values)
-        .filter(([k]) => k.startsWith('core_worker_outcomes_total{'))
-        .reduce((sum, [, v]) => sum + v, 0);
+      const outcomeSeries = getMetricSeries(values, 'core_worker_outcomes_total');
+      const outcomes = outcomeSeries.reduce((sum, s) => sum + s.value, 0);
+      const completed = outcomeSeries.filter(s => s.labels.outcome === 'completed').reduce((sum, s) => sum + s.value, 0);
+      const failed = outcomeSeries.filter(s => s.labels.outcome === 'failed_permanent' || s.labels.outcome === 'failed').reduce((sum, s) => sum + s.value, 0);
+      const retried = outcomeSeries.filter(s => s.labels.outcome === 'retried').reduce((sum, s) => sum + s.value, 0);
+      const deadLettered = outcomeSeries.filter(s => s.labels.outcome === 'dead_lettered').reduce((sum, s) => sum + s.value, 0);
+      const avgItemDuration = histogramAverage(values, 'core_worker_item_duration_seconds');
       html += `<div class="card"><div class="card-title">العمال</div>`;
       html += renderStatRow('مطالبات', claims, '', '');
       html += renderStatRow('نتائج', outcomes, '', '');
+      html += renderStatRow('مكتملة', completed, '', '');
+      html += renderStatRow('فاشلة', failed, failed > 0 ? 'red' : '', '');
+      html += renderStatRow('مُعاد المحاولة', retried, retried > 0 ? 'yellow' : '', '');
+      html += renderStatRow('dead-letter', deadLettered, deadLettered > 0 ? 'red' : '', '');
+      html += `<div class="stat-row"><span class="stat-label">متوسط زمن العنصر</span><span class="stat-value">${formatDuration(avgItemDuration)}</span></div>`;
       html += '</div>';
 
       // Blockers
@@ -529,14 +583,38 @@ core_reconciliation_depth{queue="pending_financial_decision"} 1
 core_reconciliation_depth{queue="stale_holds"} 0
 # HELP core_http_requests_total HTTP requests
 # TYPE core_http_requests_total counter
+core_http_requests_total{route="/v1/fulfillments",method="get",status="200"} 120
+core_http_requests_total{route="/v1/fulfillments",method="post",status="201"} 35
+core_http_requests_total{route="/v1/fulfillments",method="post",status="400"} 3
+core_http_requests_total{route="/v1/fulfillments",method="post",status="500"} 1
+core_http_requests_total{route="/v1/money/credit",method="post",status="201"} 18
 core_http_requests_total{route="/metrics",method="get",status="200"} 42
-core_http_rate_limited_total{route="/v1/money/credit",method="post"} 3
-# HELP core_worker_claims_total Worker claims
-# TYPE core_worker_claims_total counter
-core_worker_claims_total{queue="outbox",worker="relay"} 100
-# HELP core_worker_outcomes_total Worker outcomes
-# TYPE core_worker_outcomes_total counter
-core_worker_outcomes_total{queue="outbox",worker="relay",outcome="completed"} 95
+core_http_rate_limited_total{rate_class="write",subject_kind="credential"} 3
+core_http_request_duration_seconds_sum{route="/v1/fulfillments",method="get"} 0.84
+core_http_request_duration_seconds_count{route="/v1/fulfillments",method="get"} 120
+core_http_request_duration_seconds_sum{route="/v1/fulfillments",method="post"} 0.234
+core_http_request_duration_seconds_count{route="/v1/fulfillments",method="post"} 39
+core_http_request_duration_seconds_sum{route="/v1/money/credit",method="post"} 0.09
+core_http_request_duration_seconds_count{route="/v1/money/credit",method="post"} 18
+core_http_request_duration_seconds_sum{route="/metrics",method="get"} 0.021
+core_http_request_duration_seconds_count{route="/metrics",method="get"} 42
+core_worker_claims_total{worker="outbox-relay"} 100
+core_worker_claims_total{worker="delivery"} 60
+core_worker_claims_total{worker="notification"} 45
+core_worker_outcomes_total{worker="outbox-relay",outcome="completed"} 95
+core_worker_outcomes_total{worker="outbox-relay",outcome="retried"} 4
+core_worker_outcomes_total{worker="outbox-relay",outcome="failed_permanent"} 1
+core_worker_outcomes_total{worker="delivery",outcome="completed"} 55
+core_worker_outcomes_total{worker="delivery",outcome="retried"} 4
+core_worker_outcomes_total{worker="delivery",outcome="dead_lettered"} 1
+core_worker_outcomes_total{worker="notification",outcome="completed"} 43
+core_worker_outcomes_total{worker="notification",outcome="retried"} 2
+core_worker_item_duration_seconds_sum{worker="outbox-relay"} 1.2
+core_worker_item_duration_seconds_count{worker="outbox-relay"} 100
+core_worker_item_duration_seconds_sum{worker="delivery"} 0.9
+core_worker_item_duration_seconds_count{worker="delivery"} 60
+core_worker_item_duration_seconds_sum{worker="notification"} 0.45
+core_worker_item_duration_seconds_count{worker="notification"} 45
 # HELP core_sample_failures_total Sample failures
 # TYPE core_sample_failures_total counter
 core_sample_failures_total 0
