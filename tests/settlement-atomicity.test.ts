@@ -47,6 +47,7 @@ function failingUpdate(inner: FulfillmentRepository): FulfillmentRepository {
     // that is already cancelled and closed, so it cannot be in flight while a
     // settlement is being applied (B-29).
     markExecutedAfterCancellation: (i, s) => inner.markExecutedAfterCancellation(i, s),
+    countByStatus: () => inner.countByStatus(),
   };
 }
 

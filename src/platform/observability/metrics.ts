@@ -118,6 +118,21 @@ export const CATALOGUE: Readonly<Record<string, MetricDefinition>> = {
     help: "Queue-depth samples that threw. A rising count with a frozen timestamp is the signal.",
     labels: [],
   },
+  core_fulfillment_depth: {
+    type: "gauge",
+    help: "Fulfillments by status, as of the last sample. Not read at scrape time.",
+    labels: ["status"],
+  },
+  core_subscription_depth: {
+    type: "gauge",
+    help: "Subscriptions by status, as of the last sample.",
+    labels: ["status"],
+  },
+  core_money_depth: {
+    type: "gauge",
+    help: "Wallets and payment authorizations by status, as of the last sample.",
+    labels: ["kind", "status"],
+  },
 } as const;
 
 export type MetricName = keyof typeof CATALOGUE;

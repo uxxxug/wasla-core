@@ -238,6 +238,17 @@ export class PgSubscriptionRepository implements SubscriptionRepository {
     return result.rows.map((row) => this.toSubscription(row));
   }
 
+  async countSubscriptionsByStatus(): Promise<Record<string, number>> {
+    const result = await this.db().query<{ status: string; count: string }>(
+      `SELECT status, count(*)::text AS count FROM subscription GROUP BY status`,
+    );
+    const counts: Record<string, number> = {};
+    for (const row of result.rows) {
+      counts[row.status] = Number(row.count);
+    }
+    return counts;
+  }
+
   // ── periods ─────────────────────────────────────────────────────────────
 
   async insertPeriod(period: SubscriptionPeriod, scope?: TransactionScope): Promise<void> {

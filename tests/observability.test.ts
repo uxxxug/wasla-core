@@ -899,3 +899,190 @@ describe.each(backends)("operational metrics on $name", (backend) => {
     expect(core.router.logs.length).toBeLessThanOrEqual(1000);
   });
 });
+
+describe.each(backends)("module state counts on $name", (backend) => {
+  let core: CoreApp;
+  let store: Persistence;
+  let clock: FixedClock;
+  let close: () => Promise<void>;
+  let organizationId: string;
+
+  async function open(): Promise<void> {
+    await backend.truncate();
+    clock = new FixedClock();
+    const opened = await backend.open(clock);
+    store = opened.store;
+    close = opened.close;
+    core = createCoreApp({ clock, persistence: store, channels: [] });
+    const org = await core.organization.create({
+      name: "State Count Co",
+      country_code: "SA",
+      correlation_id: randomUUID(),
+    });
+    organizationId = org.organization_id;
+  }
+
+  beforeEach(async () => {
+    await open();
+    return async () => {
+      await close();
+    };
+  });
+
+  function orderEvent(reference: string) {
+    return makeEvent({
+      event_type: "market.order.created",
+      version: 1,
+      producer: "wasla-market",
+      occurred_at: clock.now(),
+      correlation_id: randomUUID(),
+      entity_type: "order",
+      entity_id: reference,
+      payload: {
+        organization_id: organizationId,
+        order_id: reference,
+        requested_service: "delivery",
+      },
+    });
+  }
+
+  async function createFulfillment(reference: string): Promise<string> {
+    const created = await core.fulfillment.consumeMarketOrder(orderEvent(reference));
+    await core.fulfillment.consumeJobAccepted(
+      makeEvent({
+        event_type: "move.job.accepted",
+        version: 1,
+        producer: "wasla-move",
+        occurred_at: clock.now(),
+        correlation_id: randomUUID(),
+        entity_type: "operational_job",
+        entity_id: `job-${reference}`,
+        payload: {
+          fulfillment_id: created.fulfillment_id,
+          job_id: `job-${reference}`,
+          accepted_at: clock.now().toISOString(),
+        },
+      }),
+    );
+    return created.fulfillment_id;
+  }
+
+  it("counts fulfillment, subscription, and money state in the metrics exposition", async () => {
+    // Create known state: two dispatched fulfillments and one coordinating.
+    await createFulfillment(`mkt-${randomUUID()}`);
+    await createFulfillment(`mkt-${randomUUID()}`);
+    await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+
+    // Create a wallet and credit it.
+    const walletResult = await core.money.createWallet({
+      owner_type: "organization",
+      owner_id: organizationId,
+      currency: "SAR",
+      correlation_id: randomUUID(),
+    });
+    await core.money.credit({
+      wallet_id: walletResult.wallet.wallet_id,
+      amount_minor: 10000,
+      business_reference: `topup-${randomUUID()}`,
+      correlation_id: randomUUID(),
+    });
+    // Authorize against it.
+    await core.money.authorize({
+      wallet_id: walletResult.wallet.wallet_id,
+      amount_minor: 5000,
+      business_reference: `auth-${randomUUID()}`,
+      correlation_id: randomUUID(),
+    });
+
+    // Create a subscription plan and subscribe.
+    const { plan } = await core.billing.createPlan({
+      code: `plan-${randomUUID()}`,
+      name: "Test Plan",
+      billing_interval: "month",
+      amount_minor: 1000,
+      currency: "SAR",
+      grants: [{ feature_key: "orders", limit_value: 100 }],
+      correlation_id: randomUUID(),
+    });
+    await core.billing.activatePlan({ plan_id: plan.plan_id, correlation_id: randomUUID() });
+    await core.billing.subscribe({
+      plan_id: plan.plan_id,
+      owner_type: "organization",
+      owner_id: organizationId,
+      wallet_id: walletResult.wallet.wallet_id,
+      correlation_id: randomUUID(),
+    });
+
+    // Sample.
+    await core.depthSampler.sample();
+    const values = parseExposition(core.metrics.render());
+
+    // Fulfillment: 2 dispatched, 1 coordinating.
+    expect(values[`core_fulfillment_depth{status="dispatched"}`]).toBe(2);
+    expect(values[`core_fulfillment_depth{status="coordinating"}`]).toBe(1);
+
+    // Subscription: 1 active.
+    expect(values[`core_subscription_depth{status="active"}`]).toBe(1);
+
+    // Money: 1 active wallet, 1 authorized authorization.
+    expect(values[`core_money_depth{kind="wallet",status="active"}`]).toBe(1);
+    expect(values[`core_money_depth{kind="payment_authorization",status="authorized"}`]).toBe(1);
+  });
+
+  it("updates the counts when state changes", async () => {
+    // Start with one coordinating fulfillment.
+    await core.fulfillment.consumeMarketOrder(orderEvent(`mkt-${randomUUID()}`));
+    await core.depthSampler.sample();
+    let values = parseExposition(core.metrics.render());
+    expect(values[`core_fulfillment_depth{status="coordinating"}`]).toBe(1);
+    expect(values[`core_fulfillment_depth{status="dispatched"}`]).toBe(0);
+
+    // Dispatch it.
+    const ref = `mkt-${randomUUID()}`;
+    await createFulfillment(ref);
+    await core.depthSampler.sample();
+    values = parseExposition(core.metrics.render());
+    expect(values[`core_fulfillment_depth{status="coordinating"}`]).toBe(1);
+    expect(values[`core_fulfillment_depth{status="dispatched"}`]).toBe(1);
+  });
+
+  it("falsifies: a count that does not match the real state fails the gate", async () => {
+    // Create a wallet and credit it.
+    const walletResult = await core.money.createWallet({
+      owner_type: "organization",
+      owner_id: organizationId,
+      currency: "SAR",
+      correlation_id: randomUUID(),
+    });
+    await core.money.credit({
+      wallet_id: walletResult.wallet.wallet_id,
+      amount_minor: 10000,
+      business_reference: `topup-${randomUUID()}`,
+      correlation_id: randomUUID(),
+    });
+    const auth = await core.money.authorize({
+      wallet_id: walletResult.wallet.wallet_id,
+      amount_minor: 5000,
+      business_reference: `auth-${randomUUID()}`,
+      correlation_id: randomUUID(),
+    });
+
+    // Sample and verify the count is 1 authorized.
+    await core.depthSampler.sample();
+    let values = parseExposition(core.metrics.render());
+    expect(values[`core_money_depth{kind="payment_authorization",status="authorized"}`]).toBe(1);
+
+    // Void the authorization — the count must change.
+    await core.money.voidAuthorization({
+      authorization_id: auth.authorization_id,
+      reason: "test void",
+      correlation_id: randomUUID(),
+    });
+    await core.depthSampler.sample();
+    values = parseExposition(core.metrics.render());
+
+    // The voided count must be 1 and the authorized count must be 0.
+    expect(values[`core_money_depth{kind="payment_authorization",status="voided"}`]).toBe(1);
+    expect(values[`core_money_depth{kind="payment_authorization",status="authorized"}`]).toBe(0);
+  });
+});

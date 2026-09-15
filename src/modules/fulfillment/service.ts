@@ -129,6 +129,12 @@ export interface FulfillmentRepository {
   findByOrderReference(orderReference: string): Promise<Fulfillment | undefined>;
   /** Used by reconciliation reads only; a Postgres adapter must filter in SQL. */
   all(): Promise<readonly Fulfillment[]>;
+  /**
+   * Count of fulfillments by status, platform-wide. Read-only and
+   * `select count(*)`-shaped, for the depth sampler. The rows themselves
+   * name an organization; the count names nobody.
+   */
+  countByStatus(): Promise<Record<string, number>>;
 }
 
 export class InMemoryFulfillmentRepository implements FulfillmentRepository {
@@ -240,6 +246,14 @@ export class InMemoryFulfillmentRepository implements FulfillmentRepository {
   }
   async all(): Promise<readonly Fulfillment[]> {
     return orderedBy(this.rows.values(), (row) => row.created_at, (row) => row.fulfillment_id);
+  }
+
+  async countByStatus(): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    for (const row of this.rows.values()) {
+      counts[row.status] = (counts[row.status] ?? 0) + 1;
+    }
+    return counts;
   }
 }
 

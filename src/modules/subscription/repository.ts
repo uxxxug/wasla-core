@@ -36,6 +36,11 @@ export interface SubscriptionRepository {
     ownerId: string,
   ): Promise<readonly Subscription[]>;
   listSubscriptionsByStatus(statuses: readonly SubscriptionStatus[]): Promise<readonly Subscription[]>;
+  /**
+   * Count of subscriptions by status, platform-wide. Read-only and
+   * `select count(*)`-shaped, for the depth sampler.
+   */
+  countSubscriptionsByStatus(): Promise<Record<string, number>>;
 
   insertPeriod(period: SubscriptionPeriod, scope: TransactionScope): Promise<void>;
   updatePeriod(period: SubscriptionPeriod, scope: TransactionScope): Promise<void>;
@@ -251,6 +256,14 @@ export class InMemorySubscriptionRepository implements SubscriptionRepository {
       (item) => item.created_at,
       (item) => item.subscription_id,
     );
+  }
+
+  async countSubscriptionsByStatus(): Promise<Record<string, number>> {
+    const counts: Record<string, number> = {};
+    for (const item of this.subscriptions.values()) {
+      counts[item.status] = (counts[item.status] ?? 0) + 1;
+    }
+    return counts;
   }
 
   /**

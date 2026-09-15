@@ -7386,3 +7386,45 @@ moved 855 → 862 and 1409 → 1409 (the new gate's 7 tests all run in the suite
 pass and need no database), and README carries both. The first PostgreSQL run
 failed on a flaky `refusal-retryability.test.ts` timing test; the re-run and
 the second run both passed.
+
+### Cycle 43 — operations state counts
+
+The metrics exposition carried queue depths and reconciliation depths, but the
+state of every domain module — how many fulfillments are coordinating, how many
+subscriptions are past_due, how many authorizations are held — was not in it.
+An operator could see that the outbox had 3 pending rows but not that 7
+fulfillments had never left `coordinating`, which is the same question about a
+different table.
+
+Three new gauges added to the declared catalogue:
+
+- `core_fulfillment_depth{status}` — fulfillments by status
+- `core_subscription_depth{status}` — subscriptions by status
+- `core_money_depth{kind, status}` — wallets and payment authorizations by
+  status, under `kind="wallet"` and `kind="payment_authorization"`
+
+Each is a gauge sampled by the depth sampler, not read at scrape time, for the
+same reason the queue-depth gauges are not. The sampler now also calls
+`countByStatus()` on the fulfillment repository,
+`countSubscriptionsByStatus()` on the subscription repository, and
+`countWalletsByStatus()` / `countAuthorizationsByStatus()` on the money
+repository — read-only `select count(*)`-shaped work, platform-wide, naming
+nobody. Both backends implement each method; the in-memory store tallies its
+rows and the Postgres adapter runs `group by status`.
+
+A gauge that keeps its old value when a count drops to zero is a gauge that
+lies, so the sampler emits every known status for each metric — including
+zero — rather than only the statuses that have rows. The known statuses are
+derived from the domain types: `FulfillmentStatus`, `SubscriptionStatus`,
+`WalletStatus`, `AuthorizationStatus`.
+
+Gated by `tests/observability.test.ts` on both backends: creates known state
+(two dispatched fulfillments, one coordinating, one active subscription, one
+active wallet with one authorized authorization), samples, and asserts the
+counts. A second test changes the state and asserts the counts move. A third
+falsifies: voids an authorization and proves the `authorized` count drops to
+zero and the `voided` count rises to one — a count that did not track the real
+state would fail the gate.
+
+CI verdict for cycle 43. Test counts moved 862 → 865 (3 new tests, all in the
+suite pass, no database needed) and 1409 → 1412.
