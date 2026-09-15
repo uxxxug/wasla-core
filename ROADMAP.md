@@ -7375,3 +7375,14 @@ Falsification: four cases applied to a conforming envelope constructed from
 the schema's required fields and properties (the schema's example is `{}`) —
 a required field removed, an undeclared field added, a field's type changed,
 and a conforming envelope that must pass.
+
+CI verdict for cycle 42, read from the runs themselves. At `89950df`, runs
+`34917146917` (re-run) and `34917163260`, both **success**. Verify without a
+database: **862 passed, 147 skipped across 68 files (2 skipped)**, plus the
+cluster pass, 1 skipped. Verify against PostgreSQL: **1409 passed across 68
+files**, plus the cluster pass, 1 skipped. Test partition: 69 test files, 68 in
+the suite pass and 1 in the cluster pass, each in exactly one. The counts
+moved 855 → 862 and 1409 → 1409 (the new gate's 7 tests all run in the suite
+pass and need no database), and README carries both. The first PostgreSQL run
+failed on a flaky `refusal-retryability.test.ts` timing test; the re-run and
+the second run both passed.
