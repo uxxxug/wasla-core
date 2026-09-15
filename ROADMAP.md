@@ -7487,4 +7487,6 @@ it, not with global middleware:
   would open CORS everywhere.
 
 No new metric, no new endpoint, no schema change. Test counts moved
-865 → 866 (1 new test, suite pass, no database needed).
+865 → 866 in the suite pass (no database needed). CI also reports 1453 tests
+passing in the Postgres job, which is the suite pass against a real database
+plus the cluster migration-lifecycle file.
