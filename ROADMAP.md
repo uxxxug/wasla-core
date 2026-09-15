@@ -7560,26 +7560,37 @@ No new metric, no new endpoint, no schema change. Test counts unchanged.
 
 ### Next milestone review
 
-All 31 numbered roadmap milestones are either **Complete** or **Blocked by
-an external decision**. The CORE-side implementation surface is exhausted:
+All 39 numbered rows in the milestone table (1 through 39, verified against
+the table itself rather than assumed from the highest number seen in any
+one section) are either **Complete** or **Blocked by an external
+decision**. No unblocked CORE-side row remains:
 
-- Milestones 1–4, 6, 8, 10, 12–28, 31, 32: **Complete** on the CORE side.
+- Milestones 3, 4, 6, 12–39 (28 rows): **Complete** on the CORE side.
+- Milestone 1 (event ingress/egress): CORE side complete; MOVE and MARKET
+adoption is not CORE's to do.
+- Milestone 2 (settlement beyond one hold): partial capture and refunds
+complete; multi-hold blocked on a MARKET contract decision.
 - Milestone 5 (contract adoption): blocked — MOVE and MARKET must adopt.
 - Milestone 7 (migration/reconciliation tooling): blocked — needs production
 data inventory (B-2) and identity merge policy (B-3).
+- Milestone 8 (security hardening): observability export and rate limiting
+complete; the hardening pass itself is bounded by deployment topology (B-5).
 - Milestone 9 (staging/cutover): blocked — needs deployment topology (B-5)
 and production release approval (B-6).
-- Milestone 11 (degradation rules / ADR 0010): blocked — the ADR text is not
-in the repository (B-35).
-- Milestone 3 (subscription policy): B-14 through B-19 are external policy
-decisions.
-- Milestone 10 (reputation policy): B-31 through B-34 are external policy
-decisions.
-- Milestone 2 (multi-hold settlement): blocked on a MARKET contract decision.
+- Milestone 10 (reputation and trust signals): CORE side complete; no
+producer publishes signals yet, and weighting/decay/thresholds are B-31
+through B-34.
+- Milestone 11 (degradation rules / ADR 0010): not implemented — the ADR
+text itself is not in the repository (B-35).
+
+Within milestone 3, entitlement-check, proration, grace, trials, rollover
+and comped access remain open as B-14 through B-19, all policy decisions
+above CORE, not implementation gaps.
 
 The 18 pending external decisions (B-2 through B-42) are all policy or
 deployment questions that cannot be answered from inside the repository.
 Cycles 43–47 were all new directions not on the original roadmap (depth
 gauges, dashboard, CORS, oldest-age gauges, dashboard age display). The
+current repository roadmap has no unblocked CORE-side milestone left; the
 next actionable work is either a new CORE-side expansion the user directs,
-or unblocking one of the external decisions.
+or unblocking one of the external decisions above.
