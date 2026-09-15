@@ -137,6 +137,20 @@ export const RESPONSE_HEADERS: readonly ResponseHeaderDeclaration[] = [
     // what keeps "absent means fresh" true rather than conventional.
     shape: /^true$/,
   },
+  {
+    name: "access-control-allow-origin",
+    when: "route",
+    reason:
+      "Set on /metrics so a browser dashboard on a different origin can read the exposition. The metrics endpoint is unauthenticated and carries no tenant data (see B-5), so any origin may read it.",
+    shape: /^\*$/,
+  },
+  {
+    name: "access-control-allow-methods",
+    when: "route",
+    reason:
+      "Set on /metrics alongside the origin header, naming GET as the only method the route serves.",
+    shape: /^GET$/,
+  },
 ];
 
 const BY_NAME = new Map(RESPONSE_HEADERS.map((h) => [h.name, h] as const));

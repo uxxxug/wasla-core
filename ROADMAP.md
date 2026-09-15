@@ -7453,3 +7453,38 @@ This cycle also fixed a runtime gap: the `DepthSampler` was constructed in
 `createCoreApp` but never invoked in `server.ts`. The sampler now runs on a
 15-second interval (configurable via `SAMPLE_INTERVAL_MS`) and once at startup,
 so the metrics exposition is populated before any scrape.
+
+### Cycle 45 — CORS on /metrics
+
+The dashboard from cycle 44 could not read `/metrics` when served from a
+different origin than CORE — a browser blocks a cross-origin `fetch` whose
+response carries no CORS headers. Fixed narrowly, on the one route that needs
+it, not with global middleware:
+
+- `GET /metrics` now answers with `access-control-allow-origin: *` and
+  `access-control-allow-methods: GET`, declared in `RESPONSE_HEADERS` like
+  every other response header CORE sends. `sealHeaders()` still refuses any
+  header not declared there, so this is an addition to a closed list, not an
+  exception to it.
+- No `OPTIONS /metrics` route. A plain `GET` with no custom request headers is
+  a *simple request* under the CORS specification: the browser sends it
+  directly and reads the response headers to decide whether the page may see
+  the body — no preflight, so nothing to answer. An `OPTIONS` route would also
+  have fallen outside the OpenAPI contract loader (which only walks
+  `get/post/put/patch/delete`) and outside `http-authentication-declaration.test.ts`'s
+  fixed anonymous-route count, for no capability the dashboard needs.
+- Origin is unrestricted (`*`) rather than a caller-supplied echo, because
+  `/metrics` is unauthenticated and carries no tenant-scoped data — the same
+  reasoning `UNLIMITED_ROUTES` already applies to rate limiting on this route.
+  Restricting it to named origins would need a configuration surface this
+  cycle did not add.
+- The OpenAPI contract documents both headers on the `GET /metrics` 200
+  response, and `tests/http-response-header-declaration.test.ts` extends its
+  closed list of documented header names to include them.
+- `tests/observability.test.ts` gates both directions: `/metrics` carries the
+  two headers, and an ordinary route (`/health`) does not — proving the
+  addition is scoped to the one route it names, not shared middleware that
+  would open CORS everywhere.
+
+No new metric, no new endpoint, no schema change. Test counts moved
+865 → 866 (1 new test, suite pass, no database needed).

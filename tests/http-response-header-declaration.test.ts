@@ -92,6 +92,11 @@ describe("declared response headers", () => {
       // deliberately, with its reason and its shape, rather than sent from the
       // router and discovered as a 500.
       "idempotent-replay",
+      // Cycle 45. CORS on /metrics only: the dashboard is a single HTML file
+      // that may be served from a different origin. A simple GET needs these
+      // two headers on the response, and no preflight, so no OPTIONS route.
+      "access-control-allow-origin",
+      "access-control-allow-methods",
     ]);
   });
 

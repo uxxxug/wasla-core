@@ -815,6 +815,24 @@ describe.each(backends)("operational metrics on $name", (backend) => {
     );
   });
 
+  it("carries CORS headers on /metrics, and nowhere else", async () => {
+    // The dashboard is a single HTML file that may be served from a different
+    // origin than CORE, so a browser reading /metrics needs these on the
+    // response — and a simple GET with no custom headers sends no preflight,
+    // so there is no OPTIONS route to register.
+    const metrics = await core.router.handle({ method: "GET", url: "/metrics" });
+    expect(metrics.headers?.["access-control-allow-origin"]).toBe("*");
+    expect(metrics.headers?.["access-control-allow-methods"]).toBe("GET");
+
+    // Not opened globally: an ordinary route must not acquire these headers by
+    // accident of shared middleware, because that would be CORS on every
+    // authenticated endpoint rather than on the one unauthenticated scrape
+    // target this cycle scoped it to.
+    const health = await core.router.handle({ method: "GET", url: "/health" });
+    expect(health.headers?.["access-control-allow-origin"]).toBeUndefined();
+    expect(health.headers?.["access-control-allow-methods"]).toBeUndefined();
+  });
+
   it("leaks no token, address, identifier or tenant into the exposition", async () => {
     await close();
     // A channel that fails with a message containing the recipient's address and
